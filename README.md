@@ -21,9 +21,9 @@ The code name `TheLastShift` is used for the project, module, targets and conten
 
 ## Layout
 
-- `Source/TheLastShift/` â€” game module
-- `Plugins/LidarScan/` â€” scanning effect plugin
-- `Plugins/StdCore/` â€” menus, settings, input and level transitions plugin
-- `Narrative/` â€” CSV sources of the narrative data tables
+- `Source/TheLastShift/` -> game module
+- `Plugins/LidarScan/` -> scanning effect plugin
+- `Plugins/StdCore/` -> menus, settings, input and level transitions plugin
+- `Narrative/` -> CSV sources of the narrative data tables
 
 Licensing differs per folder; see `AGENTS.md` for the zones.

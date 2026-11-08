@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: MIT
+
+#include "Debug/TestLidarCharacter.h"
+
+#include "Camera/CameraComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SpotLightComponent.h"
+#include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
+#include "Engine/LocalPlayer.h"
+#include "GameFramework/PlayerController.h"
+#include "InputAction.h"
+#include "InputActionValue.h"
+#include "InputMappingContext.h"
+#include "LidarScanComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(TestLidarCharacter)
+
+ATestLidarCharacter::ATestLidarCharacter()
+{
+	PrimaryActorTick.bCanEverTick = false;
+
+	bUseControllerRotationYaw = true;
+	BaseEyeHeight = 64.f;
+
+	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
+	Camera->SetupAttachment(GetCapsuleComponent());
+	Camera->SetRelativeLocation(FVector(0.f, 0.f, BaseEyeHeight));
+	Camera->bUsePawnControlRotation = true;
+
+	Flashlight = CreateDefaultSubobject<USpotLightComponent>(TEXT("Flashlight"));
+	Flashlight->SetupAttachment(Camera);
+	Flashlight->SetRelativeLocation(FVector(10.f, 15.f, -10.f));
+	Flashlight->SetIntensityUnits(ELightUnits::Lumens);
+	Flashlight->SetIntensity(1500.f);
+	Flashlight->SetAttenuationRadius(2500.f);
+	Flashlight->SetInnerConeAngle(14.f);
+	Flashlight->SetOuterConeAngle(26.f);
+
+	LidarScan = CreateDefaultSubobject<ULidarScanComponent>(TEXT("LidarScan"));
+	LidarScan->SetupAttachment(Camera);
+}
+
+void ATestLidarCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+	Flashlight->SetVisibility(bFlashlightOnAtStart);
+}
+
+void ATestLidarCharacter::PawnClientRestart()
+{
+	Super::PawnClientRestart();
+	AddInputMapping();
+}
+
+void ATestLidarCharacter::AddInputMapping() const
+{
+	const APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC || !InputMapping)
+	{
+		return;
+	}
+
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
+	{
+		Subsystem->AddMappingContext(InputMapping, 0);
+	}
+}
+
+void ATestLidarCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+	UEnhancedInputComponent* Input = Cast<UEnhancedInputComponent>(PlayerInputComponent);
+	if (!Input)
+	{
+		return;
+	}
+
+	if (MoveAction)
+	{
+		Input->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ATestLidarCharacter::OnMove);
+	}
+	if (LookAction)
+	{
+		Input->BindAction(LookAction, ETriggerEvent::Triggered, this, &ATestLidarCharacter::OnLook);
+	}
+	if (ScanAction)
+	{
+		Input->BindAction(ScanAction, ETriggerEvent::Started, this, &ATestLidarCharacter::OnScan);
+	}
+	if (FlashlightAction)
+	{
+		Input->BindAction(FlashlightAction, ETriggerEvent::Started, this, &ATestLidarCharacter::OnToggleFlashlight);
+	}
+}
+
+void ATestLidarCharacter::OnMove(const FInputActionValue& Value)
+{
+	// X = right, Y = forward.
+	const FVector2D Axis = Value.Get<FVector2D>();
+	AddMovementInput(GetActorForwardVector(), Axis.Y);
+	AddMovementInput(GetActorRightVector(), Axis.X);
+}
+
+void ATestLidarCharacter::OnLook(const FInputActionValue& Value)
+{
+	const FVector2D Axis = Value.Get<FVector2D>();
+	AddControllerYawInput(Axis.X);
+	AddControllerPitchInput(-Axis.Y);
+}
+
+void ATestLidarCharacter::OnScan()
+{
+	LidarScan->Scan();
+}
+
+void ATestLidarCharacter::OnToggleFlashlight()
+{
+	Flashlight->ToggleVisibility();
+}
