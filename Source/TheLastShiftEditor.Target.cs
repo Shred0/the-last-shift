@@ -1,11 +1,11 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// SPDX-License-Identifier: MIT
 
 using UnrealBuildTool;
 using System.Collections.Generic;
 
 public class TheLastShiftEditorTarget : TargetRules
 {
-	public TheLastShiftEditorTarget( TargetInfo Target) : base(Target)
+	public TheLastShiftEditorTarget(TargetInfo Target) : base(Target)
 	{
 		Type = TargetType.Editor;
 		DefaultBuildSettings = BuildSettingsVersion.V7;

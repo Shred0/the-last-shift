@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// SPDX-License-Identifier: MIT
 
 using UnrealBuildTool;
 using System.Collections.Generic;

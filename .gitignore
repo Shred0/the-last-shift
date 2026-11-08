@@ -59,7 +59,8 @@ Scripts/BuildPackage.config.json
 SourceArt/**/*.png
 SourceArt/**/*.tga
 
-# Blender backup files
+# Blender sources and backups (never committed)
+*.blend
 *.blend1
 
 # Binary Files
@@ -68,6 +69,14 @@ Plugins/**/Binaries/
 
 # Builds
 Build/*
+# Packaged builds (butler uploads them to itch.io)
+Packaged/
+Archive/
+/Windows/
+/WindowsNoEditor/
+*.pak
+*.ucas
+*.utoc
 
 # Whitelist PakBlacklist-<BuildConfiguration>.txt files
 !Build/*/

@@ -1,3 +1,18 @@
+# Plain text: source, config, data and descriptors stay out of LFS.
+*.h text
+*.hpp text
+*.cpp text
+*.inl text
+*.cs text
+*.ini text
+*.csv text
+*.json text
+*.md text
+*.py text
+*.uplugin text
+*.uproject text
+
+# Binary assets and media: Git LFS.
 *.bin filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
 *.exr filter=lfs diff=lfs merge=lfs -text
