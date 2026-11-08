@@ -5,13 +5,20 @@
 #include "LidarScanModule.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
+#include "Engine/LocalPlayer.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
+#include "SceneView.h"
 #include "TimerManager.h"
+#include "UnrealClient.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(LidarScanComponent)
 
@@ -27,7 +34,16 @@
  *
  * Update (every frame): colour and size from the live parameters,
  *   alpha = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration)
- *         * saturate(pow(Depth / ReferenceDistance, DensityCompensation)).
+ *         * saturate(pow(Depth / ReferenceDistance, DensityCompensation)),
+ *   size  = PointPixelSize * ViewPixelScale * z * (1 - PointDepthOffset * PointPixelSize * ViewPixelScale * z / d),
+ *   camera offset (towards the viewer) = PointDepthOffset * PointPixelSize * ViewPixelScale * z,
+ *   z = max(dot(Position - ViewOrigin, ViewForward), 1), d = max(|Position - ViewOrigin|, 1)
+ * where ViewOrigin and ViewForward are the current camera, read on the GPU through a Camera Query data interface,
+ * and ViewPixelScale = 2 / (Projection[1][1] * ViewHeightPixels) = 2 tan(VerticalFOV / 2) / ViewHeightPixels is
+ * pushed by this component every frame. Sprites face the camera plane, so a sprite of world size s at planar view
+ * depth z covers exactly s / (z * ViewPixelScale) pixels anywhere on screen: every point is PointPixelSize pixels.
+ * The camera offset keeps sprites from being clipped by their own surface at grazing angles; the last factor of
+ * the size cancels the perspective growth it causes (the offset moves the sprite to planar depth z - offset * z / d).
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
  */
 namespace LidarScanParams
@@ -43,7 +59,9 @@ namespace LidarScanParams
 	static const FName TanHalfFov(TEXT("User.TanHalfFov"));
 	static const FName MaxRange(TEXT("User.MaxRange"));
 	static const FName SurfaceBias(TEXT("User.SurfaceBias"));
-	static const FName PointSize(TEXT("User.PointSize"));
+	static const FName PointPixelSize(TEXT("User.PointPixelSize"));
+	static const FName ViewPixelScale(TEXT("User.ViewPixelScale"));
+	static const FName PointDepthOffset(TEXT("User.PointDepthOffset"));
 	static const FName PointColor(TEXT("User.PointColor"));
 	static const FName FadeDuration(TEXT("User.FadeDuration"));
 	static const FName AlphaFloor(TEXT("User.AlphaFloor"));
@@ -55,9 +73,11 @@ namespace LidarScanParams
 
 ULidarScanComponent::ULidarScanComponent()
 {
-	// Ticks only while a ClearScans fade-out is running.
+	// Ticks only while scans are alive: keeps the view pixel scale current and runs ClearScans fade-outs.
+	// Post update work: the player camera has been updated for this frame.
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
+	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
 	PointSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/LidarScan/NS_LidarPoints.NS_LidarPoints")));
 }
 
@@ -176,7 +196,8 @@ void ULidarScanComponent::Scan()
 	}
 
 	FLidarScanSlot& Slot = Slots[SlotIndex];
-	UTextureRenderTarget2D* Target = EnsureDepthTarget(Slot);
+	bool bNewTarget = false;
+	UTextureRenderTarget2D* Target = EnsureDepthTarget(Slot, bNewTarget);
 	UNiagaraComponent* Points = Slot.Points;
 	if (!Target || !Points)
 	{
@@ -218,20 +239,46 @@ void ULidarScanComponent::Scan()
 	// A recycled slot may still be fading out from a previous ClearScans.
 	Slot.FadeOutDuration = 0.f;
 	Slot.FadeOutElapsed = 0.f;
+	ViewPixelScale = ResolveViewPixelScale();
 	PushLiveParameters(Slot);
 
-	// Reset: clears the previous scan held by this slot and re-runs the one-shot spawn burst.
-	Points->Activate(true);
-
 	Slot.ScanIndex = ScanIndex;
+	SetComponentTickEnabled(true);
 
 	UWorld* World = GetWorld();
 	Slot.StartRealTime = World ? World->GetRealTimeSeconds() : 0.0;
 
+	// A depth target created by this call is bound to the point system's texture interface on the render thread
+	// only when the system next ticks; spawning in that same tick can sample the unbound texture and kill every
+	// point (seen on the first scan of a slot). The capture is already issued, so spawn one frame later instead.
+	if (bNewTarget && World)
+	{
+		Points->DeactivateImmediate();
+		World->GetTimerManager().SetTimerForNextTick(
+			FTimerDelegate::CreateUObject(this, &ULidarScanComponent::ActivateScanPoints, ScanIndex));
+	}
+	else
+	{
+		ActivateScanPoints(ScanIndex);
+	}
+
 	OnScanStarted.Broadcast(ScanIndex, World ? static_cast<float>(World->GetTimeSeconds()) : 0.f);
+}
+
+void ULidarScanComponent::ActivateScanPoints(int32 ScanIndex)
+{
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.ScanIndex == ScanIndex && Slot.Points)
+		{
+			// Reset: clears the previous scan held by this slot and re-runs the one-shot spawn burst.
+			Slot.Points->Activate(true);
+			break;
+		}
+	}
 
 	// The GPU spawn burst runs on the system's next tick; report completion once that frame has gone through.
-	if (World)
+	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().SetTimerForNextTick(
 			FTimerDelegate::CreateUObject(this, &ULidarScanComponent::BroadcastScanCompleted, ScanIndex));
@@ -251,7 +298,7 @@ void ULidarScanComponent::BroadcastScanCompleted(int32 ScanIndex)
 void ULidarScanComponent::ClearScans(float FadeOutSeconds)
 {
 	const float FadeOut = FMath::Max(FadeOutSeconds, 0.f);
-	bool bAnyFading = false;
+	bool bAnyActive = false;
 
 	for (FLidarScanSlot& Slot : Slots)
 	{
@@ -271,22 +318,23 @@ void ULidarScanComponent::ClearScans(float FadeOutSeconds)
 				Slot.FadeOutDuration = FadeOut;
 				Slot.FadeOutElapsed = 0.f;
 			}
-			bAnyFading = true;
+			bAnyActive = true;
 		}
 	}
 
-	SetComponentTickEnabled(bAnyFading);
+	SetComponentTickEnabled(bAnyActive);
 }
 
 void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	bool bAnyFading = false;
+	bool bAnyActive = false;
 	for (FLidarScanSlot& Slot : Slots)
 	{
 		if (!Slot.IsFadingOut())
 		{
+			bAnyActive |= Slot.IsActive();
 			continue;
 		}
 
@@ -298,13 +346,35 @@ void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 		else
 		{
 			PushLiveParameters(Slot);
-			bAnyFading = true;
+			bAnyActive = true;
 		}
 	}
 
-	if (!bAnyFading)
+	if (!bAnyActive)
 	{
 		SetComponentTickEnabled(false);
+		return;
+	}
+
+	// FOV or viewport size may have changed since the last frame (zoom, window resize).
+	UpdateViewPixelScale();
+}
+
+void ULidarScanComponent::UpdateViewPixelScale()
+{
+	const float NewScale = ResolveViewPixelScale();
+	if (FMath::IsNearlyEqual(NewScale, ViewPixelScale, ViewPixelScale * 1.e-4f))
+	{
+		return;
+	}
+
+	ViewPixelScale = NewScale;
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.IsActive() && Slot.Points)
+		{
+			Slot.Points->SetVariableFloat(LidarScanParams::ViewPixelScale, ViewPixelScale);
+		}
 	}
 }
 
@@ -413,8 +483,9 @@ void ULidarScanComponent::TrimSlots()
 	}
 }
 
-UTextureRenderTarget2D* ULidarScanComponent::EnsureDepthTarget(FLidarScanSlot& Slot)
+UTextureRenderTarget2D* ULidarScanComponent::EnsureDepthTarget(FLidarScanSlot& Slot, bool& bOutCreated)
 {
+	bOutCreated = false;
 	const int32 Resolution = FMath::Clamp(CaptureResolution, 64, 1024);
 	if (Slot.DepthTarget && Slot.DepthTarget->SizeX == Resolution && Slot.DepthTarget->SizeY == Resolution)
 	{
@@ -432,6 +503,7 @@ UTextureRenderTarget2D* ULidarScanComponent::EnsureDepthTarget(FLidarScanSlot& S
 	Target->UpdateResourceImmediate(true);
 
 	Slot.DepthTarget = Target;
+	bOutCreated = true;
 	UNiagaraFunctionLibrary::SetTextureObject(Slot.Points, LidarScanParams::DepthTexture.ToString(), Target);
 	return Target;
 }
@@ -453,6 +525,61 @@ float ULidarScanComponent::ResolveHorizontalFOV() const
 	return FMath::Min(90.f + FieldOfViewPadding, 170.f);
 }
 
+float ULidarScanComponent::ResolveViewPixelScale() const
+{
+	// Exact path: the projection the renderer builds for the local player viewing this world. M[1][1] is
+	// 1 / tan(VerticalFOV / 2) whatever the aspect-ratio axis constraint, and the constrained rect excludes letterboxing.
+	const UWorld* World = GetWorld();
+	const APlayerController* Controller = nullptr;
+	if (const APawn* Pawn = Cast<APawn>(GetOwner()))
+	{
+		Controller = Cast<APlayerController>(Pawn->GetController());
+	}
+	if (!Controller && World)
+	{
+		Controller = World->GetFirstPlayerController();
+	}
+
+	if (const ULocalPlayer* LocalPlayer = Controller ? Controller->GetLocalPlayer() : nullptr)
+	{
+		FViewport* Viewport = LocalPlayer->ViewportClient ? LocalPlayer->ViewportClient->Viewport : nullptr;
+		FSceneViewProjectionData Projection;
+		if (Viewport && LocalPlayer->GetProjectionData(Viewport, Projection))
+		{
+			const double ProjectionY = Projection.ProjectionMatrix.M[1][1];
+			const int32 ViewHeight = Projection.GetConstrainedViewRect().Height();
+			if (ProjectionY > UE_KINDA_SMALL_NUMBER && ViewHeight > 0)
+			{
+				return static_cast<float>(2.0 / (ProjectionY * ViewHeight));
+			}
+		}
+	}
+
+	// Fallback (no local player, e.g. editor preview): attached camera FOV across the game viewport width,
+	// which is what the default horizontal-FOV constraint gives.
+	FVector2D ViewportSize(1920.0, 1080.0);
+	if (GEngine && GEngine->GameViewport)
+	{
+		FVector2D Size;
+		GEngine->GameViewport->GetViewportSize(Size);
+		if (Size.X > 0.0 && Size.Y > 0.0)
+		{
+			ViewportSize = Size;
+		}
+	}
+
+	float CameraFOV = 90.f;
+	for (const USceneComponent* Parent = GetAttachParent(); Parent; Parent = Parent->GetAttachParent())
+	{
+		if (const UCameraComponent* Camera = Cast<UCameraComponent>(Parent))
+		{
+			CameraFOV = Camera->FieldOfView;
+			break;
+		}
+	}
+	return static_cast<float>(2.0 * FMath::Tan(FMath::DegreesToRadians(CameraFOV * 0.5)) / ViewportSize.X);
+}
+
 void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 {
 	UNiagaraComponent* Points = Slot.Points;
@@ -464,7 +591,9 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 	FLinearColor Emissive = PointColor * FMath::Clamp(PointIntensity, 0.f, 4.f);
 	Emissive.A = PointColor.A * Slot.GetFadeOutAlpha();
 
-	Points->SetVariableFloat(LidarScanParams::PointSize, PointSize);
+	Points->SetVariableFloat(LidarScanParams::PointPixelSize, FMath::Clamp(PointPixelSize, 0.5f, 8.f));
+	Points->SetVariableFloat(LidarScanParams::ViewPixelScale, ViewPixelScale);
+	Points->SetVariableFloat(LidarScanParams::PointDepthOffset, FMath::Clamp(PointDepthOffset, 0.f, 32.f));
 	Points->SetVariableLinearColor(LidarScanParams::PointColor, Emissive);
 	Points->SetVariableFloat(LidarScanParams::FadeDuration, FadeDuration);
 	Points->SetVariableFloat(LidarScanParams::AlphaFloor, AlphaFloor);

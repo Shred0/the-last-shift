@@ -91,7 +91,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Lidar|Events")
 	FOnLidarScan OnScanStarted;
 
-	/** Broadcast once the scan's points have been spawned (the frame after OnScanStarted). */
+	/**
+	 * Broadcast once the scan's points have been spawned: the frame after OnScanStarted, or two frames after for the
+	 * first scan of a slot (its depth target is created then and the spawn waits one frame for it).
+	 */
 	UPROPERTY(BlueprintAssignable, Category = "Lidar|Events")
 	FOnLidarScan OnScanCompleted;
 
@@ -135,9 +138,24 @@ public:
 
 	// --- Points (live) ---
 
-	/** World-space sprite size of one point. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.1", ClampMax = "20.0", Units = "cm"))
-	float PointSize = 2.f;
+	/**
+	 * Diameter of one point in screen pixels, the same at every depth and from wherever the scan is viewed.
+	 * The point system rescales each point every frame from its current view depth, so points stay screen pixels
+	 * while the viewer moves inside a scan; FOV and viewport changes apply on the next frame.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.5", ClampMax = "8.0", UIMin = "0.5", UIMax = "8.0"))
+	float PointPixelSize = 2.5f;
+
+	/**
+	 * Draw-time pull of each point towards the viewer, in point diameters. A point sits on the surface it was
+	 * sampled from; seen at a grazing angle, half of its sprite would sink into that surface and be clipped by the
+	 * depth test. Being relative to the point size, the pull is constant on screen and grows with distance
+	 * (with the defaults at 1080p and 90 degrees FOV: about 2 cm at 1 m, 20 cm at 10 m); the size is corrected for it,
+	 * so points stay PointPixelSize pixels. Points closer than the pull to an occluder can show through its edge.
+	 * 0 = off.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "32.0", UIMin = "0.0", UIMax = "32.0"))
+	float PointDepthOffset = 8.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points")
 	FLinearColor PointColor = FLinearColor(0.4f, 0.85f, 1.f, 1.f);
@@ -147,19 +165,19 @@ public:
 	float PointIntensity = 1.f;
 
 	/**
-	 * Depth at which density compensation stops: nearer points are dimmed, points at or beyond it keep full alpha.
-	 * Best set near the depth where neighbouring sprites just touch on screen.
+	 * Capture depth at which the DensityCompensation term stops: nearer points are dimmed, points at or beyond it
+	 * keep full alpha. Unused while DensityCompensation is 0.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "50.0", ClampMax = "3000.0", Units = "cm"))
 	float ReferenceDistance = 300.f;
 
 	/**
-	 * Exponent of the per-point alpha term saturate(pow(Depth / ReferenceDistance, DensityCompensation)).
-	 * Samples are evenly spaced on screen while a world-sized sprite covers screen area proportional to 1/Depth^2,
-	 * so near sprites overlap and pile up; 2 cancels that. 0 = off (every point at full alpha).
+	 * Exponent of the optional per-point alpha term saturate(pow(Depth / ReferenceDistance, DensityCompensation)),
+	 * Depth being the capture depth of the sample. Points are a constant screen size, so every point already has
+	 * the same brightness at any depth; this term is a stylistic depth cue only. 0 = off (every point at full alpha).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "4.0", UIMin = "0.0", UIMax = "4.0"))
-	float DensityCompensation = 2.f;
+	float DensityCompensation = 0.f;
 
 	// --- Fade (live) ---
 
@@ -197,8 +215,11 @@ private:
 	int32 AcquireSlot();
 	void DestroySlot(FLidarScanSlot& Slot);
 	void TrimSlots();
-	UTextureRenderTarget2D* EnsureDepthTarget(FLidarScanSlot& Slot);
+	UTextureRenderTarget2D* EnsureDepthTarget(FLidarScanSlot& Slot, bool& bOutCreated);
+	void ActivateScanPoints(int32 ScanIndex);
 	float ResolveHorizontalFOV() const;
+	float ResolveViewPixelScale() const;
+	void UpdateViewPixelScale();
 	void PushLiveParameters(const FLidarScanSlot& Slot) const;
 	void ReleaseSlot(FLidarScanSlot& Slot);
 	void BroadcastScanCompleted(int32 ScanIndex);
@@ -213,4 +234,7 @@ private:
 	TObjectPtr<UNiagaraSystem> LoadedPointSystem;
 
 	int32 ScanCount = 0;
+
+	/** World size of one screen pixel at unit view depth for the current view, last value pushed to the scans. */
+	float ViewPixelScale = 0.f;
 };
