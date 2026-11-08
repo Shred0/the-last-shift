@@ -11,14 +11,15 @@ class UCameraComponent;
 class UInputAction;
 class UInputMappingContext;
 class ULidarScanComponent;
+class UScanCueWidget;
 class UScanDirectorComponent;
 class USpotLightComponent;
 struct FInputActionValue;
 
 /**
  * Test harness pawn for the LidarScan spike (TestLidar map only).
- * First-person movement, toggleable flashlight, time stop toggle with automatic scans, debug manual scan key.
- * Input assets are assigned in BP_TestPawn.
+ * First-person movement, toggleable flashlight, time stop toggle, scan requests through the scan director, and the
+ * scan-ready cue. Input assets and the cue widget class are assigned in BP_TestPawn.
  */
 UCLASS(Abstract)
 class THELASTSHIFT_API ATestLidarCharacter : public ACharacter
@@ -50,9 +51,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Test")
 	bool bFlashlightOnAtStart = true;
 
-	/** Debug: ScanAction triggers a scan by hand, in both time states. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Test")
-	bool bAllowManualScan = true;
+	/** Scan-ready cue created for the local player (WBP_ScanCue). None = no cue. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Test|UI")
+	TSubclassOf<UScanCueWidget> ScanCueClass;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
+	TObjectPtr<UScanCueWidget> ScanCue;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Test|Input")
 	TObjectPtr<UInputMappingContext> InputMapping;
@@ -74,6 +78,7 @@ protected:
 
 private:
 	void AddInputMapping() const;
+	void CreateScanCue();
 	void OnMove(const FInputActionValue& Value);
 	void OnLook(const FInputActionValue& Value);
 	void OnScan();

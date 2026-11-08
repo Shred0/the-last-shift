@@ -120,6 +120,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Capture", meta = (ClampMin = "0.0", ClampMax = "50.0", Units = "cm"))
 	float SurfaceBias = 2.f;
 
+	/**
+	 * Random offset of each sample, in depth-target texels (per axis, uniform in [-SampleJitter, SampleJitter]),
+	 * applied to both the depth read and the ray direction. Breaks up the moire of a regular sampling grid seen in
+	 * perspective. Seeded by the scan index, so a scan is stable for its whole life and consecutive scans differ.
+	 * Applied on the next scan.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
+	float SampleJitter = 0.5f;
+
 	/** Excludes the owning actor's primitives from the depth capture. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Capture")
 	bool bHideOwnerInCapture = true;
@@ -133,9 +142,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points")
 	FLinearColor PointColor = FLinearColor(0.4f, 0.85f, 1.f, 1.f);
 
-	/** Emissive multiplier applied to PointColor. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "50.0"))
-	float PointIntensity = 4.f;
+	/** Emissive multiplier applied to PointColor; 1 = the point material's nominal brightness. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "4.0", UIMin = "0.0", UIMax = "4.0"))
+	float PointIntensity = 1.f;
+
+	/**
+	 * Depth at which density compensation stops: nearer points are dimmed, points at or beyond it keep full alpha.
+	 * Best set near the depth where neighbouring sprites just touch on screen.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "50.0", ClampMax = "3000.0", Units = "cm"))
+	float ReferenceDistance = 300.f;
+
+	/**
+	 * Exponent of the per-point alpha term saturate(pow(Depth / ReferenceDistance, DensityCompensation)).
+	 * Samples are evenly spaced on screen while a world-sized sprite covers screen area proportional to 1/Depth^2,
+	 * so near sprites overlap and pile up; 2 cancels that. 0 = off (every point at full alpha).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "4.0", UIMin = "0.0", UIMax = "4.0"))
+	float DensityCompensation = 2.f;
 
 	// --- Fade (live) ---
 

@@ -18,14 +18,16 @@
 /**
  * Contract with the point system (NS_LidarPoints). Each scan slot is one system instance.
  *
- * Spawn (once per activation): burst of PointCount particles. Particle i reads depth texel
- * (i % CaptureWidth, i / CaptureWidth) and is placed at
+ * Spawn (once per activation): burst of PointCount particles. Particle i takes texel (i % CaptureWidth, i / CaptureWidth),
+ * offsets its UV by a hash of (i, JitterSeed) in [-SampleJitter, SampleJitter] texels per axis, reads depth at that
+ * UV and is placed at
  *   CaptureOrigin + (CaptureForward + u' * TanHalfFov.x * CaptureRight + v' * TanHalfFov.y * CaptureUp) * (Depth - SurfaceBias)
- * with u', v' in [-1, 1]. SceneDepth is planar view depth, so the forward component of the ray is exactly 1.
- * Samples with depth <= 1 or >= MaxRange are killed.
+ * with u', v' in [-1, 1] from the same jittered UV. SceneDepth is planar view depth, so the forward component of the
+ * ray is exactly 1. Samples with depth <= 1 or >= MaxRange are killed. The raw depth is kept per particle.
  *
  * Update (every frame): colour and size from the live parameters,
- *   alpha = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration).
+ *   alpha = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration)
+ *         * saturate(pow(Depth / ReferenceDistance, DensityCompensation)).
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
  */
 namespace LidarScanParams
@@ -45,6 +47,10 @@ namespace LidarScanParams
 	static const FName PointColor(TEXT("User.PointColor"));
 	static const FName FadeDuration(TEXT("User.FadeDuration"));
 	static const FName AlphaFloor(TEXT("User.AlphaFloor"));
+	static const FName SampleJitter(TEXT("User.SampleJitter"));
+	static const FName JitterSeed(TEXT("User.JitterSeed"));
+	static const FName ReferenceDistance(TEXT("User.ReferenceDistance"));
+	static const FName DensityCompensation(TEXT("User.DensityCompensation"));
 }
 
 ULidarScanComponent::ULidarScanComponent()
@@ -203,6 +209,11 @@ void ULidarScanComponent::Scan()
 	Points->SetVariableVec2(LidarScanParams::TanHalfFov, FVector2D(TanX, TanY));
 	Points->SetVariableFloat(LidarScanParams::MaxRange, MaxRange);
 	Points->SetVariableFloat(LidarScanParams::SurfaceBias, SurfaceBias);
+	Points->SetVariableFloat(LidarScanParams::SampleJitter, FMath::Clamp(SampleJitter, 0.f, 1.f));
+
+	// Deterministic per scan index: the same scan never changes while alive, consecutive scans fill each other's gaps.
+	const int32 ScanIndex = ScanCount++;
+	Points->SetVariableInt(LidarScanParams::JitterSeed, static_cast<int32>(HashCombineFast(GetTypeHash(ScanIndex), 0x9E3779B9u) & 0x7FFFFFFF));
 
 	// A recycled slot may still be fading out from a previous ClearScans.
 	Slot.FadeOutDuration = 0.f;
@@ -212,7 +223,6 @@ void ULidarScanComponent::Scan()
 	// Reset: clears the previous scan held by this slot and re-runs the one-shot spawn burst.
 	Points->Activate(true);
 
-	const int32 ScanIndex = ScanCount++;
 	Slot.ScanIndex = ScanIndex;
 
 	UWorld* World = GetWorld();
@@ -451,11 +461,13 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 		return;
 	}
 
-	FLinearColor Emissive = PointColor * PointIntensity;
+	FLinearColor Emissive = PointColor * FMath::Clamp(PointIntensity, 0.f, 4.f);
 	Emissive.A = PointColor.A * Slot.GetFadeOutAlpha();
 
 	Points->SetVariableFloat(LidarScanParams::PointSize, PointSize);
 	Points->SetVariableLinearColor(LidarScanParams::PointColor, Emissive);
 	Points->SetVariableFloat(LidarScanParams::FadeDuration, FadeDuration);
 	Points->SetVariableFloat(LidarScanParams::AlphaFloor, AlphaFloor);
+	Points->SetVariableFloat(LidarScanParams::ReferenceDistance, FMath::Clamp(ReferenceDistance, 50.f, 3000.f));
+	Points->SetVariableFloat(LidarScanParams::DensityCompensation, FMath::Clamp(DensityCompensation, 0.f, 4.f));
 }

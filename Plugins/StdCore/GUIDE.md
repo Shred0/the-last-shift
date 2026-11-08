@@ -240,7 +240,8 @@ Source/StdCore/
   Flow/                StdFlowSubsystem, StdInputBlocker
   Input/               StdInputConfig, StdInputBinding (BindActionByTag), StdInputSubsystem, StdInputLibrary
   Framework/           StdGameMode, StdMenuGameMode, StdPlayerController (+ StdPauseKeyProcessor), StdMenuPlayerController
-  UI/                  StdScreenWidget (base), Main/Pause/Settings/Credits/KeyBindingRow widgets, StdUITheme
+  UI/                  StdScreenWidget (base), Main/Pause/Settings/Credits/KeyBindingRow widgets, StdUITheme,
+                       StdRadialProgress (+ SStdRadialProgress, its Slate ring)
   Dev/                 StdConsoleCommands (not in Shipping)
 Source/StdCoreTests/   automation tests (editor only)
 Content/Python/        stdcore_setup.py (rebuilds audio, input, maps, theme assets)

@@ -1,4 +1,4 @@
-// Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme.
+// Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -7,6 +7,7 @@
 
 #include "Settings/StdSettingsSubsystem.h"
 #include "Settings/StdUserSettings.h"
+#include "UI/StdRadialProgress.h"
 #include "UI/StdUITheme.h"
 #include "UObject/Package.h"
 
@@ -64,6 +65,34 @@ bool FStdThemeStylesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Slider thumb has a size"), Slider.NormalThumbImage.ImageSize.X > 0.f);
 
 	TestNotNull(TEXT("The default fonts point to the engine's Roboto"), Theme->BodyFont.FontObject.Get());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdRadialProgressTest, "StdCore.UI.RadialProgress", StdUnitTests::Flags)
+
+bool FStdRadialProgressTest::RunTest(const FString& Parameters)
+{
+	UStdRadialProgress* Ring = NewObject<UStdRadialProgress>(GetTransientPackage());
+	TestFalse(TEXT("Starts empty"), Ring->IsFull());
+
+	Ring->SetProgress(1.5f);
+	TestEqual(TEXT("Progress above 1 is clamped"), Ring->Progress, 1.f);
+	TestTrue(TEXT("Full at 1"), Ring->IsFull());
+	Ring->SetProgress(-0.5f);
+	TestEqual(TEXT("Progress below 0 is clamped"), Ring->Progress, 0.f);
+	Ring->SetProgress(0.999f);
+	TestFalse(TEXT("Not full just below 1"), Ring->IsFull());
+
+	Ring->SetRadius(20.f);
+	Ring->SetThickness(4.f);
+	TestEqual(TEXT("Outer diameter = 2 x radius + thickness"), Ring->GetOuterDiameter(), 44.f);
+	Ring->SetThickness(0.f);
+	TestEqual(TEXT("Thickness is clamped to 0.5"), Ring->Thickness, 0.5f);
+
+	// Builds the Slate widget and pushes the properties to it without a viewport.
+	const TSharedRef<SWidget> Slate = Ring->TakeWidget();
+	Slate->SlatePrepass(1.f);
+	TestEqual(TEXT("Slate desired size is the outer diameter"), static_cast<float>(Slate->GetDesiredSize().X), Ring->GetOuterDiameter());
 	return true;
 }
 

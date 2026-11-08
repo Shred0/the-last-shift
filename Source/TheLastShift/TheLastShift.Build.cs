@@ -21,7 +21,8 @@ public class TheLastShift : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"LidarScan",
-			"StdCore"
+			"StdCore",
+			"SlateCore"
 		});
 	}
 }

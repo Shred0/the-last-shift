@@ -13,6 +13,7 @@
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
 #include "LidarScanComponent.h"
+#include "Scan/ScanCueWidget.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
@@ -63,6 +64,11 @@ void ATestLidarCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		TimeState->OnTimeStateChanged.RemoveDynamic(this, &ATestLidarCharacter::HandleTimeStateChanged);
 	}
+	if (ScanCue)
+	{
+		ScanCue->RemoveFromParent();
+		ScanCue = nullptr;
+	}
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -70,6 +76,23 @@ void ATestLidarCharacter::PawnClientRestart()
 {
 	Super::PawnClientRestart();
 	AddInputMapping();
+	CreateScanCue();
+}
+
+void ATestLidarCharacter::CreateScanCue()
+{
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (ScanCue || !ScanCueClass || !PC || !PC->IsLocalController())
+	{
+		return;
+	}
+
+	ScanCue = CreateWidget<UScanCueWidget>(PC, ScanCueClass);
+	if (ScanCue)
+	{
+		ScanCue->SetScanDirector(ScanDirector);
+		ScanCue->AddToViewport(0);
+	}
 }
 
 void ATestLidarCharacter::AddInputMapping() const
@@ -135,10 +158,8 @@ void ATestLidarCharacter::OnLook(const FInputActionValue& Value)
 
 void ATestLidarCharacter::OnScan()
 {
-	if (bAllowManualScan)
-	{
-		LidarScan->Scan();
-	}
+	// The director is the only path to the lidar plugin; it ignores requests during the cooldown and in Normal time.
+	ScanDirector->RequestScan();
 }
 
 void ATestLidarCharacter::OnToggleFlashlight()

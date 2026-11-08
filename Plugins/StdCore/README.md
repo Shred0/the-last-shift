@@ -243,6 +243,10 @@ Blueprint: with `AStdPlayerController` (or a subclass) as the player controller,
 Format Text: "Press {Key} to interact"   Key = Get Key Text For Input Tag(Get Owning Player, InputTag.Interact)
 ```
 
+### Show a radial progress ring
+
+**Radial Progress** (palette category *Std Core*, C++ `UStdRadialProgress`) draws a ring that fills with *Progress* (0..1): a track circle in *Track Color* and a fill arc in *Fill Color*, anti-aliased Slate lines, no texture. *Radius* is the ring's centre line and *Thickness* its width; the desired size is `2 x Radius + Thickness`. Tick *Use Ready Color* to draw a full ring (Progress >= 1) in *Ready Color*. *Clockwise* and *Start Angle* (degrees from 12 o'clock) set where and which way it fills. Hit-test invisible by default. Set it every frame with **Set Progress** (cooldowns, hold-to-confirm, loading).
+
 ### Restyle the menus
 
 All menus take their look from one asset, `DA_UITheme` (*Project Settings > Std Core > Theme*). Edit it and every menu changes, in the game and in the Widget Blueprint designer.
@@ -324,6 +328,7 @@ Automation tests live in the editor-only module `StdCoreTests`, under the `StdCo
 | `StdCore.Assets.Input` | Value types, *Trigger when Paused* only on `IA_Pause`, the five tags of `DA_InputConfig_Core`, the six remappable entries of `IMC_Default` in order. |
 | `StdCore.Settings.Volumes` | The volume formula (`StdAudio::ComputeClassVolumes`) and volume clamping. |
 | `StdCore.Theme.Styles` | The styles built by `UStdUITheme`. |
+| `StdCore.UI.RadialProgress` | Clamping, full state and desired size of `UStdRadialProgress`. |
 | `StdCore.Flow.Play` | In PIE: main menu shown, a missing map refused, Play travels to the gameplay map, pause and resume, back to the main menu. |
 | `StdCore.Input.Remap` | In PIE: reserved, gamepad and axis keys refused, a swap, an unchanged and a rejected remap, the keys after a reset. It leaves the default keys saved. |
 
