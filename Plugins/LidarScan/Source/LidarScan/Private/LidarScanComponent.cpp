@@ -11,6 +11,7 @@
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
+#include "TimerManager.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(LidarScanComponent)
 
@@ -23,7 +24,9 @@
  * with u', v' in [-1, 1]. SceneDepth is planar view depth, so the forward component of the ray is exactly 1.
  * Samples with depth <= 1 or >= MaxRange are killed.
  *
- * Update (every frame): colour and size from the live parameters, alpha = lerp(1, AlphaFloor, Age / FadeDuration).
+ * Update (every frame): colour and size from the live parameters,
+ *   alpha = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration).
+ * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
  */
 namespace LidarScanParams
 {
@@ -46,7 +49,9 @@ namespace LidarScanParams
 
 ULidarScanComponent::ULidarScanComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	// Ticks only while a ClearScans fade-out is running.
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 	PointSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/LidarScan/NS_LidarPoints.NS_LidarPoints")));
 }
 
@@ -63,6 +68,12 @@ void ULidarScanComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		DestroySlot(Slot);
 	}
 	Slots.Reset();
+	SetComponentTickEnabled(false);
+
+	if (const UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearAllTimersForObject(this);
+	}
 
 	if (DepthCapture)
 	{
@@ -192,25 +203,110 @@ void ULidarScanComponent::Scan()
 	Points->SetVariableVec2(LidarScanParams::TanHalfFov, FVector2D(TanX, TanY));
 	Points->SetVariableFloat(LidarScanParams::MaxRange, MaxRange);
 	Points->SetVariableFloat(LidarScanParams::SurfaceBias, SurfaceBias);
-	PushLiveParameters(Points);
+
+	// A recycled slot may still be fading out from a previous ClearScans.
+	Slot.FadeOutDuration = 0.f;
+	Slot.FadeOutElapsed = 0.f;
+	PushLiveParameters(Slot);
 
 	// Reset: clears the previous scan held by this slot and re-runs the one-shot spawn burst.
 	Points->Activate(true);
 
-	Slot.ScanIndex = ScanCount++;
-	Slot.StartRealTime = GetWorld() ? GetWorld()->GetRealTimeSeconds() : 0.0;
+	const int32 ScanIndex = ScanCount++;
+	Slot.ScanIndex = ScanIndex;
+
+	UWorld* World = GetWorld();
+	Slot.StartRealTime = World ? World->GetRealTimeSeconds() : 0.0;
+
+	OnScanStarted.Broadcast(ScanIndex, World ? static_cast<float>(World->GetTimeSeconds()) : 0.f);
+
+	// The GPU spawn burst runs on the system's next tick; report completion once that frame has gone through.
+	if (World)
+	{
+		World->GetTimerManager().SetTimerForNextTick(
+			FTimerDelegate::CreateUObject(this, &ULidarScanComponent::BroadcastScanCompleted, ScanIndex));
+	}
+	else
+	{
+		BroadcastScanCompleted(ScanIndex);
+	}
 }
 
-void ULidarScanComponent::ClearScans()
+void ULidarScanComponent::BroadcastScanCompleted(int32 ScanIndex)
 {
+	const UWorld* World = GetWorld();
+	OnScanCompleted.Broadcast(ScanIndex, World ? static_cast<float>(World->GetTimeSeconds()) : 0.f);
+}
+
+void ULidarScanComponent::ClearScans(float FadeOutSeconds)
+{
+	const float FadeOut = FMath::Max(FadeOutSeconds, 0.f);
+	bool bAnyFading = false;
+
 	for (FLidarScanSlot& Slot : Slots)
 	{
-		if (Slot.Points)
+		if (!Slot.IsActive())
 		{
-			Slot.Points->DeactivateImmediate();
+			continue;
 		}
-		Slot.ScanIndex = INDEX_NONE;
+
+		if (FadeOut <= 0.f)
+		{
+			ReleaseSlot(Slot);
+		}
+		else
+		{
+			if (!Slot.IsFadingOut())
+			{
+				Slot.FadeOutDuration = FadeOut;
+				Slot.FadeOutElapsed = 0.f;
+			}
+			bAnyFading = true;
+		}
 	}
+
+	SetComponentTickEnabled(bAnyFading);
+}
+
+void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	bool bAnyFading = false;
+	for (FLidarScanSlot& Slot : Slots)
+	{
+		if (!Slot.IsFadingOut())
+		{
+			continue;
+		}
+
+		Slot.FadeOutElapsed += DeltaTime;
+		if (Slot.FadeOutElapsed >= Slot.FadeOutDuration)
+		{
+			ReleaseSlot(Slot);
+		}
+		else
+		{
+			PushLiveParameters(Slot);
+			bAnyFading = true;
+		}
+	}
+
+	if (!bAnyFading)
+	{
+		SetComponentTickEnabled(false);
+	}
+}
+
+void ULidarScanComponent::ReleaseSlot(FLidarScanSlot& Slot)
+{
+	if (Slot.Points)
+	{
+		Slot.Points->DeactivateImmediate();
+	}
+	Slot.ScanIndex = INDEX_NONE;
+	Slot.FadeOutDuration = 0.f;
+	Slot.FadeOutElapsed = 0.f;
 }
 
 void ULidarScanComponent::ApplyLiveSettings()
@@ -218,16 +314,16 @@ void ULidarScanComponent::ApplyLiveSettings()
 	TrimSlots();
 	for (const FLidarScanSlot& Slot : Slots)
 	{
-		PushLiveParameters(Slot.Points);
+		PushLiveParameters(Slot);
 	}
 }
 
-int32 ULidarScanComponent::GetNumAliveScans() const
+int32 ULidarScanComponent::GetAliveScanCount() const
 {
 	int32 Count = 0;
 	for (const FLidarScanSlot& Slot : Slots)
 	{
-		Count += Slot.IsActive() ? 1 : 0;
+		Count += (Slot.IsActive() && !Slot.IsFadingOut()) ? 1 : 0;
 	}
 	return Count;
 }
@@ -284,6 +380,8 @@ void ULidarScanComponent::DestroySlot(FLidarScanSlot& Slot)
 	}
 	Slot.DepthTarget = nullptr;
 	Slot.ScanIndex = INDEX_NONE;
+	Slot.FadeOutDuration = 0.f;
+	Slot.FadeOutElapsed = 0.f;
 }
 
 void ULidarScanComponent::TrimSlots()
@@ -345,15 +443,16 @@ float ULidarScanComponent::ResolveHorizontalFOV() const
 	return FMath::Min(90.f + FieldOfViewPadding, 170.f);
 }
 
-void ULidarScanComponent::PushLiveParameters(UNiagaraComponent* Points) const
+void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 {
+	UNiagaraComponent* Points = Slot.Points;
 	if (!Points)
 	{
 		return;
 	}
 
 	FLinearColor Emissive = PointColor * PointIntensity;
-	Emissive.A = PointColor.A;
+	Emissive.A = PointColor.A * Slot.GetFadeOutAlpha();
 
 	Points->SetVariableFloat(LidarScanParams::PointSize, PointSize);
 	Points->SetVariableLinearColor(LidarScanParams::PointColor, Emissive);

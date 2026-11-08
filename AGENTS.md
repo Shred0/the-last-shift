@@ -9,9 +9,10 @@ import it. Put project rules here, never in those files.
 First-person exploration game for GitHub Game Off 2026 (theme: SHIFT). 20–30 minutes, one location
 (a derelict twin megastructure), four areas = four acts.
 
-Core loop: the player stops time; while stopped the screen is black except for periodic lidar scans
-(points + wireframe that fade); tachyonic residues exist only in scans and are collected by holding
-contact; an entity closes in, scan by scan; every pause ages the outside world (time debt) and drains
+Core loop: the player stops time; while stopped the screen is black except for lidar scans (points +
+wireframe that fade): the first fires automatically, the rest the player triggers on a cooldown;
+tachyonic residues exist only in scans and are collected by holding contact; an entity closes in on a
+silent beat, whether the player scans or not; every pause ages the outside world (time debt) and drains
 the home battery; the story is told only through a text channel with the home AI that degrades as the
 battery drops.
 
@@ -98,6 +99,7 @@ Source/TheLastShift/           Game module (MIT)
     TextChannel/               Message queue, degradation, typewriter
     Narrative/                 Narrative row structs (code is MIT, data is not)
     Data/                      Tuning row structs
+    Debug/                     Test harness and console commands, compiled out of Shipping
 Plugins/LidarScan/             Lidar plugin (proprietary)
   LidarScan.uplugin
   LICENSE
@@ -133,8 +135,8 @@ Generic, engine-level scanning effect. Planned approach (validate in the first p
 - **Injected points:** things that are never rendered (the entity) provide points through a generic
   interface/component (e.g. `ILidarPointSource`) queried at scan time, with per-source settings such as
   "ignore fade". The game's entity implements it.
-- **Events:** `OnScanStarted` / `OnScanCompleted` delegates with scan index and timestamp. The game hooks
-  entity advancement and other logic onto these.
+- **Events:** `OnScanStarted` / `OnScanCompleted` delegates with scan index and timestamp. The game's
+  scan director re-broadcasts them; nothing else in the game subscribes to the plugin directly.
 - Every tunable is a `UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Lidar|...")` with
   `ClampMin`/`ClampMax`, so balancing happens in the editor without recompiling.
 
@@ -152,10 +154,22 @@ code or assets: use `TimeState` / `ETimeState::Stopped` / `Stop` / `Resume` (`UT
 ## Game systems (Source/TheLastShift)
 
 C++ for systems; Blueprints only for per-level scripting (wall placement, residue triggers), Niagara
-parameters, UMG widgets.
+parameters, UMG widgets. **Everything tunable is exposed to Blueprints:** every game tunable is a
+`UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="...")` with `ClampMin`/`ClampMax`, every event a
+`BlueprintAssignable` dynamic multicast delegate, every state query or action `BlueprintCallable` or
+`BlueprintPure`. Balancing happens in the editor, never by recompiling.
 
-- **Pause:** one key in, one key out, any time, no direct cost. Black screen, first scan after ~1 s,
-  then a scan every 3–4 s.
+- **Pause (time stop):** one key toggles Stop/Resume, any time, no direct cost. On Stop the flashlight
+  goes out (black screen = no lights), the first scan fires automatically after ~1 s, then the player
+  triggers scans manually (default Space) on a **cooldown** (default 4.5 s, measured from the last
+  scan). Pressing during cooldown does nothing and is not queued. A minimal "scan ready" cue (no text,
+  no bars; audio later). On Resume scans clear with a short fade-out (default 0.4 s) and the flashlight
+  returns to its previous state.
+- **Beat:** while Stopped, a silent timer (`BeatInterval`, default 4.5 s, measured from the Stop)
+  broadcasts `OnBeat`. The entity advances on beats, not on scans, so refusing to scan does not hold it
+  back; scanning only reveals where it is. Cooldown and beat have the same default period but are
+  independent timers. The `UScanDirectorComponent` owns both and is the only game object that talks to
+  the lidar plugin; other systems subscribe to the director.
 - **Time stop implementation (decided):** no global time dilation. A `UTimeStateSubsystem` (world
   subsystem, `Source/TheLastShift/Time/`) holds `ETimeState { Normal, Stopped }` and broadcasts
   `OnTimeStateChanged`. The few time-dependent systems check the state; scan timers, Niagara effects
@@ -166,7 +180,7 @@ parameters, UMG widgets.
 - **Entity:** appears after a cumulative stopped-time threshold that shrinks per act. Three forms, all
   scan-only, all with dense wrong-looking links (high k, long distance) and no fade:
   trails (tell, harmless), walls (block a passage only while stopped, placed on hand-authored nodes),
-  the figure (humanoid refracted in four directions, advances a fixed distance per scan, ignores walls).
+  the figure (humanoid refracted in four directions, advances a fixed distance per beat, ignores walls).
   Figure contact → **rewind**: lose residues from this pause, back to where the pause started, normal
   time, no death. Each new pause the figure starts closer than at the last exit.
 - **Time debt:** on exiting a pause,
@@ -200,7 +214,9 @@ parameters, UMG widgets.
   DataTables from CSV, run PIE and read `stat` output. Check the connection first; if it is missing, or
   the server lacks a capability you need, fall back to short numbered steps for the developer with exact
   asset names and paths. Do not work around a missing capability with hacks (editing `.uasset` bytes,
-  scripting the editor through other channels).
+  scripting the editor through other channels). Known limitations so far: no "new empty level" (copy
+  a template map and strip it), no "create asset" (duplicate an existing asset of the right class),
+  simulated UI key presses don't reach PIE (see below).
 - **Editor assets are binary.** Anything you create or change through the MCP (`.uasset`, `.umap`) is
   not diffable, so every report must list each asset created, changed or deleted, with its path and
   what you did to it. Ask before deleting or renaming an existing asset. Each asset still belongs to a
@@ -209,13 +225,18 @@ parameters, UMG widgets.
   Settings UI, so they are diffable. Narrative CSV in `/Narrative/` stays the source of truth: never
   edit a narrative DataTable in the editor; edit the CSV, then reimport through the MCP.
 - **Order of work when a brief has both C++ and editor parts:** C++ → full build (editor closed, see
-  below) → ask the developer to open the editor → editor work through the MCP → PIE check. Never ask
-  for a header change while the editor is open through the MCP.
+  below) → open the editor → editor work through the MCP → PIE check. You may close and reopen the
+  editor yourself for a full build, after saving all assets through the MCP and saying so in the report;
+  if closing or reopening fails, stop and ask the developer. Never change a header while the editor is
+  open.
+- **Simulated input:** key presses sent through the MCP's UI tools do not reach the PIE viewport. Use
+  the `tls.*` console commands in `Source/TheLastShift/Debug/` (`tls.Key`, `tls.Report`,
+  `tls.CycleTest`) and add to them when a brief needs a new automated check.
 - Build (`UE_ROOT` = the UE 5.8 install, e.g. `C:\Program Files\Epic Games\UE_5.8`):
   `"<UE_ROOT>\Engine\Build\BatchFiles\Build.bat" TheLastShiftEditor Win64 Development -Project="<REPO>\TheLastShift.uproject" -WaitMutex`
-- After header changes, new `UCLASS`/`USTRUCT`/`UPROPERTY`/`UFUNCTION`, or `.Build.cs` changes: the
-  developer closes the editor and you do a full build. Don't rely on Live Coding for reflection
-  changes. `.cpp`-only changes may go through Live Coding while the editor is open.
+- After header changes, new `UCLASS`/`USTRUCT`/`UPROPERTY`/`UFUNCTION`, or `.Build.cs` changes: close
+  the editor and do a full build. Don't rely on Live Coding for reflection changes. `.cpp`-only changes
+  may go through Live Coding while the editor is open.
 - UE coding standard: type prefixes (`A`, `U`, `F`, `I`, `E`), `TObjectPtr` for UObject members,
   `UPROPERTY` on every UObject reference, no raw `new`/`delete` for UObjects. Keep `.Build.cs`
   dependencies minimal.

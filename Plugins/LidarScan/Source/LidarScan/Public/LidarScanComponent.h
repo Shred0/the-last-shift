@@ -32,8 +32,22 @@ struct FLidarScanSlot
 	/** Real (undilated) world time at which the scan was taken. */
 	double StartRealTime = 0.0;
 
+	/** Fade-out started by ClearScans: total duration (0 = not fading) and time elapsed so far. */
+	float FadeOutDuration = 0.f;
+	float FadeOutElapsed = 0.f;
+
 	bool IsActive() const { return ScanIndex != INDEX_NONE; }
+	bool IsFadingOut() const { return IsActive() && FadeOutDuration > 0.f; }
+
+	/** Multiplier applied to the point alpha by an ongoing fade-out, 1 when not fading. */
+	float GetFadeOutAlpha() const
+	{
+		return FadeOutDuration > 0.f ? FMath::Clamp(1.f - FadeOutElapsed / FadeOutDuration, 0.f, 1.f) : 1.f;
+	}
 };
+
+/** Scan lifecycle event: index of the scan (monotonic per component) and world time in seconds. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLidarScan, int32, ScanIndex, float, Timestamp);
 
 /**
  * Depth-captured point scan.
@@ -54,20 +68,32 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Lidar")
 	void Scan();
 
-	/** Removes every alive scan immediately. */
+	/**
+	 * Removes every alive scan. With FadeOutSeconds > 0 the points fade to zero alpha over that time and are then
+	 * released; with 0 they are removed immediately. Scans already fading out are not restarted.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Lidar")
-	void ClearScans();
+	void ClearScans(float FadeOutSeconds = 0.f);
 
 	/** Pushes the live tunables (points, fade) to every alive scan and trims slots above MaxAliveScans. */
 	UFUNCTION(BlueprintCallable, Category = "Lidar")
 	void ApplyLiveSettings();
 
+	/** Scans currently shown, excluding those fading out after ClearScans. */
 	UFUNCTION(BlueprintPure, Category = "Lidar")
-	int32 GetNumAliveScans() const;
+	int32 GetAliveScanCount() const;
 
-	/** Total number of scans taken since BeginPlay. */
+	/** Total number of scans taken since BeginPlay; also the index the next scan will get. */
 	UFUNCTION(BlueprintPure, Category = "Lidar")
 	int32 GetScanCount() const { return ScanCount; }
+
+	/** Broadcast right after the depth capture for a scan has been issued. */
+	UPROPERTY(BlueprintAssignable, Category = "Lidar|Events")
+	FOnLidarScan OnScanStarted;
+
+	/** Broadcast once the scan's points have been spawned (the frame after OnScanStarted). */
+	UPROPERTY(BlueprintAssignable, Category = "Lidar|Events")
+	FOnLidarScan OnScanCompleted;
 
 	// --- Capture (applied on the next scan) ---
 
@@ -115,11 +141,11 @@ public:
 
 	/** Time for a scan to fade from full alpha to AlphaFloor. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Fade", meta = (ClampMin = "0.1", ClampMax = "60.0", Units = "s"))
-	float FadeDuration = 6.f;
+	float FadeDuration = 12.f;
 
 	/** Alpha a scan settles at once faded; never reaches zero while the scan is alive. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Fade", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float AlphaFloor = 0.15f;
+	float AlphaFloor = 0.01f;
 
 	// --- Scans ---
 
@@ -136,6 +162,7 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
@@ -148,7 +175,9 @@ private:
 	void TrimSlots();
 	UTextureRenderTarget2D* EnsureDepthTarget(FLidarScanSlot& Slot);
 	float ResolveHorizontalFOV() const;
-	void PushLiveParameters(UNiagaraComponent* Points) const;
+	void PushLiveParameters(const FLidarScanSlot& Slot) const;
+	void ReleaseSlot(FLidarScanSlot& Slot);
+	void BroadcastScanCompleted(int32 ScanIndex);
 
 	UPROPERTY(Transient)
 	TObjectPtr<USceneCaptureComponent2D> DepthCapture;

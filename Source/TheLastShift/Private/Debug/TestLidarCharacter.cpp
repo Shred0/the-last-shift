@@ -13,6 +13,9 @@
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
 #include "LidarScanComponent.h"
+#include "Scan/ScanDirectorComponent.h"
+#include "TheLastShift.h"
+#include "Time/TimeStateSubsystem.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(TestLidarCharacter)
 
@@ -39,12 +42,28 @@ ATestLidarCharacter::ATestLidarCharacter()
 
 	LidarScan = CreateDefaultSubobject<ULidarScanComponent>(TEXT("LidarScan"));
 	LidarScan->SetupAttachment(Camera);
+
+	ScanDirector = CreateDefaultSubobject<UScanDirectorComponent>(TEXT("ScanDirector"));
 }
 
 void ATestLidarCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 	Flashlight->SetVisibility(bFlashlightOnAtStart);
+
+	if (UTimeStateSubsystem* TimeState = GetWorld()->GetSubsystem<UTimeStateSubsystem>())
+	{
+		TimeState->OnTimeStateChanged.AddDynamic(this, &ATestLidarCharacter::HandleTimeStateChanged);
+	}
+}
+
+void ATestLidarCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UTimeStateSubsystem* TimeState = GetWorld() ? GetWorld()->GetSubsystem<UTimeStateSubsystem>() : nullptr)
+	{
+		TimeState->OnTimeStateChanged.RemoveDynamic(this, &ATestLidarCharacter::HandleTimeStateChanged);
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 void ATestLidarCharacter::PawnClientRestart()
@@ -93,6 +112,10 @@ void ATestLidarCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInput
 	{
 		Input->BindAction(FlashlightAction, ETriggerEvent::Started, this, &ATestLidarCharacter::OnToggleFlashlight);
 	}
+	if (TimeStopAction)
+	{
+		Input->BindAction(TimeStopAction, ETriggerEvent::Started, this, &ATestLidarCharacter::OnToggleTimeStop);
+	}
 }
 
 void ATestLidarCharacter::OnMove(const FInputActionValue& Value)
@@ -112,10 +135,41 @@ void ATestLidarCharacter::OnLook(const FInputActionValue& Value)
 
 void ATestLidarCharacter::OnScan()
 {
-	LidarScan->Scan();
+	if (bAllowManualScan)
+	{
+		LidarScan->Scan();
+	}
 }
 
 void ATestLidarCharacter::OnToggleFlashlight()
 {
+	// The flashlight is locked off while time is stopped.
+	const UTimeStateSubsystem* TimeState = GetWorld()->GetSubsystem<UTimeStateSubsystem>();
+	if (TimeState && TimeState->IsStopped())
+	{
+		return;
+	}
 	Flashlight->ToggleVisibility();
+}
+
+void ATestLidarCharacter::OnToggleTimeStop()
+{
+	if (UTimeStateSubsystem* TimeState = GetWorld()->GetSubsystem<UTimeStateSubsystem>())
+	{
+		TimeState->Toggle();
+	}
+}
+
+void ATestLidarCharacter::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState)
+{
+	if (NewState == ETimeState::Stopped)
+	{
+		bFlashlightWasOnBeforeStop = Flashlight->IsVisible();
+		Flashlight->SetVisibility(false);
+	}
+	else
+	{
+		Flashlight->SetVisibility(bFlashlightWasOnBeforeStop);
+	}
+	UE_LOG(LogTheLastShift, Log, TEXT("TestLidarCharacter: flashlight %s."), Flashlight->IsVisible() ? TEXT("on") : TEXT("off"));
 }
