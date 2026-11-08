@@ -183,8 +183,8 @@ parameters, UMG widgets.
 
 - **Source of truth is CSV in `/Narrative/`** (text, diffable). DataTables in
   `Content/TheLastShift/Narrative/` are imported from those CSVs.
-- Agents edit the CSV, never the `.uasset`. After any CSV change, remind the developer to reimport
-  the DataTable in the editor.
+- Agents edit the CSV, never the `.uasset`. After any CSV change, reimport the DataTable through the
+  Unreal MCP; without it, remind the developer to reimport in the editor.
 - Planned tables: `DT_AIMessages` (return, area entry, spending comments), `DT_Logs` (twin humanity
   logs, 8 entries, shown in reverse order), `DT_Fragments` (6–8), `DT_Dialogue` (2–3 option choices),
   `DT_Endings`. Row structs live in `Source/TheLastShift/Public/Narrative/`.
@@ -194,12 +194,28 @@ parameters, UMG widgets.
 
 ## Working in Unreal as an agent
 
-- Agents cannot run the editor or edit `.uasset`/`.umap`. For editor work give short numbered
-  steps with exact asset names and paths.
+- **Editor access through the Unreal MCP server.** When an Unreal Engine MCP connection is available
+  to you, the editor is running with `TheLastShift.uproject` open and you do editor work yourself
+  through it: create and edit assets, levels, actors, Blueprints, materials and Niagara systems, import
+  DataTables from CSV, run PIE and read `stat` output. Check the connection first; if it is missing, or
+  the server lacks a capability you need, fall back to short numbered steps for the developer with exact
+  asset names and paths. Do not work around a missing capability with hacks (editing `.uasset` bytes,
+  scripting the editor through other channels).
+- **Editor assets are binary.** Anything you create or change through the MCP (`.uasset`, `.umap`) is
+  not diffable, so every report must list each asset created, changed or deleted, with its path and
+  what you did to it. Ask before deleting or renaming an existing asset. Each asset still belongs to a
+  license zone: create it in the zone's folder, never elsewhere.
+- **Text first.** Project settings go in `Config/*.ini` as text, not through the editor's Project
+  Settings UI, so they are diffable. Narrative CSV in `/Narrative/` stays the source of truth: never
+  edit a narrative DataTable in the editor; edit the CSV, then reimport through the MCP.
+- **Order of work when a brief has both C++ and editor parts:** C++ → full build (editor closed, see
+  below) → ask the developer to open the editor → editor work through the MCP → PIE check. Never ask
+  for a header change while the editor is open through the MCP.
 - Build (`UE_ROOT` = the UE 5.8 install, e.g. `C:\Program Files\Epic Games\UE_5.8`):
   `"<UE_ROOT>\Engine\Build\BatchFiles\Build.bat" TheLastShiftEditor Win64 Development -Project="<REPO>\TheLastShift.uproject" -WaitMutex`
-- After header changes, new `UCLASS`/`USTRUCT`/`UPROPERTY`/`UFUNCTION`, or `.Build.cs` changes: close the
-  editor and do a full build. Don't rely on Live Coding for reflection changes.
+- After header changes, new `UCLASS`/`USTRUCT`/`UPROPERTY`/`UFUNCTION`, or `.Build.cs` changes: the
+  developer closes the editor and you do a full build. Don't rely on Live Coding for reflection
+  changes. `.cpp`-only changes may go through Live Coding while the editor is open.
 - UE coding standard: type prefixes (`A`, `U`, `F`, `I`, `E`), `TObjectPtr` for UObject members,
   `UPROPERTY` on every UObject reference, no raw `new`/`delete` for UObjects. Keep `.Build.cs`
   dependencies minimal.
