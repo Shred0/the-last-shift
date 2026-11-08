@@ -144,7 +144,7 @@ public:
 	 * while the viewer moves inside a scan; FOV and viewport changes apply on the next frame.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.5", ClampMax = "8.0", UIMin = "0.5", UIMax = "8.0"))
-	float PointPixelSize = 2.5f;
+	float PointPixelSize = 3.5f;
 
 	/**
 	 * Draw-time pull of each point towards the viewer, in point diameters. A point sits on the surface it was
@@ -160,24 +160,45 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points")
 	FLinearColor PointColor = FLinearColor(0.4f, 0.85f, 1.f, 1.f);
 
-	/** Emissive multiplier applied to PointColor; 1 = the point material's nominal brightness. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "4.0", UIMin = "0.0", UIMax = "4.0"))
-	float PointIntensity = 1.f;
-
 	/**
-	 * Capture depth at which the DensityCompensation term stops: nearer points are dimmed, points at or beyond it
-	 * keep full alpha. Unused while DensityCompensation is 0.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "50.0", ClampMax = "3000.0", Units = "cm"))
-	float ReferenceDistance = 300.f;
-
-	/**
-	 * Exponent of the optional per-point alpha term saturate(pow(Depth / ReferenceDistance, DensityCompensation)),
-	 * Depth being the capture depth of the sample. Points are a constant screen size, so every point already has
-	 * the same brightness at any depth; this term is a stylistic depth cue only. 0 = off (every point at full alpha).
+	 * Emissive multiplier applied to PointColor; 1 = the point material's nominal brightness. Kept low so that the
+	 * density compensation can brighten points (up to DensityBoostMax) before the tonemapper turns them white.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "4.0", UIMin = "0.0", UIMax = "4.0"))
-	float DensityCompensation = 0.f;
+	float PointIntensity = 0.3f;
+
+	/**
+	 * View-relative density compensation. Every point is the same size on screen, so the perceived brightness of a
+	 * surface is its point density on screen, which grows as (ViewDepth / SampleDepth)^2 when a scan is seen from
+	 * farther than it was taken from (and shrinks when seen from closer). Each point's intensity is scaled every
+	 * frame by clamp(pow(SampleDepth / ViewDepth, DensityCompensation), DensityBoostMin, DensityBoostMax), where
+	 * SampleDepth is the point's depth along the capture's forward axis and ViewDepth its depth along the current
+	 * camera's forward axis. From the scan's own pose the factor is 1 everywhere. 2 cancels the density change,
+	 * lower values only soften it; 0 = off (every point at PointIntensity).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "3.0", UIMin = "0.0", UIMax = "3.0"))
+	float DensityCompensation = 2.f;
+
+	/**
+	 * Surface-angle density compensation, multiplied with the depth term above. A surface patch covers a screen area
+	 * proportional to the cosine of the angle between its normal and the viewing direction, so the same points seen
+	 * more obliquely than they were sampled crowd together (and spread out when seen more head-on). Each point's
+	 * intensity is also scaled by pow(max(cos ViewAngle, e) / max(cos CaptureAngle, e), AngleCompensation), with the
+	 * surface normal reconstructed from the depth capture when the scan is taken. Both factors go through the same
+	 * DensityBoostMin / DensityBoostMax clamp. From the scan's own pose the term is 1. Samples on a depth
+	 * discontinuity (no reliable neighbour) take the capture ray as their normal; points that carry no normal at all
+	 * (injected points) keep a term of 1. 1 cancels the change, lower values only soften it; 0 = off (depth term only).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
+	float AngleCompensation = 1.f;
+
+	/** Lower clamp of the density compensation factor: how far points seen from farther or more obliquely than they were taken can dim. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.01", ClampMax = "1.0", UIMin = "0.01", UIMax = "1.0"))
+	float DensityBoostMin = 0.02f;
+
+	/** Upper clamp of the density compensation factor: how far points seen from closer or more head-on than they were taken can brighten. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "1.0", ClampMax = "16.0", UIMin = "1.0", UIMax = "16.0"))
+	float DensityBoostMax = 4.f;
 
 	// --- Fade (live) ---
 
@@ -187,7 +208,7 @@ public:
 
 	/** Alpha a scan settles at once faded; never reaches zero while the scan is alive. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Fade", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float AlphaFloor = 0.01f;
+	float AlphaFloor = 0.12f;
 
 	// --- Scans ---
 

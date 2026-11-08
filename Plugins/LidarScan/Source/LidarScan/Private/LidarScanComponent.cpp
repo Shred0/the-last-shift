@@ -32,18 +32,36 @@
  * with u', v' in [-1, 1] from the same jittered UV. SceneDepth is planar view depth, so the forward component of the
  * ray is exactly 1. Samples with depth <= 1 or >= MaxRange are killed. The raw depth is kept per particle.
  *
+ * Spawn also reconstructs a surface normal, Particles.LidarNormal, from the depth gradient. The particle's own texel
+ * (the jitter stays inside it, so nearest filtering reads that texel) and its four neighbours (+-1 texel per axis,
+ * read at texel centres) are unprojected through their texel-centre rays; per axis the one-sided difference whose
+ * depth is closer to the centre's is kept (a neighbour off the target edge, or with depth <= 1 or >= MaxRange, is
+ * never kept). If even the kept neighbour differs from the centre depth by more than 0.25 x the centre depth, the
+ * sample sits on a depth discontinuity (a one-texel-wide feature) and its normal is the capture ray. On a plane the
+ * per-texel depth step only reaches 0.25 x depth at grazing angles under about 2 degrees, beyond MaxRange at eye
+ * height. N = normalize(cross(Tangent X, Tangent Y)); its sign is not meaningful, only |dot| is used.
+ * A particle with LidarNormal = 0 (injected points, which have no normal) gets an angle term of 1.
+ * e = 0.02 floors both cosines (same floor on both, so the term is exactly 1 from the scan's own pose): it only
+ * guards the division and the pow; at that angle the clamp below already decides the result.
+ *
  * Update (every frame): colour and size from the live parameters,
- *   alpha = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration)
- *         * saturate(pow(Depth / ReferenceDistance, DensityCompensation)),
+ *   rgb   = PointColor.rgb * clamp(pow(SampleDepth / z, DensityCompensation) * AngleTerm, DensityBoostMin, DensityBoostMax),
+ *   AngleTerm = pow(max(saturate(|dot(N, Vview)|), e) / max(saturate(|dot(N, Vcapture)|), e), AngleCompensation),
+ *   Vview = normalize(Position - ViewOrigin), Vcapture = normalize(Position - CaptureOrigin), e = 0.02,
+ *   alpha = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration),
  *   size  = PointPixelSize * ViewPixelScale * z * (1 - PointDepthOffset * PointPixelSize * ViewPixelScale * z / d),
  *   camera offset (towards the viewer) = PointDepthOffset * PointPixelSize * ViewPixelScale * z,
- *   z = max(dot(Position - ViewOrigin, ViewForward), 1), d = max(|Position - ViewOrigin|, 1)
+ *   z = max(dot(Position - ViewOrigin, ViewForward), 1), d = max(|Position - ViewOrigin|, 1),
+ *   SampleDepth = max(Depth - SurfaceBias, 1)
  * where ViewOrigin and ViewForward are the current camera, read on the GPU through a Camera Query data interface,
  * and ViewPixelScale = 2 / (Projection[1][1] * ViewHeightPixels) = 2 tan(VerticalFOV / 2) / ViewHeightPixels is
  * pushed by this component every frame. Sprites face the camera plane, so a sprite of world size s at planar view
  * depth z covers exactly s / (z * ViewPixelScale) pixels anywhere on screen: every point is PointPixelSize pixels.
  * The camera offset keeps sprites from being clipped by their own surface at grazing angles; the last factor of
  * the size cancels the perspective growth it causes (the offset moves the sprite to planar depth z - offset * z / d).
+ * SampleDepth is the particle's depth along CaptureForward (raw depth minus the bias it was placed with), so
+ * SampleDepth / z is exactly 1 when the scan is viewed from its own pose. PointColor.rgb already carries
+ * PointIntensity; the additive material multiplies rgb by alpha.
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
  */
 namespace LidarScanParams
@@ -67,8 +85,10 @@ namespace LidarScanParams
 	static const FName AlphaFloor(TEXT("User.AlphaFloor"));
 	static const FName SampleJitter(TEXT("User.SampleJitter"));
 	static const FName JitterSeed(TEXT("User.JitterSeed"));
-	static const FName ReferenceDistance(TEXT("User.ReferenceDistance"));
 	static const FName DensityCompensation(TEXT("User.DensityCompensation"));
+	static const FName AngleCompensation(TEXT("User.AngleCompensation"));
+	static const FName DensityBoostMin(TEXT("User.DensityBoostMin"));
+	static const FName DensityBoostMax(TEXT("User.DensityBoostMax"));
 }
 
 ULidarScanComponent::ULidarScanComponent()
@@ -597,6 +617,8 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 	Points->SetVariableLinearColor(LidarScanParams::PointColor, Emissive);
 	Points->SetVariableFloat(LidarScanParams::FadeDuration, FadeDuration);
 	Points->SetVariableFloat(LidarScanParams::AlphaFloor, AlphaFloor);
-	Points->SetVariableFloat(LidarScanParams::ReferenceDistance, FMath::Clamp(ReferenceDistance, 50.f, 3000.f));
-	Points->SetVariableFloat(LidarScanParams::DensityCompensation, FMath::Clamp(DensityCompensation, 0.f, 4.f));
+	Points->SetVariableFloat(LidarScanParams::DensityCompensation, FMath::Clamp(DensityCompensation, 0.f, 3.f));
+	Points->SetVariableFloat(LidarScanParams::AngleCompensation, FMath::Clamp(AngleCompensation, 0.f, 1.f));
+	Points->SetVariableFloat(LidarScanParams::DensityBoostMin, FMath::Clamp(DensityBoostMin, 0.01f, 1.f));
+	Points->SetVariableFloat(LidarScanParams::DensityBoostMax, FMath::Clamp(DensityBoostMax, 1.f, 16.f));
 }
