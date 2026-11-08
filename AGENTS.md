@@ -1,11 +1,13 @@
 # AGENTS.md — The Last Shift
 
+Unreal Engine 5.8 (fixed — do not change the EngineAssociation in the .uproject), C++ first.
+
 Shared instructions for every AI coding agent working in this repo (Claude Code, Gemini CLI, others).
 This file is the single source of truth: tool-specific files (`CLAUDE.md`, `.gemini/settings.json`) only
 import it. Put project rules here, never in those files.
 
-First-person exploration game for GitHub Game Off 2026 (theme: SHIFT). Unreal Engine 5, C++ first.
-20–30 minutes, one location (a derelict twin megastructure), four areas = four acts.
+First-person exploration game for GitHub Game Off 2026 (theme: SHIFT). 20–30 minutes, one location
+(a derelict twin megastructure), four areas = four acts.
 
 Core loop: the player stops time; while stopped the screen is black except for periodic lidar scans
 (points + wireframe that fade); tachyonic residues exist only in scans and are collected by holding
@@ -24,15 +26,16 @@ approaching is not tense and readable, nothing else matters. Prioritise accordin
 
 ## Source of truth
 
-Design docs live in ClickUp (Italian, internal reference; "Ultimo Turno" was the working title). Workspace `90122202168` → space "Space":
+Design docs live in ClickUp (Italian, internal reference; "Ultimo Turno" was the working title).
+Workspace `90122202168` → space "Space":
 
 - Folder **GDD**: "Ultimo Turno — GDD (GameOff 2026, tema SHIFT)" — doc `2kxv7b1r-292`
 - Folder **Documentazione**: "Game Off 2026 — Workflow di preparazione" (`2kxv7b1r-172`),
   "Game Off 2026 — Submission" (`2kxv7b1r-192`)
 
-If a ClickUp connection (MCP) is available to you, read the GDD before making design decisions. If this file and the GDD
-disagree, ask. The GDD's technical notes contain leftovers from before the engine choice (Godot
-MultiMesh, Unity LineRenderer): ignore them; the "Engine: Unreal Engine 5" section is authoritative.
+If a ClickUp connection (MCP) is available to you, read the GDD before making design decisions. If this
+file and the GDD disagree, ask. The GDD's technical notes contain leftovers from before the engine choice
+(Godot MultiMesh, Unity LineRenderer): ignore them; the "Engine: Unreal Engine 5" section is authoritative.
 
 ## Language
 
@@ -47,19 +50,24 @@ The repo is public, but not everything in it has the same license. Every file be
 | Zone | Paths | License | Notes |
 |---|---|---|---|
 | **Lidar** (future licensed product) | `Plugins/LidarScan/**` | Proprietary, own `Plugins/LidarScan/LICENSE` (terms set by the owner) | Must stay fully separable from the game |
-| **Narrative** (view only) | `Narrative/**`, `Content/LastShift/Narrative/**` | All rights reserved, `LICENSE-NARRATIVE` | Dialogue, AI messages, logs, fragments, endings |
-| **Game** | `Source/LastShift/**`, `Content/LastShift/**` (except Narrative, Art, Audio), `Config/`, scripts | MIT, root `LICENSE` | Game logic, Blueprints, maps, UI, tuning data |
-| **Assets** | `Content/LastShift/Art/**`, `Content/LastShift/Audio/**` | TBD, `LICENSE-ASSETS` | Meshes, materials, sounds, music |
+| **StdCore** (reusable framework) | `Plugins/StdCore/**` | Proprietary, own `Plugins/StdCore/LICENSE` (same terms as LidarScan) | Pre-existing plugin: generic UMG widgets, level transitions, input binding, settings, menus |
+| **Narrative** (view only) | `Narrative/**`, `Content/TheLastShift/Narrative/**` | All rights reserved, `LICENSE-NARRATIVE` | Dialogue, AI messages, logs, fragments, endings |
+| **Game** | `Source/TheLastShift/**`, `Content/TheLastShift/**` (except Narrative, Art, Audio), `Config/`, scripts | MIT, root `LICENSE` | Game logic, Blueprints, maps, UI, tuning data |
+| **Assets** | `Content/TheLastShift/Art/**`, `Content/TheLastShift/Audio/**` | TBD, `LICENSE-ASSETS` | Meshes, materials, sounds, music |
+
+License files (`LICENSE*`, `CREDITS`) are written by the developer at the end of the jam. Until then
+default copyright applies; the zone a file belongs to is still fixed by this table.
 
 Hard rules:
 
-1. **Dependency direction is one way: `LastShift` → `LidarScan`, never the reverse.** The plugin must
-   compile and work in an empty project. No game concepts (residue, entity, act, battery, home, AI,
-   debt) in the plugin's class names, code, comments, or content. Game behaviour plugs in through the
-   plugin's generic extension points.
+1. **Dependency direction is one way:** `TheLastShift → LidarScan` and `TheLastShift → StdCore`.
+   `LidarScan` and `StdCore` never depend on each other or on `TheLastShift`; each must compile and work
+   in an empty project. No game concepts (residue, entity, act, battery, home, AI, debt) in either
+   plugin's class names, code, comments, or content. Game behaviour plugs in through the plugins'
+   generic extension points.
 2. **Never copy code between zones.** If the game needs lidar-like behaviour the plugin lacks, add a
    generic feature to the plugin or wrap it in the game module. Don't duplicate plugin code in
-   `Source/LastShift`.
+   `Source/TheLastShift`.
 3. **Narrative text lives only in the Narrative zone.** No story text hardcoded in C++ or Blueprints.
    Short UI labels ("Hold E", menu items) are fine in the Game zone. Code that *processes* text
    (message queue, typewriter, degradation function) is Game code.
@@ -69,7 +77,8 @@ Hard rules:
 5. **Do not create, edit, or delete `LICENSE*`, `CREDITS`, or license headers unless explicitly asked.**
    When unsure which zone a new file belongs to, ask before creating it.
 6. File headers:
-   - Plugin sources: `// Copyright <YEAR> <OWNER>. All rights reserved. See Plugins/LidarScan/LICENSE.`
+   - Plugin sources (LidarScan, StdCore):
+     `// Copyright <YEAR> <OWNER>. All rights reserved. See Plugins/<PluginName>/LICENSE.`
    - Game sources: `// SPDX-License-Identifier: MIT`
 7. No Starter Content, no Fab/Marketplace assets. Any external asset must be added to `CREDITS` with
    author and license; ask the developer to confirm the license before importing.
@@ -77,11 +86,11 @@ Hard rules:
 ## Repository layout
 
 ```
-LastShift.uproject
+TheLastShift.uproject
 Config/
-Source/LastShift/              Game module (MIT)
+Source/TheLastShift/           Game module (MIT)
   Public/ Private/
-    Time/                      Pause state, time debt, home battery
+    Time/                      Time state, time debt, home battery
     Scan/                      Scan orchestration on top of LidarScan
     Residue/                   Residue actors, collection
     Entity/                    Entity controller, trails, walls, figure
@@ -94,16 +103,20 @@ Plugins/LidarScan/             Lidar plugin (proprietary)
   LICENSE
   Source/LidarScan/
   Content/                     Plugin's own Niagara systems and materials
+Plugins/StdCore/               Reusable framework plugin (proprietary): UI widgets,
+  StdCore.uplugin              transitions, input binding, settings, menus
+  LICENSE
+  Source/StdCore/
 Narrative/                     CSV sources of all narrative DataTables (all rights reserved)
-Content/LastShift/
-  Maps/ Blueprints/ UI/
+Content/TheLastShift/
+  Maps/ Blueprints/ UI/ Input/
   Data/                        Tuning DataTables and data assets (DT_ActTuning, ...)
   Narrative/                   Narrative DataTables only, imported from /Narrative/*.csv
   Art/ Audio/
 ```
 
 The approved title is **The Last Shift**: use it in player-facing text, README, and the itch.io page.
-`LastShift` is the code name for modules, folders, and the `.uproject`.
+`TheLastShift` is the code name for the module, folders, build targets, and the `.uproject`.
 
 ## LidarScan plugin
 
@@ -125,19 +138,29 @@ Generic, engine-level scanning effect. Planned approach (validate in the first p
 - Every tunable is a `UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Lidar|...")` with
   `ClampMin`/`ClampMax`, so balancing happens in the editor without recompiling.
 
-## Game systems (Source/LastShift)
+## StdCore plugin
+
+Pre-existing, generic. Use it for everything it already covers — main menu, settings, pause menu, key
+rebinding, level transitions — instead of reimplementing in `Source/TheLastShift`. Do not add game logic
+to it; a change to StdCore is allowed only if it is generic and explicitly requested. Read its public
+headers before building UI or input.
+
+**Naming:** "pause" in StdCore means the menu pause. The time-stop mechanic is never called "pause" in
+code or assets: use `TimeState` / `ETimeState::Stopped` / `Stop` / `Resume` (`UTimeStateSubsystem`,
+`OnTimeStateChanged`, ...). "Pause" stays in design docs and player-facing text only.
+
+## Game systems (Source/TheLastShift)
 
 C++ for systems; Blueprints only for per-level scripting (wall placement, residue triggers), Niagara
 parameters, UMG widgets.
 
 - **Pause:** one key in, one key out, any time, no direct cost. Black screen, first scan after ~1 s,
   then a scan every 3–4 s.
-- **Time stop implementation — verify early:** the GDD suggests Global Time Dilation 0 + Custom Time
-  Dilation 1 on the player. In UE global dilation is clamped to `MinGlobalTimeDilation` and an actor's
-  delta is the already-dilated world delta × its custom dilation, so the player would freeze too.
-  Since nothing moves in normal time anyway, prefer an explicit game-state flag (Normal / Stopped) that
-  the few time-dependent systems check, and drive scan timers, Niagara, and UI with unscaled time.
-  Confirm with the developer before choosing.
+- **Time stop implementation (decided):** no global time dilation. A `UTimeStateSubsystem` (world
+  subsystem, `Source/TheLastShift/Time/`) holds `ETimeState { Normal, Stopped }` and broadcasts
+  `OnTimeStateChanged`. The few time-dependent systems check the state; scan timers, Niagara effects
+  shown while stopped, and UI run on unscaled real time (`GetRealTimeSeconds`, timers with
+  `bIgnoreTimeDilation`). The player keeps moving in both states.
 - **Residues:** invisible in normal time, visible only in scans as dense bright clusters; collected by
   holding contact 2–3 s; 3–6 per area; 1 energy each.
 - **Entity:** appears after a cumulative stopped-time threshold that shrinks per act. Three forms, all
@@ -159,12 +182,12 @@ parameters, UMG widgets.
 ## Narrative data
 
 - **Source of truth is CSV in `/Narrative/`** (text, diffable). DataTables in
-  `Content/LastShift/Narrative/` are imported from those CSVs.
+  `Content/TheLastShift/Narrative/` are imported from those CSVs.
 - Agents edit the CSV, never the `.uasset`. After any CSV change, remind the developer to reimport
   the DataTable in the editor.
 - Planned tables: `DT_AIMessages` (return, area entry, spending comments), `DT_Logs` (twin humanity
   logs, 8 entries, shown in reverse order), `DT_Fragments` (6–8), `DT_Dialogue` (2–3 option choices),
-  `DT_Endings`. Row structs live in `Source/LastShift/Public/Narrative/`.
+  `DT_Endings`. Row structs live in `Source/TheLastShift/Public/Narrative/`.
 - **Do not write or rewrite narrative content unless explicitly asked.** Use `[PLACEHOLDER]` rows to
   test systems. Style when asked: English written directly, short; "still" appears in every return
   message ("You have been still for 212 years").
@@ -173,8 +196,8 @@ parameters, UMG widgets.
 
 - Agents cannot run the editor or edit `.uasset`/`.umap`. For editor work give short numbered
   steps with exact asset names and paths.
-- Build (fill in once the engine version is fixed):
-  `"<UE_ROOT>\Engine\Build\BatchFiles\Build.bat" LastShiftEditor Win64 Development -Project="<REPO>\LastShift.uproject" -WaitMutex`
+- Build (`UE_ROOT` = the UE 5.8 install, e.g. `C:\Program Files\Epic Games\UE_5.8`):
+  `"<UE_ROOT>\Engine\Build\BatchFiles\Build.bat" TheLastShiftEditor Win64 Development -Project="<REPO>\TheLastShift.uproject" -WaitMutex`
 - After header changes, new `UCLASS`/`USTRUCT`/`UPROPERTY`/`UFUNCTION`, or `.Build.cs` changes: close the
   editor and do a full build. Don't rely on Live Coding for reflection changes.
 - UE coding standard: type prefixes (`A`, `U`, `F`, `I`, `E`), `TObjectPtr` for UObject members,
@@ -188,7 +211,7 @@ parameters, UMG widgets.
 ## Git
 
 - Commit only when asked. Small, frequent commits, English, imperative mood, zone prefix:
-  `lidar: ...`, `game: ...`, `narrative: ...`, `assets: ...`, `build: ...`.
+  `lidar: ...`, `stdcore: ...`, `game: ...`, `narrative: ...`, `assets: ...`, `build: ...`.
 - LFS for `.uasset`, `.umap` and binary media. C++, CSV, `.ini`, `.uplugin` stay as plain text.
 - Never commit `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`, IDE files, packaged builds,
   or `.blend` sources. Builds go to itch.io via butler.
@@ -209,5 +232,6 @@ normal time, separate suit battery, areas beyond four, detailed environment mode
 
 ## Open decisions — don't decide for the team
 
-Exact UE 5 version (stable, not the latest); engineer's name and gender; invented glyphs vs. logs already translated by the suit; LidarScan license terms; license for
-the Assets zone; entity thresholds and debt multipliers (tuned in playtest).
+Engineer's name and gender; invented glyphs vs. logs already translated by the suit; LidarScan and
+StdCore license terms; license for the Assets zone; entity thresholds and debt multipliers (tuned in
+playtest).
