@@ -1,5 +1,16 @@
 {
-  "context": {
-    "fileName": ["AGENTS.md", "GEMINI.md"]
-  }
+	"context":
+	{
+		"fileName": [
+			"AGENTS.md",
+			"GEMINI.md"
+		]
+	},
+	"mcpServers":
+	{
+		"unreal-mcp":
+		{
+			"httpUrl": "http://127.0.0.1:8001/mcp"
+		}
+	}
 }
