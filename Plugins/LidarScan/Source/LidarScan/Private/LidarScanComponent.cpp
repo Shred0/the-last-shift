@@ -30,7 +30,14 @@
  * UV and is placed at
  *   CaptureOrigin + (CaptureForward + u' * TanHalfFov.x * CaptureRight + v' * TanHalfFov.y * CaptureUp) * (Depth - SurfaceBias)
  * with u', v' in [-1, 1] from the same jittered UV. SceneDepth is planar view depth, so the forward component of the
- * ray is exactly 1. Samples with depth <= 1 or >= MaxRange are killed. The raw depth is kept per particle.
+ * ray is exactly 1. That position is stored as Particles.LidarSurfacePosition (and copied to Particles.Position).
+ * Samples with depth <= 1, >= MaxRange or < MinSampleDepth are killed. With NearThinningDistance > 0 the others are
+ * kept only if
+ *   rand3(i, JitterSeed, 1, 0).x < min(1, (Depth / NearThinningDistance)^2)
+ * (a hash of the particle index and the per-scan seed: the same scan keeps the same samples on every frame, and the
+ * stream differs from the jitter's). On a surface seen head-on the capture puts 1 / Depth^2 samples per unit area, so
+ * the near field ends up with roughly the world spacing of a surface at NearThinningDistance. The raw depth is kept
+ * per particle.
  *
  * Spawn also reconstructs a surface normal, Particles.LidarNormal, from the depth gradient. The particle's own texel
  * (the jitter stays inside it, so nearest filtering reads that texel) and its four neighbours (+-1 texel per axis,
@@ -39,30 +46,38 @@
  * never kept). If even the kept neighbour differs from the centre depth by more than 0.25 x the centre depth, the
  * sample sits on a depth discontinuity (a one-texel-wide feature) and its normal is the capture ray. On a plane the
  * per-texel depth step only reaches 0.25 x depth at grazing angles under about 2 degrees, beyond MaxRange at eye
- * height. N = normalize(cross(Tangent X, Tangent Y)); its sign is not meaningful, only |dot| is used.
+ * height. N = normalize(cross(Tangent X, Tangent Y)), then flipped if needed so that dot(N, CaptureOrigin - S) >= 0,
+ * with S = LidarSurfacePosition: the normal points to the side of the surface the capture saw (the fallback capture
+ * ray is flipped the same way). The angle term below only uses |dot|; the surface offset uses the sign.
  * A particle with LidarNormal = 0 (injected points, which have no normal) gets an angle term of 1.
  * e = 0.02 floors both cosines (same floor on both, so the term is exactly 1 from the scan's own pose): it only
  * guards the division and the pow; at that angle the clamp below already decides the result.
  *
- * Update (every frame): colour and size from the live parameters,
- *   rgb   = PointColor.rgb * clamp(pow(SampleDepth / z, DensityCompensation) * AngleTerm, DensityBoostMin, DensityBoostMax),
+ * Update (every frame): draw position, colour and size from the live parameters,
+ *   Position = S + N * SurfaceOffset                                  if |N|^2 > 0.25,
+ *   Position = S + normalize(ViewOrigin - S) * min(ViewOffsetMaxCm, 0.5 * |ViewOrigin - S|)   otherwise,
+ *   rgb   = PointColor.rgb * clamp(pow(SampleDepth / zs, DensityCompensation) * AngleTerm, DensityBoostMin, DensityBoostMax),
  *   AngleTerm = pow(max(saturate(|dot(N, Vview)|), e) / max(saturate(|dot(N, Vcapture)|), e), AngleCompensation),
- *   Vview = normalize(Position - ViewOrigin), Vcapture = normalize(Position - CaptureOrigin), e = 0.02,
+ *   Vview = normalize(S - ViewOrigin), Vcapture = normalize(S - CaptureOrigin), e = 0.02,
  *   alpha = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration),
- *   size  = PointPixelSize * ViewPixelScale * z * (1 - PointDepthOffset * PointPixelSize * ViewPixelScale * z / d),
- *   camera offset (towards the viewer) = PointDepthOffset * PointPixelSize * ViewPixelScale * z,
- *   z = max(dot(Position - ViewOrigin, ViewForward), 1), d = max(|Position - ViewOrigin|, 1),
+ *   size  = PointPixelSize * ViewPixelScale * z,
+ *   z = max(dot(Position - ViewOrigin, ViewForward), 1), zs = max(dot(S - ViewOrigin, ViewForward), 1),
  *   SampleDepth = max(Depth - SurfaceBias, 1)
  * where ViewOrigin and ViewForward are the current camera, read on the GPU through a Camera Query data interface,
  * and ViewPixelScale = 2 / (Projection[1][1] * ViewHeightPixels) = 2 tan(VerticalFOV / 2) / ViewHeightPixels is
  * pushed by this component every frame. Sprites face the camera plane, so a sprite of world size s at planar view
  * depth z covers exactly s / (z * ViewPixelScale) pixels anywhere on screen: every point is PointPixelSize pixels.
- * The camera offset keeps sprites from being clipped by their own surface at grazing angles; the last factor of
- * the size cancels the perspective growth it causes (the offset moves the sprite to planar depth z - offset * z / d).
- * SampleDepth is the particle's depth along CaptureForward (raw depth minus the bias it was placed with), so
- * SampleDepth / z is exactly 1 when the scan is viewed from its own pose. PointColor.rgb already carries
- * PointIntensity; the additive material multiplies rgb by alpha.
+ * The offset is a real displacement of the particle (no renderer camera offset), so the size needs no correction.
+ * It lifts sprites off their own surface so grazing views do not clip them; being a fixed world distance it never
+ * carries a point through geometry thicker than the offset, whatever the viewing distance.
+ * Compensation reads S, not the drawn position: SampleDepth is the depth of S along CaptureForward (raw depth minus
+ * the bias it was placed with), so SampleDepth / zs is exactly 1 when the scan is viewed from its own pose.
+ * PointColor.rgb already carries PointIntensity; the additive material multiplies rgb by alpha.
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
+ *
+ * Injected points (not produced by the depth capture) write LidarSurfacePosition and Position, and LidarNormal = 0:
+ * they get the toward-viewer offset capped by ViewOffsetMaxCm and an angle term of 1. MinSampleDepth and the near
+ * thinning are capture-sampling rules and do not apply to them.
  */
 namespace LidarScanParams
 {
@@ -79,7 +94,10 @@ namespace LidarScanParams
 	static const FName SurfaceBias(TEXT("User.SurfaceBias"));
 	static const FName PointPixelSize(TEXT("User.PointPixelSize"));
 	static const FName ViewPixelScale(TEXT("User.ViewPixelScale"));
-	static const FName PointDepthOffset(TEXT("User.PointDepthOffset"));
+	static const FName SurfaceOffset(TEXT("User.SurfaceOffset"));
+	static const FName ViewOffsetMaxCm(TEXT("User.ViewOffsetMaxCm"));
+	static const FName NearThinningDistance(TEXT("User.NearThinningDistance"));
+	static const FName MinSampleDepth(TEXT("User.MinSampleDepth"));
 	static const FName PointColor(TEXT("User.PointColor"));
 	static const FName FadeDuration(TEXT("User.FadeDuration"));
 	static const FName AlphaFloor(TEXT("User.AlphaFloor"));
@@ -251,6 +269,8 @@ void ULidarScanComponent::Scan()
 	Points->SetVariableFloat(LidarScanParams::MaxRange, MaxRange);
 	Points->SetVariableFloat(LidarScanParams::SurfaceBias, SurfaceBias);
 	Points->SetVariableFloat(LidarScanParams::SampleJitter, FMath::Clamp(SampleJitter, 0.f, 1.f));
+	Points->SetVariableFloat(LidarScanParams::NearThinningDistance, FMath::Clamp(NearThinningDistance, 0.f, 1000.f));
+	Points->SetVariableFloat(LidarScanParams::MinSampleDepth, FMath::Clamp(MinSampleDepth, 0.f, 200.f));
 
 	// Deterministic per scan index: the same scan never changes while alive, consecutive scans fill each other's gaps.
 	const int32 ScanIndex = ScanCount++;
@@ -613,7 +633,8 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 
 	Points->SetVariableFloat(LidarScanParams::PointPixelSize, FMath::Clamp(PointPixelSize, 0.5f, 8.f));
 	Points->SetVariableFloat(LidarScanParams::ViewPixelScale, ViewPixelScale);
-	Points->SetVariableFloat(LidarScanParams::PointDepthOffset, FMath::Clamp(PointDepthOffset, 0.f, 32.f));
+	Points->SetVariableFloat(LidarScanParams::SurfaceOffset, FMath::Clamp(SurfaceOffset, 0.f, 5.f));
+	Points->SetVariableFloat(LidarScanParams::ViewOffsetMaxCm, FMath::Clamp(ViewOffsetMaxCm, 0.f, 10.f));
 	Points->SetVariableLinearColor(LidarScanParams::PointColor, Emissive);
 	Points->SetVariableFloat(LidarScanParams::FadeDuration, FadeDuration);
 	Points->SetVariableFloat(LidarScanParams::AlphaFloor, AlphaFloor);

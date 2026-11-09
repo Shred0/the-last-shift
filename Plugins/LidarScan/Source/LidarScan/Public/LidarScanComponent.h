@@ -132,6 +132,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
 	float SampleJitter = 0.5f;
 
+	/**
+	 * Near-field thinning. A regular capture grid puts far more samples per square metre on surfaces close to the
+	 * capture origin (the density falls as 1 / depth^2), so the area around the scan reads as a solid sheet. Samples
+	 * closer than this depth are kept with probability (Depth / NearThinningDistance)^2, which makes the near field
+	 * roughly as dense in world space as a surface at NearThinningDistance; farther samples are all kept. The choice
+	 * is seeded per scan, so a scan is stable for its whole life. Depth is the planar depth along the capture's forward
+	 * axis. 0 = off. Applied on the next scan.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "1000.0", UIMin = "0.0", UIMax = "1000.0", Units = "cm"))
+	float NearThinningDistance = 250.f;
+
+	/** Samples closer than this planar depth produce no point at all. 0 = off. Applied on the next scan. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "200.0", UIMin = "0.0", UIMax = "200.0", Units = "cm"))
+	float MinSampleDepth = 40.f;
+
 	/** Excludes the owning actor's primitives from the depth capture. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Capture")
 	bool bHideOwnerInCapture = true;
@@ -147,15 +162,21 @@ public:
 	float PointPixelSize = 3.5f;
 
 	/**
-	 * Draw-time pull of each point towards the viewer, in point diameters. A point sits on the surface it was
-	 * sampled from; seen at a grazing angle, half of its sprite would sink into that surface and be clipped by the
-	 * depth test. Being relative to the point size, the pull is constant on screen and grows with distance
-	 * (with the defaults at 1080p and 90 degrees FOV: about 2 cm at 1 m, 20 cm at 10 m); the size is corrected for it,
-	 * so points stay PointPixelSize pixels. Points closer than the pull to an occluder can show through its edge.
-	 * 0 = off.
+	 * Draw-time lift of each point off the surface it was sampled from, along that surface's normal, towards the side
+	 * the surface was scanned from. A point sits on its surface; seen at a grazing angle, half of its sprite would sink
+	 * into it and be clipped by the depth test. A fixed world distance, unlike a pull towards the viewer, never grows
+	 * with viewing distance, so it cannot carry a point through a wall thicker than SurfaceOffset. 0 = off.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "32.0", UIMin = "0.0", UIMax = "32.0"))
-	float PointDepthOffset = 8.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "5.0", UIMin = "0.0", UIMax = "5.0", Units = "cm"))
+	float SurfaceOffset = 1.5f;
+
+	/**
+	 * For points that carry no surface normal (injected points): draw-time pull towards the current viewer, at most
+	 * this distance (and never more than half the distance to the viewer). Capped in world units for the same reason
+	 * as SurfaceOffset. 0 = off.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "10.0", UIMin = "0.0", UIMax = "10.0", Units = "cm"))
+	float ViewOffsetMaxCm = 2.5f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points")
 	FLinearColor PointColor = FLinearColor(0.4f, 0.85f, 1.f, 1.f);
