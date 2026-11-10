@@ -15,7 +15,7 @@ class UTextureRenderTarget2D;
 
 /**
  * One scan slot: a Niagara instance holding the points of one scan plus the depth target it was spawned from.
- * Slots are recycled oldest-first once MaxAliveScans is reached.
+ * Once MaxAliveScans is reached the oldest scan is evicted (its particles removed) and its slot holds the new scan.
  */
 USTRUCT()
 struct FLidarScanSlot
@@ -52,6 +52,29 @@ struct FLidarScanSlot
 	}
 };
 
+/** Diagnostics for one scan slot: which scan it holds and how many particles its point system currently simulates. */
+USTRUCT(BlueprintType)
+struct FLidarScanSlotStats
+{
+	GENERATED_BODY()
+
+	/** Scan the slot holds, -1 when idle. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Diagnostics")
+	int32 ScanIndex = INDEX_NONE;
+
+	/** True while the slot's scan is fading out after ClearScans. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Diagnostics")
+	bool bFadingOut = false;
+
+	/** Live particles of the captured-points emitter. GPU counts are read back with a latency of a frame or two. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Diagnostics")
+	int32 CapturedParticles = 0;
+
+	/** Live particles of the injected-points emitter, same latency. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Diagnostics")
+	int32 InjectedParticles = 0;
+};
+
 /** Scan lifecycle event: index of the scan (monotonic per component) and world time in seconds. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLidarScan, int32, ScanIndex, float, Timestamp);
 
@@ -60,7 +83,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLidarScan, int32, ScanIndex, flo
  *
  * Attach to a camera. Scan() renders scene depth once from this component's transform into a render target and
  * hands it to a GPU Niagara system that spawns one world-space point per depth sample. Points fade to a non-zero
- * floor; up to MaxAliveScans scans coexist, the oldest is recycled first.
+ * floor; up to MaxAliveScans scans coexist, beyond that the oldest is removed.
  */
 UCLASS(ClassGroup = (Lidar), meta = (BlueprintSpawnableComponent))
 class LIDARSCAN_API ULidarScanComponent : public USceneComponent
@@ -70,7 +93,7 @@ class LIDARSCAN_API ULidarScanComponent : public USceneComponent
 public:
 	ULidarScanComponent();
 
-	/** Captures depth once and spawns a new scan, recycling the oldest one if MaxAliveScans is reached. */
+	/** Captures depth once and spawns a new scan, removing the oldest one if MaxAliveScans is reached. */
 	UFUNCTION(BlueprintCallable, Category = "Lidar")
 	void Scan();
 
@@ -96,6 +119,10 @@ public:
 	/** Capture pose and coverage of every alive scan (those counted by GetAliveScanCount), oldest first. */
 	UFUNCTION(BlueprintPure, Category = "Lidar")
 	TArray<FLidarScanContext> GetAliveScans() const;
+
+	/** One entry per scan slot (idle ones included), in slot order: the scan it holds and its live particle counts. */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Diagnostics")
+	TArray<FLidarScanSlotStats> GetScanSlotStats() const;
 
 	// --- Injected points ---
 
@@ -277,7 +304,11 @@ public:
 
 	// --- Scans ---
 
-	/** Scans kept alive at once; the oldest is recycled first. */
+	/**
+	 * Ghost cap: scans kept alive at once. When a new scan needs a slot and all are taken, the oldest scan is removed
+	 * (its points disappear in both emitters) and its slot holds the new scan. Lowering it removes the oldest scans at
+	 * the next scan (or at once through ApplyLiveSettings).
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Scans", meta = (ClampMin = "1", ClampMax = "6", UIMin = "1", UIMax = "6"))
 	int32 MaxAliveScans = 3;
 

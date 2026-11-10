@@ -1190,9 +1190,32 @@ namespace EntityDebug
 		GMoveTest.bRunning = false;
 	}
 
+	/**
+	 * A test runs on its world's timers, which die with the world: if PIE stopped mid-test, nothing will ever clear
+	 * bRunning. A test whose world is gone or tearing down is therefore not running, and is marked so here.
+	 */
+	static bool IsLive(bool& bRunning, const TWeakObjectPtr<UWorld>& World)
+	{
+		if (bRunning)
+		{
+			const UWorld* TestWorld = World.Get();
+			if (!TestWorld || TestWorld->bIsTearingDown)
+			{
+				bRunning = false;
+			}
+		}
+		return bRunning;
+	}
+
 	static bool AnyTestRunning()
 	{
-		return GEntityTest.bRunning || GSpawnTest.bRunning || GEscalation.bRunning || GTransientTest.bRunning || GMoveTest.bRunning;
+		// Every test is checked (no short-circuit), so stale flags are all cleared at once.
+		bool bAny = IsLive(GEntityTest.bRunning, GEntityTest.World);
+		bAny |= IsLive(GSpawnTest.bRunning, GSpawnTest.World);
+		bAny |= IsLive(GEscalation.bRunning, GEscalation.World);
+		bAny |= IsLive(GTransientTest.bRunning, GTransientTest.World);
+		bAny |= IsLive(GMoveTest.bRunning, GMoveTest.World);
+		return bAny;
 	}
 
 	// ------------------------------------------------------------------------------------------------------------

@@ -581,7 +581,8 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsScanTestCommand(
 			UE_LOG(LogTheLastShift, Warning, TEXT("tls.ScanTest: no game world, time state or scan director."));
 			return;
 		}
-		if (GScanTest.bRunning || GCycleTest.bRunning)
+		// A test from a PIE session that was stopped mid-test left its flag set; only tests of this world count.
+		if ((GScanTest.bRunning && GScanTest.World.Get() == World) || (GCycleTest.bRunning && GCycleTest.World.Get() == World))
 		{
 			UE_LOG(LogTheLastShift, Warning, TEXT("tls.ScanTest: a test is already running."));
 			return;

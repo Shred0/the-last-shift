@@ -15,8 +15,12 @@
 #include "GameFramework/PlayerController.h"
 #include "NiagaraComponent.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "NiagaraEmitterHandle.h"
+#include "NiagaraEmitterInstance.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
+#include "NiagaraSystemInstance.h"
+#include "NiagaraSystemInstanceController.h"
 #include "SceneView.h"
 #include "TextureResource.h"
 #include "TimerManager.h"
@@ -77,11 +81,19 @@
  * PointColor.rgb already carries PointIntensity; the additive material multiplies rgb by alpha.
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
  *
+ * Slots and the ghost cap: one instance holds exactly one scan. At most MaxAliveScans instances exist; when a scan
+ * needs a slot and none is idle, the oldest scan's slot is reused and that scan is evicted: the component completes
+ * the instance (DeactivateImmediate, which kills every particle of both emitters) and re-activates it for the new
+ * scan in the same frame, so the evicted scan is gone by the frame the new one spawns. The system must not rely on a
+ * reset (Activate(true)) to clear particles: a Niagara reset restarts the emitters but keeps live particles. Every
+ * per-scan value (Capture*, TanHalfFov, ScanRealAge, the Injected arrays) therefore always describes the only scan
+ * in the instance. Neither emitter needs anything for this: removal is the same rule for both.
+ *
  * Injected points (not produced by the depth capture) write LidarSurfacePosition and Position, and LidarNormal = 0:
  * they get the toward-viewer offset capped by ViewOffsetMaxCm and an angle term of 1. MinSampleDepth and the near
  * thinning are capture-sampling rules and do not apply to them.
  *
- * Injected emitter (second emitter of the same system, so it shares the instance: ghost cap, ClearScans, recycling).
+ * Injected emitter (second emitter of the same system, so it shares the instance: ghost cap, ClearScans, eviction).
  * Spawn (once per activation): burst of InjectedPointCount particles; particle i reads InjectedPositions[i] (P),
  * InjectedColors[i], InjectedParams[i] = (FadeWeight, OcclusionTolerance) and InjectedTransient[i] = (Hold, Vanish).
  * With d = dot(P - CaptureOrigin,
@@ -141,6 +153,10 @@ namespace LidarScanParams
 	static const FName ScanRealAge(TEXT("User.ScanRealAge"));
 	static const FName InjectedIntensity(TEXT("User.InjectedIntensity"));
 	static const FName FadeOutAlpha(TEXT("User.FadeOutAlpha"));
+
+	/** Emitter names in the point system, used only by GetScanSlotStats. */
+	static const FName CapturedEmitterName(TEXT("Points"));
+	static const FName InjectedEmitterName(TEXT("Injected"));
 }
 
 bool FLidarScanContext::IsInCoverage(const FVector& WorldPosition, double& OutDepth) const
@@ -280,6 +296,15 @@ void ULidarScanComponent::Scan()
 	}
 
 	FLidarScanSlot& Slot = Slots[SlotIndex];
+	if (Slot.IsActive())
+	{
+		// Reusing the slot of a live scan: that scan is evicted. Re-activating with a reset alone would keep its
+		// particles (a Niagara system reset restarts the emitters but keeps live particles), so the slot would keep
+		// every scan it ever held. Completing the instance kills the particles of both emitters now; the new scan's
+		// spawn below re-activates it.
+		ReleaseSlot(Slot);
+	}
+
 	bool bNewTarget = false;
 	UTextureRenderTarget2D* Target = EnsureDepthTarget(Slot, bNewTarget);
 	UNiagaraComponent* Points = Slot.Points;
@@ -535,13 +560,48 @@ TArray<FLidarScanContext> ULidarScanComponent::GetAliveScans() const
 	return Result;
 }
 
+TArray<FLidarScanSlotStats> ULidarScanComponent::GetScanSlotStats() const
+{
+	TArray<FLidarScanSlotStats> Result;
+	Result.Reserve(Slots.Num());
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		FLidarScanSlotStats& Stats = Result.AddDefaulted_GetRef();
+		Stats.ScanIndex = Slot.ScanIndex;
+		Stats.bFadingOut = Slot.IsFadingOut();
+
+		const UNiagaraComponent* Points = Slot.Points;
+		const FNiagaraSystemInstanceControllerConstPtr Controller = Points ? Points->GetSystemInstanceController() : nullptr;
+		const FNiagaraSystemInstance* Instance = Controller.IsValid() ? Controller->GetSystemInstance_Unsafe() : nullptr;
+		if (!Instance)
+		{
+			continue;
+		}
+		for (const FNiagaraEmitterInstanceRef& Emitter : Instance->GetEmitters())
+		{
+			const FName Name = Emitter->GetEmitterHandle().GetName();
+			const int32 Count = Emitter->IsComplete() ? 0 : Emitter->GetNumParticles();
+			if (Name == LidarScanParams::InjectedEmitterName)
+			{
+				Stats.InjectedParticles += Count;
+			}
+			else if (Name == LidarScanParams::CapturedEmitterName)
+			{
+				Stats.CapturedParticles += Count;
+			}
+		}
+	}
+	return Result;
+}
+
 void ULidarScanComponent::ActivateScanPoints(int32 ScanIndex)
 {
 	for (const FLidarScanSlot& Slot : Slots)
 	{
 		if (Slot.ScanIndex == ScanIndex && Slot.Points)
 		{
-			// Reset: clears the previous scan held by this slot and re-runs the one-shot spawn burst.
+			// Re-runs the one-shot spawn burst. The slot holds no particles here: it is new, was released by ClearScans,
+			// or its previous scan was evicted by Scan(); a reset alone would not remove them.
 			Slot.Points->Activate(true);
 			break;
 		}
@@ -718,7 +778,7 @@ int32 ULidarScanComponent::AcquireSlot()
 		return Slots.Num() - 1;
 	}
 
-	// 3. Recycle the oldest scan.
+	// 3. Reuse the slot of the oldest scan (Scan() evicts it).
 	int32 Oldest = 0;
 	for (int32 Index = 1; Index < Slots.Num(); ++Index)
 	{
