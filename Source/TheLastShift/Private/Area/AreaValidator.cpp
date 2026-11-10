@@ -2,8 +2,6 @@
 
 #include "Area/AreaValidator.h"
 
-#if WITH_EDITOR
-
 #include "Area/AreaExit.h"
 #include "Area/AreaGenerator.h"
 #include "Area/AreaInfo.h"
@@ -23,6 +21,16 @@ namespace AreaValidation
 {
 	static constexpr int32 MaxDetails = 8;
 	static const FVector ProjectExtent(100.f, 100.f, 300.f);
+
+	/** Editor label when there is one (editor builds), else the object name. */
+	static FString Label(const AActor* Actor)
+	{
+#if WITH_EDITOR
+		return Actor->GetActorLabel();
+#else
+		return Actor->GetName();
+#endif
+	}
 
 	static FString Where(const FVector& P) { return FString::Printf(TEXT("(%.0f, %.0f, %.0f)"), P.X, P.Y, P.Z); }
 
@@ -54,6 +62,7 @@ namespace AreaValidation
 	{
 		UWorld* World = nullptr;
 		AAreaGenerator* Generator = nullptr;
+		const FAreaRecipe* Recipe = nullptr;
 		AAreaInfo* Info = nullptr;
 		UNavigationSystemV1* NavSys = nullptr;
 		ARecastNavMesh* Nav = nullptr;
@@ -165,8 +174,8 @@ namespace AreaValidation
 		R.Name = TEXT("start-to-exit path");
 		double Length = 0.0;
 		const bool bPath = C.PathLength(C.Start, C.Exit, Length);
-		const float Min = C.Generator->RouteLengthMin;
-		const float Max = C.Generator->RouteLengthMax;
+		const float Min = C.Recipe->RouteLengthMin;
+		const float Max = C.Recipe->RouteLengthMax;
 		R.bPass = bPath && Length >= Min && Length <= Max;
 		R.Summary = bPath
 			? FString::Printf(TEXT("path %.1f m (range %.0f-%.0f m)"), Length / 100.0, Min / 100.f, Max / 100.f)
@@ -190,7 +199,7 @@ namespace AreaValidation
 			if (!C.Reachable(Residue->GetActorLocation()))
 			{
 				++Unreachable;
-				AddDetail(R, FString::Printf(TEXT("residue %s unreachable at %s"), *Residue->GetActorLabel(), *Where(Residue->GetActorLocation())));
+				AddDetail(R, FString::Printf(TEXT("residue %s unreachable at %s"), *Label(Residue), *Where(Residue->GetActorLocation())));
 			}
 		}
 		const TArray<APowerTerminal*> Terminals = All<APowerTerminal>(World);
@@ -199,7 +208,7 @@ namespace AreaValidation
 			if (!C.Reachable(TerminalFront(Terminal)))
 			{
 				++Unreachable;
-				AddDetail(R, FString::Printf(TEXT("terminal %s unreachable at %s"), *Terminal->GetActorLabel(), *Where(TerminalFront(Terminal))));
+				AddDetail(R, FString::Printf(TEXT("terminal %s unreachable at %s"), *Label(Terminal), *Where(TerminalFront(Terminal))));
 			}
 		}
 		const TArray<ADoorDevice*> Doors = All<ADoorDevice>(World);
@@ -211,23 +220,23 @@ namespace AreaValidation
 				if (!C.Reachable(P))
 				{
 					++Unreachable;
-					AddDetail(R, FString::Printf(TEXT("door %s side %+.0f unreachable at %s"), *Door->GetActorLabel(), Side, *Where(P)));
+					AddDetail(R, FString::Printf(TEXT("door %s side %+.0f unreachable at %s"), *Label(Door), Side, *Where(P)));
 				}
 			}
 		}
-		const int32 Gates = C.Generator->GetGateCount();
+		const int32 Gates = C.Recipe->GetGateCount();
 		const int32 LightGroups = All<ALightGroupDevice>(World).Num();
 		const int32 Entities = All<AEntity>(World).Num();
 		const int32 Starts = All<APlayerStart>(World).Num();
 		const int32 Exits = All<AAreaExit>(World).Num();
-		const bool bCounts = Residues == C.Generator->ResidueCount && Regenerating == Gates && Doors.Num() == Gates
-			&& Terminals.Num() == Gates + C.Generator->LightGroupCount && LightGroups == C.Generator->LightGroupCount
+		const bool bCounts = Residues == C.Recipe->ResidueCount && Regenerating == Gates && Doors.Num() == Gates
+			&& Terminals.Num() == Gates + C.Recipe->LightGroupCount && LightGroups == C.Recipe->LightGroupCount
 			&& Entities == 1 && Starts == 1 && Exits == 1;
 		if (!bCounts)
 		{
 			AddDetail(R, FString::Printf(TEXT("counts: residues %d/%d (regenerating %d/%d), doors %d/%d, terminals %d/%d, light groups %d/%d, entities %d/1, starts %d/1, exits %d/1"),
-				Residues, C.Generator->ResidueCount, Regenerating, Gates, Doors.Num(), Gates, Terminals.Num(), Gates + C.Generator->LightGroupCount,
-				LightGroups, C.Generator->LightGroupCount, Entities, Starts, Exits));
+				Residues, C.Recipe->ResidueCount, Regenerating, Gates, Doors.Num(), Gates, Terminals.Num(), Gates + C.Recipe->LightGroupCount,
+				LightGroups, C.Recipe->LightGroupCount, Entities, Starts, Exits));
 		}
 		R.bPass = Unreachable == 0 && bCounts;
 		R.Summary = FString::Printf(TEXT("%d residues (%d regenerating), %d terminals, %d doors; unreachable %d; counts %s"),
@@ -247,7 +256,7 @@ namespace AreaValidation
 		TArray<FString> Lines;
 		for (const ADoorDevice* Door : Doors)
 		{
-			const FString Name = Door->GetActorLabel();
+			const FString Name = Label(Door);
 			const APowerTerminal* Terminal = TerminalOf(World, Door);
 			if (!Terminal)
 			{
@@ -565,7 +574,8 @@ FAreaValidationResult AreaValidator::Validate(UWorld* World)
 	C.World = World;
 	if (World)
 	{
-		for (TActorIterator<AAreaGenerator> It(World); It; ++It) { C.Generator = *It; break; }
+		C.Generator = AAreaGenerator::Find(World);
+		C.Recipe = C.Generator ? C.Generator->GetRecipe() : nullptr;
 		C.Info = AAreaInfo::Find(World);
 		C.NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
 		C.Nav = C.NavSys ? Cast<ARecastNavMesh>(C.NavSys->GetDefaultNavDataInstance(FNavigationSystem::DontCreate)) : nullptr;
@@ -573,10 +583,10 @@ FAreaValidationResult AreaValidator::Validate(UWorld* World)
 	}
 	const TArray<APlayerStart*> Starts = World ? All<APlayerStart>(World) : TArray<APlayerStart*>();
 	const TArray<AAreaExit*> Exits = World ? All<AAreaExit>(World) : TArray<AAreaExit*>();
-	if (!World || !C.Generator || !C.Info || !C.Nav || !C.Entity || Starts.Num() == 0 || Exits.Num() == 0)
+	if (!World || !C.Generator || !C.Recipe || !C.Info || !C.Nav || !C.Entity || Starts.Num() == 0 || Exits.Num() == 0)
 	{
-		Result.FatalError = FString::Printf(TEXT("needs a generator (%d), an area info (%d), a recast navmesh (%d), an entity (%d), a PlayerStart (%d) and an exit (%d)"),
-			C.Generator ? 1 : 0, C.Info ? 1 : 0, C.Nav ? 1 : 0, C.Entity ? 1 : 0, Starts.Num(), Exits.Num());
+		Result.FatalError = FString::Printf(TEXT("needs a generator (%d) with a recipe (%d), an area info (%d), a recast navmesh (%d), an entity (%d), a PlayerStart (%d) and an exit (%d)"),
+			C.Generator ? 1 : 0, C.Recipe ? 1 : 0, C.Info ? 1 : 0, C.Nav ? 1 : 0, C.Entity ? 1 : 0, Starts.Num(), Exits.Num());
 		return Result;
 	}
 	C.Pawn = GetAreaPawnMetrics(World);
@@ -608,4 +618,3 @@ FAreaValidationResult AreaValidator::Validate(UWorld* World)
 	return Result;
 }
 
-#endif // WITH_EDITOR

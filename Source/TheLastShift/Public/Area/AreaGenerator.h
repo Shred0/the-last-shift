@@ -5,30 +5,102 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Area/AreaTypes.h"
+#include "Area/AreaValidator.h"
 #include "AreaGenerator.generated.h"
 
 class ADoorDevice;
 class AEntity;
 class ALightGroupDevice;
+class ANavMeshBoundsVolume;
+class APawn;
 class APowerTerminal;
 class AResidue;
+class UBoxComponent;
+class UInstancedStaticMeshComponent;
 class UMaterialInterface;
+class UPCGComponent;
+class UPCGGraphInterface;
 class UStaticMesh;
 
+/** Where the generation of the current area stands. */
+UENUM(BlueprintType)
+enum class EAreaGenerationState : uint8
+{
+	Idle,
+	/** PCG is building the geometry; the gameplay actors are placed. */
+	BuildingWorld,
+	/** Geometry done, the navmesh is being rebuilt. */
+	BuildingNavigation,
+	Ready,
+	/** Every seed tried failed (see LastError). */
+	Failed
+};
+
+/** A kind of box the plan publishes to the PCG graphs. */
+UENUM(BlueprintType)
+enum class EAreaPieceKind : uint8
+{
+	Floors,
+	Walls,
+	Curbs,
+	Pillars,
+	Ceilings,
+	Backdrop
+};
+
+THELASTSHIFT_API const TCHAR* LexToString(EAreaPieceKind Kind);
+
+/** The boxes of one kind, as the plan lays them out (structure kinds: XY footprint only; backdrop: full box). */
+USTRUCT()
+struct THELASTSHIFT_API FAreaPieceList
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<FBox> Boxes;
+};
+
+/** Heights structure footprints are extruded with (the generator's tunables). */
+struct THELASTSHIFT_API FAreaPieceHeights
+{
+	float FloorThickness = -1.f;
+	float WallHeight = -1.f;
+	float CurbHeight = -1.f;
+
+	bool IsValid() const { return FloorThickness > 0.f && WallHeight > 0.f && CurbHeight > 0.f; }
+
+	/**
+	 * World transform of one engine cube (100 cm) filling Box as Kind: floors from -FloorThickness to 0, walls and
+	 * pillars from -FloorThickness to WallHeight, curbs from -FloorThickness to CurbHeight, ceilings from WallHeight to
+	 * WallHeight + FloorThickness; backdrop boxes keep their own Z. The one formula used for the published plan, the
+	 * layout hash and the plan check.
+	 */
+	FTransform MakeTransform(EAreaPieceKind Kind, const FBox& Box) const;
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAreaReady);
+DECLARE_MULTICAST_DELEGATE_TwoParams(FOnAreaGenerationFinished, class AAreaGenerator* /*Generator*/, bool /*bPassed*/);
+
 /**
- * Editor-only actor that lays out a whole area from a recipe (its properties) and a seed, and bakes it into the map:
- * Generate() spawns the geometry, the residues, the gates (door + terminal + regenerating residue), the light groups,
- * the entity, the PlayerStart, the exit and a NavMeshBoundsVolume fitted to the route, then builds the navmesh. The
- * spawned actors are saved with the map; nothing is generated at runtime. Same recipe and seed, same area.
+ * Builds the map's area at load, behind the travel screen, from the act's recipe and seed in UTheLastShiftSettings
+ * (the test recipe outside the map list). Same recipe and seed, same area; nothing generated is saved in the map.
  *
- * Every spawned actor carries AAreaInfo::GeneratedTag, so Clear() removes exactly what Generate() made. Never move a
- * generated actor by hand: change the recipe or the seed and regenerate. The generation code is compiled only in
- * editor builds and the actor is stripped from cooked maps.
+ * On BeginPlay: (1) read the recipe and seed; (2) plan the route with the planner; (3) publish the plan as one array
+ * of box transforms per kind (the Plan* properties, one engine cube of 100 cm per box) and run the PCG graphs on it
+ * with the same seed (StructureGraph: floors, walls, curbs, pillars, ceilings; BackdropGraph: the far masses); (4) spawn the gameplay actors in their slots (residues,
+ * gates with door, terminal and regenerating residue, light groups, exit, area info) and move the map's PlayerStart
+ * and entity to theirs; (5) fit the map's NavMeshBoundsVolume to the route, wait for PCG and for the dynamic navmesh;
+ * (6) run the validator; (7) broadcast OnAreaReady. Until then the player pawn cannot move, look or stop time and
+ * StdCore's transition screen is held black. A seed that cannot be built or fails validation is logged and the next
+ * seed is tried, up to SeedAttempts times.
  *
- * Layout: an axis-aligned grid of half-metre cells. The route is a one-way chain of segments heading +X, turning +Y/-Y
- * but never back; closed segments get walls and a ceiling, open segments get a curb on every edge (taller than the
- * pawn's step, so the player cannot fall); all walkable floors are at Z = 0. Segments never touch except where they
- * join, keeping SegmentClearance from each other, so the route has no shortcut.
+ * The planner works on an axis-aligned grid of half-metre cells. The route is a one-way chain of segments heading +X,
+ * turning +Y/-Y but never back; closed segments get walls and a ceiling, open segments get a curb on every edge
+ * (taller than the pawn's step, so the player cannot fall); all walkable floors are at Z = 0. Segments never touch
+ * except where they join, keeping SegmentClearance from each other, so the route has no shortcut. C++ decides where
+ * everything the player interacts with goes; PCG only builds the boxes of the plan.
+ *
+ * In the editor, Generate() and Clear() preview the area of the map's act; the preview is transient and saves nothing.
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API AAreaGenerator : public AActor
@@ -38,29 +110,29 @@ class THELASTSHIFT_API AAreaGenerator : public AActor
 public:
 	AAreaGenerator();
 
-	// --- Recipe ---
+	/** The generator of World, or null. */
+	static AAreaGenerator* Find(const UWorld* World);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Recipe", meta = (ClampMin = "0", ClampMax = "999999"))
-	int32 Seed = 1;
+	/** True when World has no area generator, or its area is ready. */
+	static bool IsAreaReady(const UWorld* World);
 
-	/** The route, in order, from the PlayerStart to the exit. The Gate entries are the area's gates. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Recipe")
-	TArray<FAreaSegmentSpec> Segments;
+	// --- Generation ---
 
-	/** Residues in the area, the gates' regenerating residues included (one per gate). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Recipe", meta = (ClampMin = "0", ClampMax = "32"))
-	int32 ResidueCount = 6;
+	/** Seeds tried at load, from the act's seed upwards, before the generation gives up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Generation", meta = (ClampMin = "1", ClampMax = "32"))
+	int32 SeedAttempts = 8;
 
-	/** Groups of lights paid at their own terminal, placed in closed segments. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Recipe", meta = (ClampMin = "0", ClampMax = "4"))
-	int32 LightGroupCount = 1;
+	/** Builds the floors, walls, curbs, pillars and ceilings from the published plan (PCG_AreaStructure). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Generation")
+	TObjectPtr<UPCGGraphInterface> StructureGraph;
 
-	/** Navigation path length from the PlayerStart to the exit that the validator accepts (rule 1). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Recipe", meta = (ClampMin = "0.0", ClampMax = "500000.0", Units = "cm"))
-	float RouteLengthMin = 25000.f;
+	/** Builds the far backdrop from the published plan (PCG_AreaBackdrop). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Generation")
+	TObjectPtr<UPCGGraphInterface> BackdropGraph;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Recipe", meta = (ClampMin = "0.0", ClampMax = "500000.0", Units = "cm"))
-	float RouteLengthMax = 55000.f;
+	/** Longest wait for PCG and for the navmesh before the attempt fails. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Generation", meta = (ClampMin = "1.0", ClampMax = "120.0", Units = "s"))
+	float BuildTimeoutSeconds = 30.f;
 
 	// --- Backdrop ---
 
@@ -169,6 +241,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Shape", meta = (ClampMin = "0", ClampMax = "20"))
 	int32 HallMaxDetourEdges = 2;
 
+	/**
+	 * How much shorter the walked navigation path is expected to be than the planned route centreline (it cuts corners
+	 * in rooms and halls). A layout is kept only if its centreline is at least RouteLengthMin / (1 - RouteCornerCut),
+	 * so the validator's path (rule 1) does not fall under the recipe's minimum.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Shape", meta = (ClampMin = "0.0", ClampMax = "0.3"))
+	float RouteCornerCut = 0.1f;
+
 	/** Whole layouts tried (each from a seed derived from Seed) until one fits and its route length is in range. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Shape", meta = (ClampMin = "1", ClampMax = "32"))
 	int32 LayoutAttempts = 8;
@@ -193,6 +273,13 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "1.05", ClampMax = "5.0"))
 	float TerminalDistanceFactor = 1.5f;
+
+	/**
+	 * Gates whose door stays open once paid (PoweredSeconds 0): the terminal stands at least this far back along the
+	 * route from the door, so it never blocks the doorway.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "200.0", ClampMax = "5000.0", Units = "cm"))
+	float UntimedTerminalDistance = 600.f;
 
 	/** The gate's regenerating residue sits this far back along the route from its terminal. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "100.0", ClampMax = "5000.0", Units = "cm"))
@@ -236,17 +323,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
 	TSubclassOf<ALightGroupDevice> LightGroupClass;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
-	TSubclassOf<AEntity> EntityClass;
-
-	/** Block mesh of every piece of geometry (the engine's 100 cm cube). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
-	TObjectPtr<UStaticMesh> BlockMesh;
-
-	/** Material of every piece of geometry (the greybox material). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
-	TObjectPtr<UMaterialInterface> GreyboxMaterial;
-
 	// --- Validation (tls.AreaValidate) ---
 
 	/** Rule 4: closed segments are sampled along the route this often. */
@@ -263,38 +339,210 @@ public:
 
 	// --- Actions and state ---
 
-	/** Number of Gate entries in Segments (the area's gate count). */
+	/** Act of this map (1-4), 0 outside the map list (the test recipe). Set when the generation starts. */
+	UFUNCTION(BlueprintPure, Category = "Area")
+	int32 GetAct() const { return Act; }
+
+	/** The recipe being built, read from UTheLastShiftSettings (null when the act has none). */
+	const FAreaRecipe* GetRecipe() const;
+
+	/** Number of Gate entries in the recipe (the area's gate count). */
 	UFUNCTION(BlueprintPure, Category = "Area")
 	int32 GetGateCount() const;
 
+	UFUNCTION(BlueprintPure, Category = "Area")
+	bool IsReady() const { return State == EAreaGenerationState::Ready; }
+
+	UFUNCTION(BlueprintPure, Category = "Area")
+	EAreaGenerationState GetGenerationState() const { return State; }
+
+	/** Hash of the generated layout (plan, gameplay actors, start and entity poses); 0 before the first ready. */
+	UFUNCTION(BlueprintPure, Category = "Area")
+	int64 GetLayoutHash() const { return LayoutHash; }
+
+	/** Route centreline length of the current plan. */
+	UFUNCTION(BlueprintPure, Category = "Area", meta = (Units = "cm"))
+	float GetRouteLength() const { return RouteLength; }
+
+	/** Seed of the current (or last) attempt. */
+	UFUNCTION(BlueprintPure, Category = "Area")
+	int32 GetSeed() const { return Seed; }
+
+	/** Instances PCG built for this area (all kinds). */
+	UFUNCTION(BlueprintPure, Category = "Area")
+	int32 GetPCGInstanceCount() const;
+
+	/** Instances PCG built of one kind. */
+	int32 GetPCGInstanceCountOf(EAreaPieceKind Kind) const;
+
+	/** The PCG-built instanced components of Kind on this actor (identified by the component tag "Area<Kind>"). */
+	TArray<UInstancedStaticMeshComponent*> GetPCGComponents(EAreaPieceKind Kind) const;
+
+	/** Real-time seconds from the start of the generation to ready (all attempts). */
+	UFUNCTION(BlueprintPure, Category = "Area", meta = (Units = "s"))
+	float GetTimeToReadySeconds() const { return TimeToReadySeconds; }
+
+	/** The boxes of Kind in the current plan. */
+	const TArray<FBox>& GetPublishedPieces(EAreaPieceKind Kind) const;
+
+	/** The heights structure footprints are extruded with (this generator's tunables). */
+	FAreaPieceHeights GetPieceHeights() const;
+
+	// --- The plan as the PCG graphs read it (Get Actor Property on Self): one engine-cube transform per box ---
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanFloors;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanWalls;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanCurbs;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanPillars;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanCeilings;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanBackdrop;
+
+	/**
+	 * Clears and regenerates the area for InSeed in this world (runtime: tls.AreaGenerate, seed sweeps). With
+	 * bInTryNextSeeds, a seed that fails is followed by the next ones as at load. Ends with OnGenerationFinished.
+	 */
+	void Regenerate(int32 InSeed, bool bInTryNextSeeds);
+
+	/** Rebuilds the navmesh of the current content, then validates (tls.AreaBreak). Ends with OnGenerationFinished. */
+	void RevalidateAfterNavigationRebuild();
+
+	/** Removes the generated actors and the PCG output; returns the actors removed. */
+	int32 ClearArea();
+
+	/**
+	 * Hash of the generated layout, in the form of Brief 4b-1 (so an unchanged plan gives the same hash): every actor
+	 * with AAreaInfo::GeneratedTag, the plan's boxes per kind in plan order, the PlayerStart, the entity, the navmesh
+	 * bounds position and the area info. OutLines is the number of items hashed; OutText (optional) receives them.
+	 */
+	int64 ComputeLayoutHash(int32& OutLines, TArray<FString>* OutText = nullptr) const;
+
+	/** Result of the last validation (load, regeneration or revalidation). */
+	const FAreaValidationResult& GetLastValidation() const { return LastValidation; }
+
+	/** True when PCG built exactly the plan's boxes (per kind, compared as sets of rounded transforms). */
+	bool DoesPCGMatchPlan(FString& OutWhy) const;
+
 #if WITH_EDITOR
-	/** Clears the previous generation and bakes the area for Seed. Logs the result; see LastError on failure. */
+	/** Editor preview of the map's act and seed (transient: saves nothing, no navmesh wait, no validation). */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Area")
 	void Generate();
 
-	/** Removes every actor this level's generation made (AAreaInfo::GeneratedTag). */
+	/** Removes the editor preview. */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Area")
 	void Clear();
-
-	/** Generate() that reports: false and OutError when the recipe cannot be laid out for Seed. */
-	bool GenerateArea(FString& OutError, bool bBuildNavigation = true);
-
-	/** Removes the generated actors; returns how many. */
-	int32 ClearArea();
-
-	/** Synchronous navmesh build of this world; returns the seconds it took (-1 when there is no navigation system). */
-	float BuildNavigation();
 #endif
+
+	/** The area is generated, validated and playable (the player is released). */
+	UPROPERTY(BlueprintAssignable, Category = "Area")
+	FOnAreaReady OnAreaReady;
+
+	/** Every generation or revalidation end (also failed ones), with the validation result. */
+	FOnAreaGenerationFinished OnGenerationFinished;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State")
 	FString LastError;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State")
-	int64 LastLayoutHash = 0;
-
+	/** Items hashed by the last layout hash. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State")
 	int32 LastActorCount = 0;
 
+	/** Planning and spawning time of the last attempt (PCG, navmesh and validation excluded). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State", meta = (Units = "s"))
 	float LastGenerationSeconds = 0.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State", meta = (Units = "s"))
+	float LastPCGSeconds = 0.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State", meta = (Units = "s"))
+	float LastNavigationSeconds = 0.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State", meta = (Units = "s"))
+	float LastValidationSeconds = 0.f;
+
+	/** Seeds tried by the last generation (1 = the first one passed). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State")
+	int32 LastSeedsTried = 0;
+
+	/** Result of the last validation. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State")
+	bool bLastValidationPassed = false;
+
+	/** Whether PCG built exactly the plan, at the last ready. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State")
+	bool bLastPCGMatchedPlan = false;
+
+protected:
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void Tick(float DeltaSeconds) override;
+
+	/** Bounds of the actor for PCG (which refuses an actor without bounds): no collision, no navigation, never drawn. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	TObjectPtr<UBoxComponent> PCGBounds;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	TObjectPtr<UPCGComponent> StructurePCG;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	TObjectPtr<UPCGComponent> BackdropPCG;
+
+private:
+	void StartGeneration(int32 InSeed, bool bInTryNextSeeds);
+	/** Starts InSeed, and the next seeds while they cannot be planned (and bTryNextSeeds allows). */
+	void TryAttempt(int32 InSeed);
+	/** Every allowed seed failed: the player is released on an invalid area, with an error. */
+	void GiveUp();
+	/** Plans and spawns everything for InSeed and starts PCG; false (and LastError) when the plan cannot be built. */
+	bool StartAttempt(int32 InSeed, FString& OutError);
+	void FailAttempt(const FString& Why);
+	void FinishWithValidation();
+	void BecomeReady();
+	void StartNavigationRebuild();
+	void RunPCG(UPCGComponent* Component, UPCGGraphInterface* Graph);
+	void HoldPlayer();
+	void ReleasePlayer();
+	void SetCoverHold(bool bHold);
+	void FitNavigationBounds();
+	void HandlePCGGenerated(UPCGComponent* Component);
+
+	EAreaGenerationState State = EAreaGenerationState::Idle;
+	int32 Act = 0;
+	int32 Seed = 0;
+	int32 FirstSeed = 0;
+	bool bTryNextSeeds = true;
+	bool bRevalidateOnly = false;
+	int64 LayoutHash = 0;
+	float RouteLength = 0.f;
+	float TimeToReadySeconds = 0.f;
+	double GenerationStartTime = 0.0;
+	double PhaseStartTime = 0.0;
+	int32 NavigationIdleTicks = 0;
+	bool bNavigationRequested = false;
+	bool bStructureDone = false;
+	bool bBackdropDone = false;
+	bool bCoverHeld = false;
+	TWeakObjectPtr<APawn> HeldPawn;
+
+	FAreaValidationResult LastValidation;
+
+	/** The current plan's boxes, by EAreaPieceKind. */
+	UPROPERTY(Transient)
+	TArray<FAreaPieceList> PublishedPieces;
+
+	/** Bounds the navmesh is fitted to (the walkable route, grown). */
+	FBox NavigationBounds = FBox(ForceInit);
+	FVector PlannedStart = FVector::ZeroVector;
+	FRotator PlannedStartRotation = FRotator::ZeroRotator;
+	FVector PlannedEntity = FVector::ZeroVector;
 };

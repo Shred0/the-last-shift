@@ -63,3 +63,13 @@ FAreaPawnMetrics GetAreaPawnMetrics(const UWorld* World)
 	Metrics.EyeHeight = Character->BaseEyeHeight;
 	return Metrics;
 }
+
+int32 FAreaRecipe::GetGateCount() const
+{
+	int32 Count = 0;
+	for (const FAreaSegmentSpec& Spec : Segments)
+	{
+		Count += Spec.Type == EAreaSegmentType::Gate ? 1 : 0;
+	}
+	return Count;
+}

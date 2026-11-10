@@ -20,16 +20,13 @@ public class TheLastShift : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			"DeveloperSettings",
 			"LidarScan",
 			"NavigationSystem",
+			"PCG",
 			"StdCore",
 			"SlateCore"
 		});
 
-		// Area generator and validator (editor-time): volume brushes, editor world access.
-		if (Target.bBuildEditor)
-		{
-			PrivateDependencyModuleNames.Add("UnrealEd");
-		}
 	}
 }

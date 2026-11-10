@@ -65,9 +65,38 @@ struct THELASTSHIFT_API FAreaSegmentSpec
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (EditCondition = "Type == EAreaSegmentType::Hall"))
 	bool bWeb = true;
 
-	/** Gate only: Normal-time seconds the door stays open once paid (the door's PoweredSeconds). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0.5", ClampMax = "120.0", Units = "s", EditCondition = "Type == EAreaSegmentType::Gate"))
+	/** Gate only: Normal-time seconds the door stays open once paid (the door's PoweredSeconds); 0 = it stays open once paid. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0.0", ClampMax = "120.0", Units = "s", EditCondition = "Type == EAreaSegmentType::Gate"))
 	float PoweredSeconds = 6.f;
+};
+
+/** What an area is made of: the route's segments in order, what is placed along it, and the route length accepted. */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FAreaRecipe
+{
+	GENERATED_BODY()
+
+	/** The route, in order, from the PlayerStart to the exit. The Gate entries are the area's gates. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area")
+	TArray<FAreaSegmentSpec> Segments;
+
+	/** Residues in the area, the gates' regenerating residues included (one per gate). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0", ClampMax = "32"))
+	int32 ResidueCount = 6;
+
+	/** Groups of lights paid at their own terminal, placed in closed segments. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 LightGroupCount = 1;
+
+	/** Navigation path length from the PlayerStart to the exit that the validator accepts (rule 1). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0.0", ClampMax = "500000.0", Units = "cm"))
+	float RouteLengthMin = 25000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0.0", ClampMax = "500000.0", Units = "cm"))
+	float RouteLengthMax = 55000.f;
+
+	/** Number of Gate entries in Segments. */
+	int32 GetGateCount() const;
 };
 
 /** A generated segment, as read back by the validator. */

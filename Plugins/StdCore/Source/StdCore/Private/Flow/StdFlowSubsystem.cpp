@@ -13,6 +13,7 @@
 #include "StdLog.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBorder.h"
+#include "Widgets/Text/STextBlock.h"
 
 namespace StdFlow
 {
@@ -43,6 +44,7 @@ void UStdFlowSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	{
 		// Opaque from the start: the overlay is attached as soon as the first world exists, before its first frame.
 		Alpha = 1.f;
+		CoveredSince = FPlatformTime::Seconds();
 		SetState(EStdFlowState::Loading);
 		SetInputBlocked(true);
 	}
@@ -64,6 +66,11 @@ void UStdFlowSubsystem::Deinitialize()
 
 bool UStdFlowSubsystem::TravelToLevel(TSoftObjectPtr<UWorld> Level)
 {
+	return TravelToLevelWithOptions(Level, FStdTravelOptions());
+}
+
+bool UStdFlowSubsystem::TravelToLevelWithOptions(TSoftObjectPtr<UWorld> Level, const FStdTravelOptions& Options)
+{
 	if (IsTransitioning())
 	{
 		UE_LOG(LogStdCore, Log, TEXT("TravelToLevel(%s) ignored: a transition is already running."), *Level.ToString());
@@ -84,8 +91,10 @@ bool UStdFlowSubsystem::TravelToLevel(TSoftObjectPtr<UWorld> Level)
 		return false;
 	}
 
-	UE_LOG(LogStdCore, Log, TEXT("Travelling to %s."), *PackageName);
+	UE_LOG(LogStdCore, Log, TEXT("Travelling to %s (label '%s', covered at least %.2f s)."), *PackageName, *Options.Label.ToString(), Options.MinCoveredSeconds);
 	PendingLevel = Level;
+	Label = Options.Label;
+	MinCoveredSeconds = FMath::Clamp(Options.MinCoveredSeconds, 0.f, 60.f);
 	bQuitAfterFadeOut = false;
 	BeginFadeOut();
 	return true;
@@ -133,6 +142,7 @@ bool UStdFlowSubsystem::Tick(float DeltaTime)
 		Alpha = Settings->FadeOutDuration > 0.f ? FMath::Min(Alpha + Step / Settings->FadeOutDuration, 1.f) : 1.f;
 		if (Alpha >= 1.f)
 		{
+			CoveredSince = FPlatformTime::Seconds();
 			HandleFadeOutFinished();
 		}
 		break;
@@ -146,8 +156,15 @@ bool UStdFlowSubsystem::Tick(float DeltaTime)
 
 	case EStdFlowState::WaitingToFadeIn:
 		FadeInDelayRemaining -= Step;
-		if (FadeInDelayRemaining <= 0.f)
+		if (CoverHolds.Num() > 0 && FPlatformTime::Seconds() - StateStartTime > Settings->TravelTimeoutSeconds)
 		{
+			UE_LOG(LogStdCore, Error, TEXT("Cover holds still active after %.0f s (%s); releasing them."), Settings->TravelTimeoutSeconds,
+				*FString::JoinBy(CoverHolds, TEXT(", "), [](const FName& N) { return N.ToString(); }));
+			CoverHolds.Reset();
+		}
+		if (CanStartFadeIn())
+		{
+			UE_LOG(LogStdCore, Log, TEXT("Fading in after %.2f s covered."), GetCoveredSeconds());
 			SetState(EStdFlowState::FadingIn);
 		}
 		break;
@@ -199,6 +216,12 @@ void UStdFlowSubsystem::HandleWorldInitialized(const FActorsInitializedParams& P
 
 	EnsureOverlay();
 
+	if (CoverHolds.Num() > 0)
+	{
+		UE_LOG(LogStdCore, Log, TEXT("New map: clearing %d cover holds left by the previous world."), CoverHolds.Num());
+		CoverHolds.Reset();
+	}
+
 	if (State == EStdFlowState::Loading)
 	{
 		PendingLevel.Reset();
@@ -222,6 +245,9 @@ void UStdFlowSubsystem::FinishTransition()
 		UE_LOG(LogStdCore, Log, TEXT("Transition finished."));
 	}
 	Alpha = 0.f;
+	CoveredSince = -1.0;
+	Label = FText::GetEmpty();
+	MinCoveredSeconds = 0.f;
 	SetState(EStdFlowState::Idle);
 	SetInputBlocked(false);
 }
@@ -235,8 +261,54 @@ void UStdFlowSubsystem::AbortTransition(const FString& Reason)
 
 void UStdFlowSubsystem::SetState(EStdFlowState NewState)
 {
+	const bool bChanged = State != NewState;
 	State = NewState;
 	StateStartTime = FPlatformTime::Seconds();
+	if (bChanged)
+	{
+		OnStateChanged.Broadcast(NewState);
+	}
+}
+
+void UStdFlowSubsystem::AddCoverHold(FName Reason)
+{
+	CoverHolds.Add(Reason);
+	UE_LOG(LogStdCore, Log, TEXT("Cover hold '%s' added (%d active)."), *Reason.ToString(), CoverHolds.Num());
+	if (State == EStdFlowState::Idle || State == EStdFlowState::FadingIn)
+	{
+		CoverNow();
+	}
+}
+
+void UStdFlowSubsystem::RemoveCoverHold(FName Reason)
+{
+	if (CoverHolds.Remove(Reason) > 0)
+	{
+		UE_LOG(LogStdCore, Log, TEXT("Cover hold '%s' removed after %.2f s covered (%d active)."), *Reason.ToString(), GetCoveredSeconds(), CoverHolds.Num());
+	}
+}
+
+float UStdFlowSubsystem::GetCoveredSeconds() const
+{
+	return CoveredSince >= 0.0 && Alpha >= 1.f ? static_cast<float>(FPlatformTime::Seconds() - CoveredSince) : 0.f;
+}
+
+bool UStdFlowSubsystem::CanStartFadeIn() const
+{
+	return FadeInDelayRemaining <= 0.f && CoverHolds.Num() == 0 && GetCoveredSeconds() >= MinCoveredSeconds;
+}
+
+void UStdFlowSubsystem::CoverNow()
+{
+	EnsureOverlay();
+	SetInputBlocked(true);
+	if (Alpha < 1.f || CoveredSince < 0.0)
+	{
+		CoveredSince = FPlatformTime::Seconds();
+	}
+	Alpha = 1.f;
+	FadeInDelayRemaining = UStdProjectSettings::Get()->FadeInDelay;
+	SetState(EStdFlowState::WaitingToFadeIn);
 }
 
 void UStdFlowSubsystem::EnsureOverlay()
@@ -261,10 +333,18 @@ void UStdFlowSubsystem::EnsureOverlay()
 		{
 			return FSlateColor(WeakThis.IsValid() ? WeakThis->GetOverlayColor() : FLinearColor::Transparent);
 		})
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
 		.Visibility_Lambda([WeakThis]()
 		{
 			return WeakThis.IsValid() && WeakThis->IsOverlayVisible() ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
-		});
+		})
+		[
+			SNew(STextBlock)
+			.Font(FCoreStyle::GetDefaultFontStyle("Regular", UStdProjectSettings::Get()->TransitionLabelFontSize))
+			.Text_Lambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->Label : FText::GetEmpty(); })
+			.ColorAndOpacity_Lambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->GetLabelColor() : FSlateColor(FLinearColor::Transparent); })
+		];
 
 	ViewportClient->AddViewportWidgetContent(Overlay.ToSharedRef(), StdFlow::OverlayZOrder);
 	OverlayViewport = ViewportClient;
@@ -301,6 +381,14 @@ void UStdFlowSubsystem::SetInputBlocked(bool bBlocked)
 		FSlateApplication::Get().UnregisterInputPreProcessor(InputBlocker);
 		InputBlocker.Reset();
 	}
+}
+
+FSlateColor UStdFlowSubsystem::GetLabelColor() const
+{
+	FLinearColor Color = UStdProjectSettings::Get()->TransitionLabelColor;
+	// The label is shown on the covered screen only, and goes before the fade in starts.
+	Color.A *= (Alpha >= 1.f && State != EStdFlowState::FadingIn) ? 1.f : 0.f;
+	return FSlateColor(Color);
 }
 
 FLinearColor UStdFlowSubsystem::GetOverlayColor() const

@@ -101,9 +101,16 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions")
 	bool bFadeInOnStartup = true;
 
-	/** If the new map has not arrived after this time, the fade is removed, input is unblocked and an error is logged. */
+	/** If the new map has not arrived after this time, the fade is removed, input is unblocked and an error is logged. Also caps how long cover holds can keep the screen covered. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (ClampMin = "1.0", Units = "s"))
 	float TravelTimeoutSeconds = 30.f;
+
+	/** Colour of the optional label shown in the middle of the covered screen (its alpha follows the fade). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions")
+	FLinearColor TransitionLabelColor = FLinearColor(0.6f, 0.6f, 0.6f, 1.f);
+
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (ClampMin = "6", ClampMax = "96"))
+	int32 TransitionLabelFontSize = 20;
 
 	// Audio
 

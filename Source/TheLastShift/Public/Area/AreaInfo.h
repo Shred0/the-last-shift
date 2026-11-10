@@ -8,9 +8,9 @@
 #include "AreaInfo.generated.h"
 
 /**
- * One per map, written by AAreaGenerator when it bakes an area: what the validator (tls.AreaValidate) reads back about
- * the generated layout. Segment bounds and types, the route centreline, the walkable floor rectangles, the seed and
- * the layout hash. It does nothing at runtime; it is generated (tagged) like the rest of the area.
+ * One per map, spawned by AAreaGenerator with each generated area: what the validator (tls.AreaValidate) reads back
+ * about the layout. Segment bounds and types, the route centreline, the walkable floor rectangles, the seed, the
+ * layout hash and the generation timings. No logic; it is generated (tagged) like the rest of the area.
  */
 UCLASS(NotBlueprintable)
 class THELASTSHIFT_API AAreaInfo : public AInfo
@@ -24,29 +24,44 @@ public:
 	/** The area info of World, or null. */
 	static AAreaInfo* Find(const UWorld* World);
 
-	/**
-	 * Hash of everything generated in World (actors with GeneratedTag): class, transform, instance transforms of the
-	 * geometry, and the generated properties of residues, doors and terminals. Independent of actor names and order.
-	 */
-	static int64 ComputeLayoutHash(const UWorld* World, int32& OutActorCount);
-
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
 	int32 Seed = 0;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
 	int64 LayoutHash = 0;
 
-	/** Actors with GeneratedTag right after generation (this one included). */
+	/** Items in the layout hash (generated actors, the geometry, start, entity, navmesh bounds, this info). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
 	int32 GeneratedActorCount = 0;
 
-	/** Wall time of the last generation, navmesh build excluded. */
+	/** Act of the map (1-4, 0 = test recipe). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	int32 Act = 0;
+
+	/** Seeds tried until this one passed. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	int32 SeedsTried = 0;
+
+	/** Instances PCG built for the area. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	int32 PCGInstanceCount = 0;
+
+	/** Planning and spawning time of the attempt that passed. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area", meta = (Units = "s"))
 	float GenerationSeconds = 0.f;
 
-	/** Wall time of the navmesh build that followed the last generation. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area", meta = (Units = "s"))
+	float PCGSeconds = 0.f;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area", meta = (Units = "s"))
 	float NavBuildSeconds = 0.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area", meta = (Units = "s"))
+	float ValidationSeconds = 0.f;
+
+	/** From the start of the generation (all seeds tried) to ready. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area", meta = (Units = "s"))
+	float TimeToReadySeconds = 0.f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
 	TArray<FAreaSegmentRecord> Segments;

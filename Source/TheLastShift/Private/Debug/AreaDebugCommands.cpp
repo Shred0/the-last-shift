@@ -1,83 +1,127 @@
 // SPDX-License-Identifier: MIT
 
-// Debug console commands for generated areas: generate, clear, validate (also over many seeds), report, the
-// determinism and regeneration checks, deliberate rule breaks, and a teleport along the route for PIE measurements.
-// Generation and validation act on the editor world (not during PIE); tls.AreaGo acts on the PIE world.
-// Editor builds only, compiled out of Shipping.
+// Debug console commands for generated areas, acting on the game (PIE) world where the area is generated at load:
+// regenerate, clear, validate (also over many seeds), report, the determinism and regeneration checks, deliberate
+// rule breaks, a top-down map dump, a teleport along the route, and travel between areas. Generation, PCG and the
+// navmesh are asynchronous, so the multi-step commands wait for AAreaGenerator::OnGenerationFinished.
+// Compiled out of Shipping.
 
 #include "Area/AreaExit.h"
 #include "Area/AreaGenerator.h"
-#include "Area/AreaGeometry.h"
 #include "Area/AreaInfo.h"
 #include "Area/AreaTypes.h"
 #include "Area/AreaValidator.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Containers/Ticker.h"
 #include "Debug/TlsDebugCommon.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/PowerTerminal.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Entity/Entity.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerStart.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Residue/Residue.h"
-
-#if WITH_EDITOR && !UE_BUILD_SHIPPING
-
-#include "Components/BoxComponent.h"
-#include "Components/InstancedStaticMeshComponent.h"
-#include "Editor.h"
 #include "NavMesh/RecastNavMesh.h"
 #include "NavigationSystem.h"
-#include "GameFramework/PlayerStart.h"
+#include "Residue/Residue.h"
+#include "Run/RunSubsystem.h"
+
+#if !UE_BUILD_SHIPPING
 
 namespace AreaDebug
 {
-	static UWorld* EditorWorld()
+	static const EAreaPieceKind AllKinds[] = { EAreaPieceKind::Floors, EAreaPieceKind::Walls, EAreaPieceKind::Curbs,
+		EAreaPieceKind::Pillars, EAreaPieceKind::Ceilings, EAreaPieceKind::Backdrop };
+
+	static AAreaGenerator* Generator(UWorld* InWorld, const TCHAR* Command)
 	{
-		if (!GEditor)
+		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
+		AAreaGenerator* Gen = World && World->IsGameWorld() ? AAreaGenerator::Find(World) : nullptr;
+		if (!Gen)
 		{
-			return nullptr;
+			UE_LOG(LogArea, Warning, TEXT("%s: needs a game (PIE) world with an area generator."), Command);
 		}
-		if (GEditor->PlayWorld)
-		{
-			UE_LOG(LogArea, Warning, TEXT("Area commands act on the editor world: stop PIE first."));
-			return nullptr;
-		}
-		return GEditor->GetEditorWorldContext().World();
+		return Gen;
 	}
 
-	static AAreaGenerator* Generator(UWorld* World)
+	static bool IsBusy(const AAreaGenerator* Gen, const TCHAR* Command)
 	{
-		if (World)
+		const EAreaGenerationState State = Gen->GetGenerationState();
+		if (State == EAreaGenerationState::BuildingWorld || State == EAreaGenerationState::BuildingNavigation)
 		{
-			for (TActorIterator<AAreaGenerator> It(World); It; ++It)
-			{
-				return *It;
-			}
+			UE_LOG(LogArea, Warning, TEXT("%s: the area is still being generated; try again when it is ready."), Command);
+			return true;
 		}
-		UE_LOG(LogArea, Warning, TEXT("No AAreaGenerator in %s."), *GetNameSafe(World));
-		return nullptr;
+		return false;
 	}
 
-	static int32 CountActors(UWorld* World, int32& OutGenerated)
+	static int32 CountGenerated(UWorld* World)
 	{
-		int32 Total = 0;
-		OutGenerated = 0;
+		int32 Count = 0;
 		for (TActorIterator<AActor> It(World); It; ++It)
 		{
-			++Total;
-			OutGenerated += It->ActorHasTag(AAreaInfo::GeneratedTag) ? 1 : 0;
+			Count += It->ActorHasTag(AAreaInfo::GeneratedTag) ? 1 : 0;
 		}
-		return Total;
+		return Count;
 	}
 
-	static bool GenerateSeed(AAreaGenerator* Gen, int32 Seed, FString& OutError)
+	/** Calls Then once when Gen next finishes a generation or revalidation (on the next tick, outside the broadcast). */
+	static void OnceFinished(AAreaGenerator* Gen, TFunction<void(AAreaGenerator*, bool)> Then)
 	{
-		Gen->Seed = Seed;
-		return Gen->GenerateArea(OutError, true);
+		// The callback state lives outside the delegate: the binding is removed on the next tick, never from inside its
+		// own broadcast (that would free the lambda while it runs).
+		struct FState
+		{
+			FDelegateHandle Handle;
+			TFunction<void(AAreaGenerator*, bool)> Then;
+			bool bFired = false;
+		};
+		TSharedRef<FState> State = MakeShared<FState>();
+		State->Then = MoveTemp(Then);
+		TWeakObjectPtr<AAreaGenerator> WeakGen = Gen;
+		State->Handle = Gen->OnGenerationFinished.AddLambda([State, WeakGen](AAreaGenerator* Finished, bool bPassed)
+		{
+			if (State->bFired)
+			{
+				return;
+			}
+			State->bFired = true;
+			FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([State, WeakGen, bPassed](float)
+			{
+				if (AAreaGenerator* G = WeakGen.Get())
+				{
+					G->OnGenerationFinished.Remove(State->Handle);
+					State->Then(G, bPassed);
+				}
+				return false;
+			}));
+		});
+	}
+
+	static FString FailedRules(const AAreaGenerator* Gen, TArray<FString>* OutKeys = nullptr)
+	{
+		const FAreaValidationResult& V = Gen->GetLastValidation();
+		FString Out;
+		for (const FAreaRuleResult& Rule : V.Rules)
+		{
+			if (!Rule.bPass)
+			{
+				const FString Key = FString::Printf(TEXT("rule %d %s"), Rule.Rule, *Rule.Name);
+				if (OutKeys) { OutKeys->Add(Key); }
+				Out += FString::Printf(TEXT(" [rule %d: %s%s]"), Rule.Rule, *Rule.Summary, Rule.Details.Num() > 0 ? *FString::Printf(TEXT("; first: %s"), *Rule.Details[0]) : TEXT(""));
+			}
+		}
+		if (!V.FatalError.IsEmpty())
+		{
+			if (OutKeys) { OutKeys->Add(TEXT("fatal")); }
+			Out += FString::Printf(TEXT(" [fatal: %s]"), *V.FatalError);
+		}
+		return Out;
 	}
 
 	// --- Seed sweep ---
@@ -85,71 +129,61 @@ namespace AreaDebug
 	struct FSweep
 	{
 		bool bActive = false;
-		TWeakObjectPtr<AAreaGenerator> Gen;
 		TArray<int32> Seeds;
 		int32 Next = 0;
 		int32 OriginalSeed = 0;
-		int64 OriginalHash = 0;
 		int32 Passed = 0;
 		TMap<FString, int32> FailuresByRule;
 		TArray<FString> Lines;
-		double GenSecondsSum = 0.0;
-		double GenSecondsMax = 0.0;
+		double ReadySum = 0.0;
+		double ReadyMax = 0.0;
 	};
 	static FSweep GSweep;
 
-	static bool TickSweep(float)
+	static void SweepNext(AAreaGenerator* Gen);
+
+	static void SweepRecord(AAreaGenerator* Gen, bool bPassed)
 	{
-		AAreaGenerator* Gen = GSweep.Gen.Get();
-		if (!GSweep.bActive || !Gen)
+		const int32 Seed = Gen->GetSeed();
+		FString Failed;
+		if (!bPassed)
 		{
-			GSweep.bActive = false;
-			return false;
+			TArray<FString> Keys;
+			if (Gen->LastError.Contains(TEXT("validation failed")))
+			{
+				Failed = FailedRules(Gen, &Keys);
+			}
+			else
+			{
+				Keys = { Gen->LastError.Contains(TEXT("PCG did not")) ? TEXT("pcg") : TEXT("generation") };
+				Failed = FString::Printf(TEXT(" [%s]"), *Gen->LastError);
+			}
+			for (const FString& Key : Keys)
+			{
+				GSweep.FailuresByRule.FindOrAdd(Key) += 1;
+			}
 		}
+		GSweep.Passed += bPassed ? 1 : 0;
+		GSweep.ReadySum += Gen->GetTimeToReadySeconds();
+		GSweep.ReadyMax = FMath::Max(GSweep.ReadyMax, double(Gen->GetTimeToReadySeconds()));
+		GSweep.Lines.Add(FString::Printf(TEXT("seed %d: %s, route %.0f m, %d PCG instances, ready in %.2f s (plan %.2f, PCG %.2f, navmesh %.2f, validation %.2f), hash %016llx%s"),
+			Seed, bPassed ? TEXT("PASS") : TEXT("FAIL"), Gen->GetRouteLength() / 100.f, Gen->GetPCGInstanceCount(), Gen->GetTimeToReadySeconds(),
+			Gen->LastGenerationSeconds, Gen->LastPCGSeconds, Gen->LastNavigationSeconds, Gen->LastValidationSeconds, static_cast<uint64>(Gen->GetLayoutHash()), *Failed));
+		UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: %s"), *GSweep.Lines.Last());
+		SweepNext(Gen);
+	}
+
+	static void SweepNext(AAreaGenerator* Gen)
+	{
 		if (GSweep.Next < GSweep.Seeds.Num())
 		{
 			const int32 Seed = GSweep.Seeds[GSweep.Next++];
-			FString Error;
-			if (!GenerateSeed(Gen, Seed, Error))
-			{
-				GSweep.FailuresByRule.FindOrAdd(TEXT("generation")) += 1;
-				GSweep.Lines.Add(FString::Printf(TEXT("seed %d: GENERATION FAILED: %s"), Seed, *Error));
-				UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: seed %d generation failed: %s"), Seed, *Error);
-				return true;
-			}
-			GSweep.GenSecondsSum += Gen->LastGenerationSeconds;
-			GSweep.GenSecondsMax = FMath::Max(GSweep.GenSecondsMax, double(Gen->LastGenerationSeconds));
-			const FAreaValidationResult Result = AreaValidator::Validate(Gen->GetWorld());
-			FString Failed;
-			for (const FAreaRuleResult& Rule : Result.Rules)
-			{
-				if (!Rule.bPass)
-				{
-					const FString Key = FString::Printf(TEXT("rule %d %s"), Rule.Rule, *Rule.Name);
-					GSweep.FailuresByRule.FindOrAdd(Key) += 1;
-					Failed += FString::Printf(TEXT(" [rule %d: %s%s]"), Rule.Rule, *Rule.Summary,
-						Rule.Details.Num() > 0 ? *FString::Printf(TEXT("; first: %s"), *Rule.Details[0]) : TEXT(""));
-				}
-			}
-			if (!Result.FatalError.IsEmpty())
-			{
-				GSweep.FailuresByRule.FindOrAdd(TEXT("fatal")) += 1;
-				Failed += FString::Printf(TEXT(" [fatal: %s]"), *Result.FatalError);
-			}
-			const bool bPass = Result.AllPassed();
-			GSweep.Passed += bPass ? 1 : 0;
-			const AAreaInfo* Info = AAreaInfo::Find(Gen->GetWorld());
-			GSweep.Lines.Add(FString::Printf(TEXT("seed %d: %s, route %.0f m, generation %.2f s, hash %016llx%s"), Seed, bPass ? TEXT("PASS") : TEXT("FAIL"),
-				Info ? Info->GetRouteLength() / 100.f : 0.f, Gen->LastGenerationSeconds, static_cast<uint64>(Gen->LastLayoutHash), *Failed));
-			UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: %s"), *GSweep.Lines.Last());
-			return true;
+			OnceFinished(Gen, [](AAreaGenerator* G, bool bPassed) { SweepRecord(G, bPassed); });
+			Gen->Regenerate(Seed, /*bTryNextSeeds=*/false);
+			return;
 		}
-
-		// Done: restore the map's own seed.
-		FString Error;
-		GenerateSeed(Gen, GSweep.OriginalSeed, Error);
-		UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: ===== %d of %d seeds pass all rules (generation mean %.2f s, max %.2f s) ====="),
-			GSweep.Passed, GSweep.Seeds.Num(), GSweep.Seeds.Num() > 0 ? GSweep.GenSecondsSum / GSweep.Seeds.Num() : 0.0, GSweep.GenSecondsMax);
+		UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: ===== act %d: %d of %d seeds pass all rules (time to ready mean %.2f s, max %.2f s) ====="),
+			Gen->GetAct(), GSweep.Passed, GSweep.Seeds.Num(), GSweep.Seeds.Num() > 0 ? GSweep.ReadySum / GSweep.Seeds.Num() : 0.0, GSweep.ReadyMax);
 		TArray<FString> Keys;
 		GSweep.FailuresByRule.GetKeys(Keys);
 		Keys.Sort();
@@ -157,78 +191,89 @@ namespace AreaDebug
 		{
 			UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: failures by rule: %s: %d"), *Key, GSweep.FailuresByRule[Key]);
 		}
-		UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: restored seed %d, hash %016llx (before the sweep %016llx, %s)."), GSweep.OriginalSeed,
-			static_cast<uint64>(Gen->LastLayoutHash), static_cast<uint64>(GSweep.OriginalHash), Gen->LastLayoutHash == GSweep.OriginalHash ? TEXT("same") : TEXT("DIFFERENT"));
 		GSweep.bActive = false;
+		const int32 Original = GSweep.OriginalSeed;
+		OnceFinished(Gen, [Original](AAreaGenerator* G, bool bPassed)
+		{
+			UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: restored seed %d (%s), hash %016llx."), Original, bPassed ? TEXT("valid") : TEXT("INVALID"), static_cast<uint64>(G->GetLayoutHash()));
+		});
+		Gen->Regenerate(Original, /*bTryNextSeeds=*/false);
+	}
+
+	// --- Repeated generation (determinism, regeneration) ---
+
+	struct FRepeatRun { int32 Seed = 0; int64 Hash = 0; int32 Instances = 0; int32 Generated = 0; int32 OrphansAfterClear = 0; bool bPassed = false; float Ready = 0.f; };
+	struct FRepeat
+	{
+		bool bActive = false;
+		FString Name;
+		TArray<int32> Seeds;
+		int32 Next = 0;
+		TArray<FRepeatRun> Runs;
+		TFunction<void(const TArray<FRepeatRun>&)> Summary;
+	};
+	static FRepeat GRepeat;
+
+	static void RepeatNext(AAreaGenerator* Gen)
+	{
+		if (GRepeat.Next >= GRepeat.Seeds.Num())
+		{
+			GRepeat.bActive = false;
+			GRepeat.Summary(GRepeat.Runs);
+			return;
+		}
+		const int32 Seed = GRepeat.Seeds[GRepeat.Next++];
+		// Clear first and count what is left: nothing generated may survive a clear.
+		Gen->ClearArea();
+		const int32 Orphans = CountGenerated(Gen->GetWorld()) + Gen->GetPCGInstanceCount();
+		OnceFinished(Gen, [Seed, Orphans](AAreaGenerator* G, bool bPassed)
+		{
+			FRepeatRun Run;
+			Run.Seed = Seed;
+			Run.Hash = G->GetLayoutHash();
+			Run.Instances = G->GetPCGInstanceCount();
+			Run.Generated = CountGenerated(G->GetWorld());
+			Run.OrphansAfterClear = Orphans;
+			Run.bPassed = bPassed;
+			Run.Ready = G->GetTimeToReadySeconds();
+			GRepeat.Runs.Add(Run);
+			UE_LOG(LogArea, Display, TEXT("%s: run %d: seed %d %s, hash %016llx, %d PCG instances, %d generated actors, left after clear %d, ready in %.2f s"),
+				*GRepeat.Name, GRepeat.Runs.Num(), Seed, bPassed ? TEXT("valid") : TEXT("INVALID"), static_cast<uint64>(Run.Hash), Run.Instances, Run.Generated, Orphans, Run.Ready);
+			RepeatNext(G);
+		});
+		Gen->Regenerate(Seed, /*bTryNextSeeds=*/false);
+	}
+
+	static void StartRepeat(AAreaGenerator* Gen, const FString& Name, const TArray<int32>& Seeds, TFunction<void(const TArray<FRepeatRun>&)> Summary)
+	{
+		GRepeat = FRepeat();
+		GRepeat.bActive = true;
+		GRepeat.Name = Name;
+		GRepeat.Seeds = Seeds;
+		GRepeat.Summary = MoveTemp(Summary);
+		RepeatNext(Gen);
+	}
+
+	static bool AnyTestRunning(const TCHAR* Command)
+	{
+		if (GSweep.bActive || GRepeat.bActive)
+		{
+			UE_LOG(LogArea, Warning, TEXT("%s: a sweep or repeat test is already running."), Command);
+			return true;
+		}
 		return false;
 	}
 
-	// --- Regeneration test ---
+	// --- Report ---
 
-	struct FRegen
+	static void LogReport(UWorld* World)
 	{
-		bool bActive = false;
-		TWeakObjectPtr<AAreaGenerator> Gen;
-		int32 Runs = 0;
-		int32 Done = 0;
-		int32 BaselineActors = 0;
-		int32 FirstCount = -1;
-		int64 FirstHash = 0;
-		int32 Problems = 0;
-	};
-	static FRegen GRegen;
-
-	static bool TickRegen(float)
-	{
-		AAreaGenerator* Gen = GRegen.Gen.Get();
-		if (!GRegen.bActive || !Gen)
-		{
-			GRegen.bActive = false;
-			return false;
-		}
-		UWorld* World = Gen->GetWorld();
-		const int32 Removed = Gen->ClearArea();
-		int32 Generated = 0;
-		const int32 AfterClear = CountActors(World, Generated);
-		const bool bClean = Generated == 0 && AfterClear == GRegen.BaselineActors;
-		FString Error;
-		const bool bOk = Gen->GenerateArea(Error, true);
-		int32 GeneratedNow = 0;
-		const int32 Total = CountActors(World, GeneratedNow);
-		if (GRegen.FirstCount < 0)
-		{
-			GRegen.FirstCount = GeneratedNow;
-			GRegen.FirstHash = Gen->LastLayoutHash;
-		}
-		const bool bSame = GeneratedNow == GRegen.FirstCount && Gen->LastLayoutHash == GRegen.FirstHash;
-		GRegen.Problems += (bClean && bOk && bSame) ? 0 : 1;
-		++GRegen.Done;
-		UE_LOG(LogArea, Display, TEXT("tls.AreaRegenTest: run %d/%d: cleared %d, after Clear %d actors (%d tagged; baseline %d) %s; generated %d tagged, level %d actors, hash %016llx, %.2f s %s%s"),
-			GRegen.Done, GRegen.Runs, Removed, AfterClear, Generated, GRegen.BaselineActors, bClean ? TEXT("clean") : TEXT("ORPHANS"), GeneratedNow, Total,
-			static_cast<uint64>(Gen->LastLayoutHash), Gen->LastGenerationSeconds, bSame ? TEXT("same") : TEXT("DIFFERENT"), bOk ? TEXT("") : *FString::Printf(TEXT(" FAILED: %s"), *Error));
-		if (GRegen.Done >= GRegen.Runs)
-		{
-			UE_LOG(LogArea, Display, TEXT("tls.AreaRegenTest: ===== %s: %d runs, %d with orphans, a different count or hash, or a failure ====="),
-				GRegen.Problems == 0 ? TEXT("PASS") : TEXT("FAIL"), GRegen.Runs, GRegen.Problems);
-			GRegen.bActive = false;
-			return false;
-		}
-		return true;
-	}
-
-	static void LogReport(UWorld* World, bool bRebuild)
-	{
-		AAreaGenerator* Gen = Generator(World);
+		AAreaGenerator* Gen = AAreaGenerator::Find(World);
 		AAreaInfo* Info = AAreaInfo::Find(World);
 		if (!Gen || !Info)
 		{
-			UE_LOG(LogArea, Warning, TEXT("tls.AreaReport: needs a generator and an area info."));
+			UE_LOG(LogArea, Warning, TEXT("tls.AreaReport: needs a generated area (generator and area info)."));
 			return;
-		}
-		float NavSeconds = Info->NavBuildSeconds;
-		if (bRebuild)
-		{
-			NavSeconds = Gen->BuildNavigation();
 		}
 		const FAreaPawnMetrics Pawn = GetAreaPawnMetrics(World);
 		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
@@ -262,29 +307,27 @@ namespace AreaDebug
 			Types += FString::Printf(TEXT("%s%s %d"), Types.IsEmpty() ? TEXT("") : TEXT(", "), LexToString(T), ByType.FindRef(T));
 		}
 		FString Instances;
-		int32 TotalInstances = 0;
-		for (TActorIterator<AAreaGeometry> It(World); It; ++It)
+		for (const EAreaPieceKind Kind : AllKinds)
 		{
-			for (const UInstancedStaticMeshComponent* Component : It->GetAllComponents())
-			{
-				Instances += FString::Printf(TEXT("%s%s %d"), Instances.IsEmpty() ? TEXT("") : TEXT(", "), *Component->GetName(), Component->GetInstanceCount());
-				TotalInstances += Component->GetInstanceCount();
-			}
+			Instances += FString::Printf(TEXT("%s%s %d (%d components)"), Instances.IsEmpty() ? TEXT("") : TEXT(", "), LexToString(Kind), Gen->GetPCGInstanceCountOf(Kind), Gen->GetPCGComponents(Kind).Num());
 		}
 		int32 Tiles = 0;
 		if (const ARecastNavMesh* Nav = NavSys ? Cast<ARecastNavMesh>(NavSys->GetDefaultNavDataInstance(FNavigationSystem::DontCreate)) : nullptr)
 		{
 			Tiles = Nav->GetNumActiveTiles();
 		}
-		int32 Generated = 0;
-		const int32 Total = CountActors(World, Generated);
-		UE_LOG(LogArea, Display, TEXT("tls.AreaReport: seed %d, hash %016llx, %d generated actors (level %d)"), Info->Seed, static_cast<uint64>(Info->LayoutHash), Generated, Total);
+		FString Why;
+		const bool bMatch = Gen->DoesPCGMatchPlan(Why);
+		UE_LOG(LogArea, Display, TEXT("tls.AreaReport: act %d, map %s, state %d, seed %d (%d tried), hash %016llx, %d hashed items, %d generated actors"),
+			Gen->GetAct(), *UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), static_cast<int32>(Gen->GetGenerationState()), Gen->GetSeed(), Info->SeedsTried,
+			static_cast<uint64>(Gen->GetLayoutHash()), Gen->LastActorCount, CountGenerated(World));
 		UE_LOG(LogArea, Display, TEXT("tls.AreaReport: route centreline %.1f m, navigation path start->exit %.1f m, expected walk %.0f s at %.0f cm/s (%s)"),
 			Info->GetRouteLength() / 100.f, PathLength / 100.0, PathLength > 0.0 ? PathLength / Pawn.WalkSpeed : -1.0, Pawn.WalkSpeed, *Pawn.Source);
 		UE_LOG(LogArea, Display, TEXT("tls.AreaReport: segments: %s; spurs/dead ends %d, niches %d"), *Types, Spurs, Niches);
-		UE_LOG(LogArea, Display, TEXT("tls.AreaReport: instances %d: %s"), TotalInstances, *Instances);
-		UE_LOG(LogArea, Display, TEXT("tls.AreaReport: generation %.3f s, navmesh build %.3f s%s, %d active navmesh tiles"),
-			Info->GenerationSeconds, NavSeconds, bRebuild ? TEXT(" (rebuilt now)") : TEXT(" (at generation)"), Tiles);
+		UE_LOG(LogArea, Display, TEXT("tls.AreaReport: PCG instances %d: %s; PCG matches the plan: %s%s"), Gen->GetPCGInstanceCount(), *Instances,
+			bMatch ? TEXT("yes") : TEXT("NO"), bMatch ? TEXT("") : *FString::Printf(TEXT(" (%s)"), *Why));
+		UE_LOG(LogArea, Display, TEXT("tls.AreaReport: time to ready %.2f s (last attempt: plan %.3f s, PCG %.3f s, navmesh %.3f s, validation %.3f s), %d active navmesh tiles"),
+			Gen->GetTimeToReadySeconds(), Gen->LastGenerationSeconds, Gen->LastPCGSeconds, Gen->LastNavigationSeconds, Gen->LastValidationSeconds, Tiles);
 		for (int32 Index = 0; Index < Info->Segments.Num(); ++Index)
 		{
 			const FAreaSegmentRecord& S = Info->Segments[Index];
@@ -293,7 +336,7 @@ namespace AreaDebug
 		}
 	}
 
-	/** Route distance of a named pose: start, corridor (10 m in), hall (the hall's centre), gate, exit, or metres. */
+	/** Route distance of a named pose: start, corridor (10 m in), room, hall (the hall's centre), gate, exit, or metres. */
 	static bool PoseDistance(const AAreaInfo* Info, const FString& What, float& OutDistance)
 	{
 		if (What.IsNumeric())
@@ -304,7 +347,8 @@ namespace AreaDebug
 		if (What == TEXT("start")) { OutDistance = 150.f; return true; }
 		if (What == TEXT("corridor")) { OutDistance = 1000.f; return true; }
 		if (What == TEXT("exit")) { OutDistance = Info->GetRouteLength() - 300.f; return true; }
-		const EAreaSegmentType Type = What == TEXT("hall") ? EAreaSegmentType::Hall : What == TEXT("gate") ? EAreaSegmentType::Gate : EAreaSegmentType::Room;
+		const EAreaSegmentType Type = What == TEXT("hall") ? EAreaSegmentType::Hall : What == TEXT("gate") ? EAreaSegmentType::Gate
+			: What == TEXT("catwalk") ? EAreaSegmentType::Catwalk : EAreaSegmentType::Room;
 		const int32 Index = Info->FindSegmentOfType(Type);
 		if (Index < 0)
 		{
@@ -331,160 +375,156 @@ namespace AreaDebug
 		}
 		return true;
 	}
+
+	static UInstancedStaticMeshComponent* FirstComponent(const AAreaGenerator* Gen, EAreaPieceKind Kind)
+	{
+		const TArray<UInstancedStaticMeshComponent*> Components = Gen->GetPCGComponents(Kind);
+		return Components.Num() > 0 ? Components[0] : nullptr;
+	}
 }
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaGenerateCommand(
 	TEXT("tls.AreaGenerate"),
-	TEXT("tls.AreaGenerate [Seed]: (editor world) clears and bakes the area of the map's AAreaGenerator, optionally with a new Seed, and builds the navmesh."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	TEXT("tls.AreaGenerate [Seed]: (PIE) clears and regenerates the area of the map's act at load-time (plan, PCG, navmesh, validation), with Seed or the current seed; does not try further seeds."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
-		UWorld* World = AreaDebug::EditorWorld();
-		AAreaGenerator* Gen = AreaDebug::Generator(World);
-		if (!Gen)
+		AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaGenerate"));
+		if (!Gen || AreaDebug::IsBusy(Gen, TEXT("tls.AreaGenerate")) || AreaDebug::AnyTestRunning(TEXT("tls.AreaGenerate")))
 		{
 			return;
 		}
-		if (Args.Num() > 0)
+		const int32 Seed = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : Gen->GetSeed();
+		AreaDebug::OnceFinished(Gen, [](AAreaGenerator* G, bool bPassed)
 		{
-			Gen->Seed = FCString::Atoi(*Args[0]);
-		}
-		FString Error;
-		if (!Gen->GenerateArea(Error, true))
-		{
-			UE_LOG(LogArea, Error, TEXT("tls.AreaGenerate: seed %d failed: %s"), Gen->Seed, *Error);
-			return;
-		}
-		UE_LOG(LogArea, Display, TEXT("tls.AreaGenerate: seed %d, %d actors, hash %016llx, %.3f s."), Gen->Seed, Gen->LastActorCount, static_cast<uint64>(Gen->LastLayoutHash), Gen->LastGenerationSeconds);
+			UE_LOG(LogArea, Display, TEXT("tls.AreaGenerate: seed %d %s, hash %016llx, %d PCG instances, route %.1f m, ready in %.2f s%s"), G->GetSeed(),
+				bPassed ? TEXT("valid") : TEXT("INVALID"), static_cast<uint64>(G->GetLayoutHash()), G->GetPCGInstanceCount(), G->GetRouteLength() / 100.f,
+				G->GetTimeToReadySeconds(), bPassed ? TEXT("") : *FString::Printf(TEXT(": %s"), *G->LastError));
+		});
+		Gen->Regenerate(Seed, false);
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaClearCommand(
 	TEXT("tls.AreaClear"),
-	TEXT("tls.AreaClear: (editor world) removes every generated area actor."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld*)
+	TEXT("tls.AreaClear: (PIE) removes every generated area actor and the PCG output."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* InWorld)
 	{
-		if (AAreaGenerator* Gen = AreaDebug::Generator(AreaDebug::EditorWorld()))
+		if (AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaClear")))
 		{
-			UE_LOG(LogArea, Display, TEXT("tls.AreaClear: removed %d actors."), Gen->ClearArea());
+			UE_LOG(LogArea, Display, TEXT("tls.AreaClear: removed %d actors; %d PCG instances left."), Gen->ClearArea(), Gen->GetPCGInstanceCount());
 		}
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaValidateCommand(
 	TEXT("tls.AreaValidate"),
-	TEXT("tls.AreaValidate [Rebuild=0]: (editor world) checks the six area rules (path, reachability and counts, gates, hiding places, curbs, stray navmesh); Rebuild=1 rebuilds the navmesh first."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	TEXT("tls.AreaValidate [Rebuild=0]: (PIE) checks the six area rules (path, reachability and counts, gates, hiding places, curbs, stray navmesh) on the world as it is; Rebuild=1 rebuilds the navmesh first."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
-		UWorld* World = AreaDebug::EditorWorld();
-		AAreaGenerator* Gen = AreaDebug::Generator(World);
-		if (!Gen)
+		AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaValidate"));
+		if (!Gen || AreaDebug::IsBusy(Gen, TEXT("tls.AreaValidate")))
 		{
 			return;
 		}
+		UWorld* World = Gen->GetWorld();
+		const AAreaInfo* Info = AAreaInfo::Find(World);
+		UE_LOG(LogArea, Display, TEXT("tls.AreaValidate: %s, act %d, seed %d, hash %016llx"), *UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), Gen->GetAct(),
+			Info ? Info->Seed : -1, static_cast<uint64>(Gen->GetLayoutHash()));
 		if (Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0)
 		{
-			UE_LOG(LogArea, Display, TEXT("tls.AreaValidate: navmesh rebuilt in %.3f s."), Gen->BuildNavigation());
+			AreaDebug::OnceFinished(Gen, [](AAreaGenerator* G, bool) { G->GetLastValidation().Log(TEXT("tls.AreaValidate:"), true); });
+			Gen->RevalidateAfterNavigationRebuild();
+			return;
 		}
-		const FAreaValidationResult Result = AreaValidator::Validate(World);
-		const AAreaInfo* Info = AAreaInfo::Find(World);
-		UE_LOG(LogArea, Display, TEXT("tls.AreaValidate: %s, seed %d, hash %016llx"), *World->GetMapName(), Info ? Info->Seed : -1, Info ? static_cast<uint64>(Info->LayoutHash) : 0ull);
-		Result.Log(TEXT("tls.AreaValidate:"), true);
+		AreaValidator::Validate(World).Log(TEXT("tls.AreaValidate:"), true);
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaValidateSeedsCommand(
 	TEXT("tls.AreaValidate.Seeds"),
-	TEXT("tls.AreaValidate.Seeds [N=20] [FirstSeed=1]: (editor world, not saved) generates and validates seeds FirstSeed..FirstSeed+N-1 with the map's recipe, one after the other; reports the pass rate and the failures by rule, then regenerates the map's own seed."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	TEXT("tls.AreaValidate.Seeds [N=20] [FirstSeed=1]: (PIE) regenerates and validates seeds FirstSeed..FirstSeed+N-1 with the map's recipe at runtime, one after the other; reports the pass rate and the failures by rule, then regenerates the map's own seed."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
-		AAreaGenerator* Gen = AreaDebug::Generator(AreaDebug::EditorWorld());
-		if (!Gen || AreaDebug::GSweep.bActive || AreaDebug::GRegen.bActive)
+		AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaValidate.Seeds"));
+		if (!Gen || AreaDebug::IsBusy(Gen, TEXT("tls.AreaValidate.Seeds")) || AreaDebug::AnyTestRunning(TEXT("tls.AreaValidate.Seeds")))
 		{
-			UE_LOG(LogArea, Warning, TEXT("tls.AreaValidate.Seeds: no generator, or a sweep is already running."));
 			return;
 		}
 		const int32 N = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 500) : 20;
 		const int32 First = Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 1;
 		AreaDebug::GSweep = AreaDebug::FSweep();
 		AreaDebug::GSweep.bActive = true;
-		AreaDebug::GSweep.Gen = Gen;
-		AreaDebug::GSweep.OriginalSeed = Gen->Seed;
-		int32 Count = 0;
-		AreaDebug::GSweep.OriginalHash = AAreaInfo::ComputeLayoutHash(Gen->GetWorld(), Count);
+		AreaDebug::GSweep.OriginalSeed = Gen->GetSeed();
 		for (int32 I = 0; I < N; ++I)
 		{
 			AreaDebug::GSweep.Seeds.Add(First + I);
 		}
-		UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: %d seeds from %d (map seed %d)."), N, First, Gen->Seed);
-		// Synchronous: a navmesh Build() called from the core ticker never completes (editor deadlock).
-		while (AreaDebug::TickSweep(0.f)) {}
+		UE_LOG(LogArea, Display, TEXT("tls.AreaValidate.Seeds: act %d, %d seeds from %d (map seed %d)."), Gen->GetAct(), N, First, Gen->GetSeed());
+		AreaDebug::SweepNext(Gen);
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaReportCommand(
 	TEXT("tls.AreaReport"),
-	TEXT("tls.AreaReport [Rebuild=0]: (editor world) route length, expected walking time, segments by type, instance counts, generation and navmesh build time (Rebuild=1 times a fresh build)."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	TEXT("tls.AreaReport: (PIE) act, map, seed, hash, route length, expected walking time, segments by type, PCG instance counts and whether they match the plan, time to ready and its parts."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* InWorld)
 	{
-		AreaDebug::LogReport(AreaDebug::EditorWorld(), Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);
+		if (AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaReport")))
+		{
+			AreaDebug::LogReport(Gen->GetWorld());
+		}
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaRegenTestCommand(
 	TEXT("tls.AreaRegenTest"),
-	TEXT("tls.AreaRegenTest [Runs=10]: (editor world) Clear() then Generate() Runs times: no orphan actor after Clear, same actor count and hash every time."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	TEXT("tls.AreaRegenTest [Runs=3]: (PIE) clears and regenerates the current seed Runs times: nothing generated left after each clear, same hash, PCG instance count and actor count every time."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
-		UWorld* World = AreaDebug::EditorWorld();
-		AAreaGenerator* Gen = AreaDebug::Generator(World);
-		if (!Gen || AreaDebug::GSweep.bActive || AreaDebug::GRegen.bActive)
+		AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaRegenTest"));
+		if (!Gen || AreaDebug::IsBusy(Gen, TEXT("tls.AreaRegenTest")) || AreaDebug::AnyTestRunning(TEXT("tls.AreaRegenTest")))
 		{
 			return;
 		}
-		AreaDebug::GRegen = AreaDebug::FRegen();
-		AreaDebug::GRegen.bActive = true;
-		AreaDebug::GRegen.Gen = Gen;
-		AreaDebug::GRegen.Runs = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 100) : 10;
-		int32 Generated = 0;
-		const int32 Total = AreaDebug::CountActors(World, Generated);
-		AreaDebug::GRegen.BaselineActors = Total - Generated;
-		UE_LOG(LogArea, Display, TEXT("tls.AreaRegenTest: %d runs; level has %d actors, %d of them generated."), AreaDebug::GRegen.Runs, Total, Generated);
-		while (AreaDebug::TickRegen(0.f)) {}
+		const int32 Runs = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 50) : 3;
+		TArray<int32> Seeds;
+		Seeds.Init(Gen->GetSeed(), Runs);
+		AreaDebug::StartRepeat(Gen, TEXT("tls.AreaRegenTest"), Seeds, [](const TArray<AreaDebug::FRepeatRun>& R)
+		{
+			int32 Problems = 0;
+			for (const AreaDebug::FRepeatRun& Run : R)
+			{
+				Problems += (Run.OrphansAfterClear == 0 && Run.Hash == R[0].Hash && Run.Instances == R[0].Instances && Run.Generated == R[0].Generated) ? 0 : 1;
+			}
+			UE_LOG(LogArea, Display, TEXT("tls.AreaRegenTest: ===== %s: %d runs, %d with leftovers or a different hash, instance or actor count ====="),
+				Problems == 0 ? TEXT("PASS") : TEXT("FAIL"), R.Num(), Problems);
+		});
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaDeterminismCommand(
 	TEXT("tls.AreaDeterminism"),
-	TEXT("tls.AreaDeterminism: (editor world) generates the map's seed twice and seed+1 once, compares layout hashes and actor counts, then regenerates the map's seed."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld*)
+	TEXT("tls.AreaDeterminism: (PIE) regenerates the current seed twice, seed+1 once and the seed again; compares layout hashes and PCG instance counts."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* InWorld)
 	{
-		AAreaGenerator* Gen = AreaDebug::Generator(AreaDebug::EditorWorld());
-		if (!Gen)
+		AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaDeterminism"));
+		if (!Gen || AreaDebug::IsBusy(Gen, TEXT("tls.AreaDeterminism")) || AreaDebug::AnyTestRunning(TEXT("tls.AreaDeterminism")))
 		{
 			return;
 		}
-		const int32 Seed = Gen->Seed;
-		struct FRun { int32 Seed; int64 Hash; int32 Count; float Seconds; };
-		TArray<FRun> Runs;
-		for (const int32 S : { Seed, Seed, Seed + 1, Seed })
+		const int32 Seed = Gen->GetSeed();
+		AreaDebug::StartRepeat(Gen, TEXT("tls.AreaDeterminism"), { Seed, Seed, Seed + 1, Seed }, [](const TArray<AreaDebug::FRepeatRun>& R)
 		{
-			FString Error;
-			AreaDebug::GenerateSeed(Gen, S, Error);
-			Runs.Add({ S, Gen->LastLayoutHash, Gen->LastActorCount, Gen->LastGenerationSeconds });
-			UE_LOG(LogArea, Display, TEXT("tls.AreaDeterminism: seed %d: hash %016llx, %d actors, %.3f s%s"), S, static_cast<uint64>(Gen->LastLayoutHash),
-				Gen->LastActorCount, Gen->LastGenerationSeconds, Error.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" FAILED: %s"), *Error));
-		}
-		const bool bSame = Runs[0].Hash == Runs[1].Hash && Runs[0].Count == Runs[1].Count && Runs[0].Hash == Runs[3].Hash;
-		const bool bDiffers = Runs[2].Hash != Runs[0].Hash;
-		UE_LOG(LogArea, Display, TEXT("tls.AreaDeterminism: same seed -> same hash and count: %s; seed+1 -> different hash: %s"),
-			bSame ? TEXT("PASS") : TEXT("FAIL"), bDiffers ? TEXT("PASS") : TEXT("FAIL"));
+			const bool bSame = R.Num() == 4 && R[0].Hash == R[1].Hash && R[0].Hash == R[3].Hash && R[0].Instances == R[1].Instances && R[0].Instances == R[3].Instances;
+			const bool bDiffers = R.Num() == 4 && R[2].Hash != R[0].Hash;
+			UE_LOG(LogArea, Display, TEXT("tls.AreaDeterminism: same seed -> same hash and PCG instance count: %s; seed+1 -> different hash: %s"),
+				bSame ? TEXT("PASS") : TEXT("FAIL"), bDiffers ? TEXT("PASS") : TEXT("FAIL"));
+		});
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaBreakCommand(
 	TEXT("tls.AreaBreak"),
-	TEXT("tls.AreaBreak path|residue|terminal|hiding|curb|navmesh: (editor world) breaks one validator rule on purpose (exit into the void, a residue off the navmesh, the gate terminal 3 m from its door, walls and pillars removed, one curb removed, a stray floor slab), rebuilds the navmesh and validates. Regenerate afterwards (tls.AreaGenerate)."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	TEXT("tls.AreaBreak path|residue|terminal|hiding|curb|navmesh|mass: (PIE) breaks one validator rule on purpose (exit into the void, a residue off the navmesh, the gate terminal 3 m from its door, walls and pillars removed, one curb removed, a stray floor slab, a solid PCG mass across the route), rebuilds the navmesh and validates. tls.AreaGenerate afterwards restores the area."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
-		UWorld* World = AreaDebug::EditorWorld();
-		AAreaGenerator* Gen = AreaDebug::Generator(World);
+		AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaBreak"));
+		UWorld* World = Gen ? Gen->GetWorld() : nullptr;
 		AAreaInfo* Info = AAreaInfo::Find(World);
-		AAreaGeometry* Geo = nullptr;
-		for (TActorIterator<AAreaGeometry> It(World); It; ++It) { Geo = *It; break; }
-		if (!Gen || !Info || !Geo || Args.Num() == 0)
+		if (!Gen || !Info || Args.Num() == 0 || AreaDebug::IsBusy(Gen, TEXT("tls.AreaBreak")))
 		{
 			UE_LOG(LogArea, Warning, TEXT("tls.AreaBreak: needs a generated area and a rule name."));
 			return;
@@ -527,7 +567,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaBreakCommand(
 			{
 				const FVector P = OffFloor(List[0]->GetActorLocation());
 				List[0]->SetActorLocation(P);
-				Done = FString::Printf(TEXT("moved residue %s off the navmesh to (%.0f, %.0f, %.0f)"), *List[0]->GetActorLabel(), P.X, P.Y, P.Z);
+				Done = FString::Printf(TEXT("moved residue %s off the navmesh to (%.0f, %.0f, %.0f)"), *List[0]->GetName(), P.X, P.Y, P.Z);
 			}
 		}
 		else if (What == TEXT("terminal"))
@@ -541,7 +581,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaBreakCommand(
 						const FVector Back = It->GetActorTransform().TransformPosition(FVector(-300.f, 120.f, 0.f));
 						T->SetActorLocation(Back);
 						T->SetActorRotation((It->GetActorLocation() - Back).GetSafeNormal2D().Rotation());
-						Done = FString::Printf(TEXT("moved %s 3 m from %s"), *T->GetActorLabel(), *It->GetActorLabel());
+						Done = FString::Printf(TEXT("moved %s 3 m from %s (door open %.1f s)"), *T->GetName(), *It->GetName(), It->PoweredSeconds);
 						break;
 					}
 				}
@@ -550,29 +590,39 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaBreakCommand(
 		}
 		else if (What == TEXT("hiding"))
 		{
-			Done = FString::Printf(TEXT("removed %d wall and %d pillar instances"), Geo->Walls->GetInstanceCount(), Geo->Pillars->GetInstanceCount());
-			Geo->Walls->ClearInstances();
-			Geo->Pillars->ClearInstances();
+			int32 Removed = 0;
+			for (const EAreaPieceKind Kind : { EAreaPieceKind::Walls, EAreaPieceKind::Pillars })
+			{
+				for (UInstancedStaticMeshComponent* Component : Gen->GetPCGComponents(Kind))
+				{
+					Removed += Component->GetInstanceCount();
+					Component->ClearInstances();
+				}
+			}
+			Done = FString::Printf(TEXT("removed %d PCG wall and pillar instances"), Removed);
 		}
 		else if (What == TEXT("curb"))
 		{
 			const int32 Hall = Info->FindSegmentOfType(EAreaSegmentType::Hall);
-			const FVector Target = Hall >= 0 ? Info->Segments[Hall].Bounds.GetCenter() : Info->RoutePoints[Info->RoutePoints.Num() / 2];
+			const int32 Catwalk = Info->FindSegmentOfType(EAreaSegmentType::Catwalk);
+			const int32 Open = Hall >= 0 ? Hall : Catwalk;
+			const FVector Target = Open >= 0 ? Info->Segments[Open].Bounds.GetCenter() : Info->RoutePoints[Info->RoutePoints.Num() / 2];
+			UInstancedStaticMeshComponent* Curbs = AreaDebug::FirstComponent(Gen, EAreaPieceKind::Curbs);
 			int32 Best = -1;
 			double BestDist = TNumericLimits<double>::Max();
-			for (int32 I = 0; I < Geo->Curbs->GetInstanceCount(); ++I)
+			for (int32 I = 0; Curbs && I < Curbs->GetInstanceCount(); ++I)
 			{
 				FTransform T;
-				Geo->Curbs->GetInstanceTransform(I, T, true);
+				Curbs->GetInstanceTransform(I, T, true);
 				const double D = FVector::Dist2D(T.GetLocation(), Target);
 				if (D < BestDist) { BestDist = D; Best = I; }
 			}
 			if (Best >= 0)
 			{
 				FTransform T;
-				Geo->Curbs->GetInstanceTransform(Best, T, true);
-				Geo->Curbs->RemoveInstance(Best);
-				Done = FString::Printf(TEXT("removed curb instance %d at (%.0f, %.0f), %.0f cm long"), Best, T.GetLocation().X, T.GetLocation().Y, FMath::Max(T.GetScale3D().X, T.GetScale3D().Y) * 100.f);
+				Curbs->GetInstanceTransform(Best, T, true);
+				Curbs->RemoveInstance(Best);
+				Done = FString::Printf(TEXT("removed PCG curb instance %d at (%.0f, %.0f), %.0f cm long"), Best, T.GetLocation().X, T.GetLocation().Y, FMath::Max(T.GetScale3D().X, T.GetScale3D().Y) * 100.f);
 			}
 		}
 		else if (What == TEXT("navmesh"))
@@ -595,44 +645,74 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaBreakCommand(
 				}
 				if (bFound) { break; }
 			}
-			Geo->Floors->AddInstance(FTransform(FRotator::ZeroRotator, FVector(Spot.X, Spot.Y, -5.f), FVector(6.f, 6.f, 0.1f)));
-			Done = FString::Printf(TEXT("added a stray 6 x 6 m floor slab at (%.0f, %.0f)"), Spot.X, Spot.Y);
+			if (UInstancedStaticMeshComponent* Floors = AreaDebug::FirstComponent(Gen, EAreaPieceKind::Floors))
+			{
+				Floors->AddInstance(FTransform(FRotator::ZeroRotator, FVector(Spot.X, Spot.Y, -5.f), FVector(6.f, 6.f, 0.1f)), /*bWorldSpace=*/true);
+				Done = FString::Printf(TEXT("added a stray 6 x 6 m PCG floor slab at (%.0f, %.0f)"), Spot.X, Spot.Y);
+			}
+		}
+		else if (What == TEXT("mass"))
+		{
+			// A solid block across the first corridor, 10 m in: as if a graph had placed a mass on the route.
+			const int32 Corridor = Info->FindSegmentOfType(EAreaSegmentType::Corridor);
+			const float At = Corridor >= 0 ? Info->Segments[Corridor].RouteStart + 1000.f : 1000.f;
+			int32 Segment = -1;
+			const FVector P = Info->GetRoutePointAtDistance(At, Segment);
+			const FVector Dir = Info->GetRouteDirectionAtDistance(At);
+			if (UInstancedStaticMeshComponent* Pillars = AreaDebug::FirstComponent(Gen, EAreaPieceKind::Pillars))
+			{
+				const FRotator Yaw = Dir.Rotation();
+				Pillars->AddInstance(FTransform(Yaw, FVector(P.X, P.Y, Gen->WallHeight * 0.5f - Gen->FloorThickness * 0.5f),
+					FVector(4.f, 12.f, (Gen->WallHeight + Gen->FloorThickness) / 100.f)), /*bWorldSpace=*/true);
+				Done = FString::Printf(TEXT("added a solid 4 x 12 m PCG mass across the route at %.0f m (%.0f, %.0f)"), At / 100.f, P.X, P.Y);
+			}
+			else
+			{
+				Done = TEXT("no PCG pillar component to add the mass to (no rooms in this area)");
+			}
 		}
 		if (Done.IsEmpty())
 		{
-			UE_LOG(LogArea, Warning, TEXT("tls.AreaBreak: unknown rule '%s' (path|residue|terminal|hiding|curb|navmesh)."), *What);
+			UE_LOG(LogArea, Warning, TEXT("tls.AreaBreak: unknown rule '%s' (path|residue|terminal|hiding|curb|navmesh|mass), or nothing to break."), *What);
 			return;
 		}
-		World->MarkPackageDirty();
-		UE_LOG(LogArea, Display, TEXT("tls.AreaBreak %s: %s; navmesh rebuilt in %.3f s."), *What, *Done, Gen->BuildNavigation());
-		AreaValidator::Validate(World).Log(*FString::Printf(TEXT("tls.AreaBreak %s:"), *What), true);
+		UE_LOG(LogArea, Display, TEXT("tls.AreaBreak %s: %s; rebuilding the navmesh and validating."), *What, *Done);
+		AreaDebug::OnceFinished(Gen, [What](AAreaGenerator* G, bool bPassed)
+		{
+			G->GetLastValidation().Log(*FString::Printf(TEXT("tls.AreaBreak %s:"), *What), true);
+			UE_LOG(LogArea, Display, TEXT("tls.AreaBreak %s: ===== %s (navmesh %.2f s) ====="), *What, bPassed ? TEXT("NOT CAUGHT: all rules pass") : TEXT("CAUGHT"), G->LastNavigationSeconds);
+		});
+		Gen->RevalidateAfterNavigationRebuild();
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaMapCommand(
 	TEXT("tls.AreaMap"),
-	TEXT("tls.AreaMap: (editor world) writes Saved/AreaMap.json: floors, walls, curbs, pillars, backdrop footprints, route, gameplay actors and navmesh polygons (connected to the start or not), for a top-down map."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld*)
+	TEXT("tls.AreaMap: (PIE) writes Saved/AreaMap.json: floors, walls, curbs, pillars, backdrop footprints (from the PCG output), route, gameplay actors and navmesh polygons (connected to the start or not), for a top-down map."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* InWorld)
 	{
-		UWorld* World = AreaDebug::EditorWorld();
+		AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaMap"));
+		UWorld* World = Gen ? Gen->GetWorld() : nullptr;
 		const AAreaInfo* Info = AAreaInfo::Find(World);
-		AAreaGeometry* Geo = nullptr;
-		for (TActorIterator<AAreaGeometry> It(World); It; ++It) { Geo = *It; break; }
-		if (!Info || !Geo)
+		if (!Info)
 		{
 			UE_LOG(LogArea, Warning, TEXT("tls.AreaMap: needs a generated area."));
 			return;
 		}
-		FString Json = FString::Printf(TEXT("{\"seed\":%d,\"hash\":\"%016llx\",\"floorZ\":%.1f,\n"), Info->Seed, static_cast<uint64>(Info->LayoutHash), Info->FloorZ);
+		FString Json = FString::Printf(TEXT("{\"act\":%d,\"map\":\"%s\",\"seed\":%d,\"hash\":\"%016llx\",\"floorZ\":%.1f,\"pcgInstances\":%d,\n"), Gen->GetAct(),
+			*UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), Info->Seed, static_cast<uint64>(Gen->GetLayoutHash()), Info->FloorZ, Gen->GetPCGInstanceCount());
 		auto Box = [](const FBox& B) { return FString::Printf(TEXT("[%.0f,%.0f,%.0f,%.0f,%.0f,%.0f]"), B.Min.X, B.Min.Y, B.Min.Z, B.Max.X, B.Max.Y, B.Max.Z); };
-		auto Instances = [&](const UInstancedStaticMeshComponent* Component)
+		auto Instances = [&](EAreaPieceKind Kind)
 		{
 			TArray<FString> Items;
-			for (int32 I = 0; I < Component->GetInstanceCount(); ++I)
+			for (const UInstancedStaticMeshComponent* Component : Gen->GetPCGComponents(Kind))
 			{
-				FTransform T;
-				Component->GetInstanceTransform(I, T, true);
-				const FVector Half = T.GetScale3D() * 50.f;
-				Items.Add(Box(FBox(T.GetLocation() - Half, T.GetLocation() + Half)));
+				for (int32 I = 0; I < Component->GetInstanceCount(); ++I)
+				{
+					FTransform T;
+					Component->GetInstanceTransform(I, T, true);
+					const FVector Half = T.GetScale3D().GetAbs() * 50.f;
+					Items.Add(Box(FBox(T.GetLocation() - Half, T.GetLocation() + Half)));
+				}
 			}
 			return FString::Join(Items, TEXT(","));
 		};
@@ -643,7 +723,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaMapCommand(
 		}
 		Json += FString::Printf(TEXT("\"floors\":[%s],\n"), *FString::Join(Floors, TEXT(",")));
 		Json += FString::Printf(TEXT("\"walls\":[%s],\n\"curbs\":[%s],\n\"pillars\":[%s],\n\"backdrop\":[%s],\n"),
-			*Instances(Geo->Walls), *Instances(Geo->Curbs), *Instances(Geo->Pillars), *Instances(Geo->Backdrop));
+			*Instances(EAreaPieceKind::Walls), *Instances(EAreaPieceKind::Curbs), *Instances(EAreaPieceKind::Pillars), *Instances(EAreaPieceKind::Backdrop));
 		TArray<FString> Route;
 		for (int32 I = 0; I < Info->RoutePoints.Num(); ++I)
 		{
@@ -653,14 +733,15 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaMapCommand(
 		TArray<FString> Actors;
 		for (TActorIterator<AActor> It(World); It; ++It)
 		{
-			if (!It->ActorHasTag(AAreaInfo::GeneratedTag) || It->IsA<AAreaGeometry>() || It->IsA<AAreaInfo>())
+			const bool bListed = It->ActorHasTag(AAreaInfo::GeneratedTag) || It->IsA<APlayerStart>() || It->IsA<AEntity>();
+			if (!bListed || It->IsA<AAreaInfo>())
 			{
 				continue;
 			}
 			const FVector L = It->GetActorLocation();
 			const FVector F = It->GetActorForwardVector();
 			Actors.Add(FString::Printf(TEXT("{\"label\":\"%s\",\"class\":\"%s\",\"pos\":[%.0f,%.0f,%.0f],\"fwd\":[%.2f,%.2f]}"),
-				*It->GetActorLabel(), *It->GetClass()->GetName(), L.X, L.Y, L.Z, F.X, F.Y));
+				*It->GetName(), *It->GetClass()->GetName(), L.X, L.Y, L.Z, F.X, F.Y));
 		}
 		Json += FString::Printf(TEXT("\"actors\":[%s],\n"), *FString::Join(Actors, TEXT(",")));
 
@@ -706,34 +787,35 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaMapCommand(
 		UE_LOG(LogArea, Display, TEXT("tls.AreaMap: wrote %s (%d floors, %d navmesh polygons)."), *FPaths::ConvertRelativePathToFull(Path), Floors.Num(), Polys.Num());
 	}));
 
-#endif // WITH_EDITOR && !UE_BUILD_SHIPPING
-
-#if !UE_BUILD_SHIPPING
-
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaHashCommand(
 	TEXT("tls.AreaHash"),
-	TEXT("tls.AreaHash: (PIE world if running, else the editor world) recomputes the layout hash and generated actor count and compares them with the ones stored in the area info at generation; also says whether an area generator exists in that world."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* InWorld)
+	TEXT("tls.AreaHash [Dump=0]: (PIE) recomputes the layout hash and compares it with the one stored at ready; also says whether PCG built exactly the plan. Dump=1 writes the hashed lines to Saved/AreaHashLines.txt."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
-		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
-		if (!World)
+		AAreaGenerator* Gen = AreaDebug::Generator(InWorld, TEXT("tls.AreaHash"));
+		if (!Gen)
 		{
-			World = InWorld;
+			return;
 		}
-		const AAreaInfo* Info = AAreaInfo::Find(World);
-		int32 Count = 0;
-		const int64 Hash = AAreaInfo::ComputeLayoutHash(World, Count);
-		int32 Generators = 0;
-		for (TActorIterator<AAreaGenerator> It(World); It; ++It) { ++Generators; }
-		const bool bSame = Info && Info->LayoutHash == Hash && Info->GeneratedActorCount == Count;
-		UE_LOG(LogArea, Display, TEXT("tls.AreaHash: %s world %s: recomputed hash %016llx, %d generated actors; stored %016llx, %d: %s; area generators in this world: %d"),
-			World && World->IsGameWorld() ? TEXT("game") : TEXT("editor"), *GetNameSafe(World), static_cast<uint64>(Hash), Count,
-			Info ? static_cast<uint64>(Info->LayoutHash) : 0ull, Info ? Info->GeneratedActorCount : 0, bSame ? TEXT("SAME") : TEXT("DIFFERENT"), Generators);
+		int32 Lines = 0;
+		TArray<FString> Text;
+		const int64 Hash = Gen->ComputeLayoutHash(Lines, &Text);
+		if (Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0)
+		{
+			const FString Path = FPaths::ProjectSavedDir() / TEXT("AreaHashLines.txt");
+			FFileHelper::SaveStringToFile(FString::Join(Text, LINE_TERMINATOR) + LINE_TERMINATOR, *Path);
+			UE_LOG(LogArea, Display, TEXT("tls.AreaHash: wrote %d lines to %s."), Text.Num(), *FPaths::ConvertRelativePathToFull(Path));
+		}
+		FString Why;
+		const bool bMatch = Gen->DoesPCGMatchPlan(Why);
+		UE_LOG(LogArea, Display, TEXT("tls.AreaHash: recomputed %016llx (%d items), stored %016llx: %s; PCG matches the plan: %s%s"),
+			static_cast<uint64>(Hash), Lines, static_cast<uint64>(Gen->GetLayoutHash()), Hash == Gen->GetLayoutHash() ? TEXT("SAME") : TEXT("DIFFERENT"),
+			bMatch ? TEXT("yes") : TEXT("NO"), bMatch ? TEXT("") : *FString::Printf(TEXT(" (%s)"), *Why));
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaGoCommand(
 	TEXT("tls.AreaGo"),
-	TEXT("tls.AreaGo start|corridor|room|gate|hall|exit|Metres [YawOffset=0]: (PIE) puts the pawn on the route centreline at that pose, facing along the route plus YawOffset degrees."),
+	TEXT("tls.AreaGo start|corridor|room|gate|catwalk|hall|exit|Metres [YawOffset=0]: (PIE) puts the pawn on the route centreline at that pose, facing along the route plus YawOffset degrees."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
@@ -741,11 +823,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaGoCommand(
 		APlayerController* Controller = World ? World->GetFirstPlayerController() : nullptr;
 		ACharacter* Character = Controller ? Cast<ACharacter>(Controller->GetPawn()) : nullptr;
 		float Distance = 0.f;
-#if WITH_EDITOR
 		const bool bPose = Info && Args.Num() > 0 && AreaDebug::PoseDistance(Info, Args[0].ToLower(), Distance);
-#else
-		const bool bPose = Info && Args.Num() > 0 && Args[0].IsNumeric() && ((Distance = FCString::Atof(*Args[0]) * 100.f), true);
-#endif
 		if (!Character || !bPose)
 		{
 			UE_LOG(LogArea, Warning, TEXT("tls.AreaGo: needs PIE, an area info and a pose."));
@@ -761,6 +839,37 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaGoCommand(
 		Controller->SetControlRotation(FRotator(0.f, Yaw, 0.f));
 		UE_LOG(LogArea, Display, TEXT("tls.AreaGo: %s = %.1f m along the route (segment %d %s) at (%.0f, %.0f, %.0f), yaw %.0f."), *Args[0], Distance / 100.f, Segment,
 			Info->Segments.IsValidIndex(Segment) ? LexToString(Info->Segments[Segment].Type) : TEXT("-"), Location.X, Location.Y, Location.Z, Yaw);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsTravelNextCommand(
+	TEXT("tls.Travel.Next"),
+	TEXT("tls.Travel.Next: (PIE) travels to the next area as the exit would (after the last area: the main menu). Refused while Stopped."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* InWorld)
+	{
+		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
+		URunSubsystem* Run = URunSubsystem::Get(World);
+		if (!Run)
+		{
+			UE_LOG(LogRun, Warning, TEXT("tls.Travel.Next: needs a game world."));
+			return;
+		}
+		UE_LOG(LogRun, Display, TEXT("tls.Travel.Next: from act %d: %s."), Run->GetActIndex(), Run->TravelToNextArea() ? TEXT("travelling") : TEXT("refused"));
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsTravelToCommand(
+	TEXT("tls.Travel.To"),
+	TEXT("tls.Travel.To <1-4>: (PIE) travels to the area of that act. Refused while Stopped."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
+		URunSubsystem* Run = URunSubsystem::Get(World);
+		if (!Run || Args.Num() == 0)
+		{
+			UE_LOG(LogRun, Warning, TEXT("tls.Travel.To: needs a game world and an act (1-4)."));
+			return;
+		}
+		const int32 Act = FCString::Atoi(*Args[0]);
+		UE_LOG(LogRun, Display, TEXT("tls.Travel.To %d: from act %d: %s."), Act, Run->GetActIndex(), Run->TravelToArea(Act) ? TEXT("travelling") : TEXT("refused"));
 	}));
 
 #endif // !UE_BUILD_SHIPPING

@@ -2,64 +2,139 @@
 
 #include "Area/AreaGenerator.h"
 
+#include "AI/NavDataGenerator.h"
 #include "Area/AreaExit.h"
-#include "Area/AreaGeometry.h"
 #include "Area/AreaInfo.h"
+#include "Area/AreaValidator.h"
+#include "Components/BoxComponent.h"
+#include "Components/BrushComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Components/PointLightComponent.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/LightGroupDevice.h"
 #include "Energy/PowerTerminal.h"
-#include "Engine/StaticMesh.h"
-#include "Entity/Entity.h"
-#include "Residue/Residue.h"
-#include "UObject/ConstructorHelpers.h"
-
-#if WITH_EDITOR
-#include "AI/NavDataGenerator.h"
-#include "ActorFactories/ActorFactory.h"
-#include "Builders/CubeBuilder.h"
-#include "Components/BoxComponent.h"
-#include "Components/InstancedStaticMeshComponent.h"
-#include "Components/PointLightComponent.h"
+#include "Engine/GameInstance.h"
 #include "Engine/PointLight.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Entity/Entity.h"
+#include "Flow/StdFlowSubsystem.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerStart.h"
-#include "Materials/MaterialInterface.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "NavigationSystem.h"
-#endif
+#include "PCGComponent.h"
+#include "PCGGraph.h"
+#include "Residue/Residue.h"
+#include "Run/RunSubsystem.h"
+#include "Run/TheLastShiftSettings.h"
+#include "UObject/ObjectSaveContext.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(AreaGenerator)
 
+const TCHAR* LexToString(EAreaPieceKind Kind)
+{
+	switch (Kind)
+	{
+	case EAreaPieceKind::Floors: return TEXT("Floors");
+	case EAreaPieceKind::Walls: return TEXT("Walls");
+	case EAreaPieceKind::Curbs: return TEXT("Curbs");
+	case EAreaPieceKind::Pillars: return TEXT("Pillars");
+	case EAreaPieceKind::Ceilings: return TEXT("Ceilings");
+	case EAreaPieceKind::Backdrop: return TEXT("Backdrop");
+	}
+	return TEXT("Unknown");
+}
+
+FTransform FAreaPieceHeights::MakeTransform(EAreaPieceKind Kind, const FBox& Box) const
+{
+	FVector Min = Box.Min;
+	FVector Max = Box.Max;
+	switch (Kind)
+	{
+	case EAreaPieceKind::Floors: Min.Z = -FloorThickness; Max.Z = 0.0; break;
+	case EAreaPieceKind::Walls:
+	case EAreaPieceKind::Pillars: Min.Z = -FloorThickness; Max.Z = WallHeight; break;
+	case EAreaPieceKind::Curbs: Min.Z = -FloorThickness; Max.Z = CurbHeight; break;
+	case EAreaPieceKind::Ceilings: Min.Z = WallHeight; Max.Z = WallHeight + FloorThickness; break;
+	case EAreaPieceKind::Backdrop: break;
+	}
+	return FTransform(FRotator::ZeroRotator, (Min + Max) * 0.5, (Max - Min) / 100.0);
+}
+
 AAreaGenerator::AAreaGenerator()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = true;
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Root")));
-	bIsEditorOnlyActor = true;
+
+	PCGBounds = CreateDefaultSubobject<UBoxComponent>(TEXT("PCGBounds"));
+	PCGBounds->SetupAttachment(GetRootComponent());
+	PCGBounds->SetBoxExtent(FVector(150000.0, 150000.0, 30000.0));
+	PCGBounds->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	PCGBounds->SetCollisionResponseToAllChannels(ECR_Ignore);
+	PCGBounds->SetGenerateOverlapEvents(false);
+	PCGBounds->SetCanEverAffectNavigation(false);
+	PCGBounds->SetHiddenInGame(true);
+	PCGBounds->SetVisibility(false);
+
+	StructurePCG = CreateDefaultSubobject<UPCGComponent>(TEXT("StructurePCG"));
+	StructurePCG->GenerationTrigger = EPCGComponentGenerationTrigger::GenerateOnDemand;
+	BackdropPCG = CreateDefaultSubobject<UPCGComponent>(TEXT("BackdropPCG"));
+	BackdropPCG->GenerationTrigger = EPCGComponentGenerationTrigger::GenerateOnDemand;
 
 	ResidueClass = AResidue::StaticClass();
 	TerminalClass = APowerTerminal::StaticClass();
 	DoorClass = ADoorDevice::StaticClass();
 	LightGroupClass = ALightGroupDevice::StaticClass();
-	EntityClass = AEntity::StaticClass();
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("/Engine/BasicShapes/Cube.Cube"));
-	if (CubeMesh.Succeeded())
+}
+
+AAreaGenerator* AAreaGenerator::Find(const UWorld* World)
+{
+	if (World)
 	{
-		BlockMesh = CubeMesh.Object;
+		for (TActorIterator<AAreaGenerator> It(const_cast<UWorld*>(World)); It; ++It)
+		{
+			return *It;
+		}
 	}
+	return nullptr;
+}
+
+bool AAreaGenerator::IsAreaReady(const UWorld* World)
+{
+	const AAreaGenerator* Generator = Find(World);
+	return !Generator || Generator->IsReady();
+}
+
+const FAreaRecipe* AAreaGenerator::GetRecipe() const
+{
+	return UTheLastShiftSettings::Get()->FindRecipe(Act);
 }
 
 int32 AAreaGenerator::GetGateCount() const
 {
-	int32 Count = 0;
-	for (const FAreaSegmentSpec& Spec : Segments)
-	{
-		Count += Spec.Type == EAreaSegmentType::Gate ? 1 : 0;
-	}
-	return Count;
+	const FAreaRecipe* Recipe = GetRecipe();
+	return Recipe ? Recipe->GetGateCount() : 0;
 }
 
-#if WITH_EDITOR
+FAreaPieceHeights AAreaGenerator::GetPieceHeights() const
+{
+	FAreaPieceHeights Heights;
+	Heights.FloorThickness = FloorThickness;
+	Heights.WallHeight = WallHeight;
+	Heights.CurbHeight = CurbHeight;
+	return Heights;
+}
+
+const TArray<FBox>& AAreaGenerator::GetPublishedPieces(EAreaPieceKind Kind) const
+{
+	static const TArray<FBox> Empty;
+	const int32 Index = static_cast<int32>(Kind);
+	return PublishedPieces.IsValidIndex(Index) ? PublishedPieces[Index].Boxes : Empty;
+}
 
 namespace AreaGen
 {
@@ -392,14 +467,15 @@ namespace AreaGen
 	class FBuilder
 	{
 	public:
-		FBuilder(const AAreaGenerator& InG, int32 InLayoutAttempt, float InDoorWidth, float InWalkSpeed, int32 InTerminalCost)
-			: G(InG), Rng(InLayoutAttempt == 0 ? InG.Seed : int32(HashCombine(GetTypeHash(InG.Seed), GetTypeHash(InLayoutAttempt)))),
+		FBuilder(const AAreaGenerator& InG, const FAreaRecipe& InRecipe, int32 InSeed, int32 InLayoutAttempt, float InDoorWidth, float InWalkSpeed, int32 InTerminalCost)
+			: G(InG), R(InRecipe), Rng(InLayoutAttempt == 0 ? InSeed : int32(HashCombine(GetTypeHash(InSeed), GetTypeHash(InLayoutAttempt)))),
 			  DoorWidth(InDoorWidth), WalkSpeed(InWalkSpeed), TerminalCost(InTerminalCost)
 		{
 			Margin = FMath::Max(1, FMath::CeilToInt(G.SegmentClearance / Cell));
 		}
 
 		const AAreaGenerator& G;
+		const FAreaRecipe& R;
 		FRandomStream Rng;
 		float DoorWidth;
 		float WalkSpeed;
@@ -418,7 +494,7 @@ namespace AreaGen
 
 		bool Build()
 		{
-			if (G.Segments.Num() == 0)
+			if (R.Segments.Num() == 0)
 			{
 				Error = TEXT("the recipe has no segments");
 				return false;
@@ -426,7 +502,7 @@ namespace AreaGen
 			FVector2D Head(0.0, 0.0);
 			int32 Dir = 0;
 			Plan.AddRoute(Head, 0);
-			for (int32 Index = 0; Index < G.Segments.Num(); ++Index)
+			for (int32 Index = 0; Index < R.Segments.Num(); ++Index)
 			{
 				if (!PlaceSegment(Index, Head, Dir))
 				{
@@ -470,7 +546,7 @@ namespace AreaGen
 
 		bool PlaceSegment(int32 Index, FVector2D& Head, int32& Dir)
 		{
-			const FAreaSegmentSpec& Spec = G.Segments[Index];
+			const FAreaSegmentSpec& Spec = R.Segments[Index];
 			const int32 Attempts = FMath::Clamp(G.PlacementAttempts, 1, 64);
 			for (int32 Attempt = 0; Attempt < Attempts; ++Attempt)
 			{
@@ -705,7 +781,7 @@ namespace AreaGen
 			CellsIn(Leg.Rect, Body.FloorCells);
 			Body.Seg.DoorPos = Head + DirV(Dir) * SnapLen(L * 0.5f);
 			Body.Seg.DoorDir = Dir;
-			Body.Seg.PoweredSeconds = FMath::Clamp(Spec.PoweredSeconds, 0.5f, 120.f);
+			Body.Seg.PoweredSeconds = FMath::Clamp(Spec.PoweredSeconds, 0.f, 120.f);
 			Body.Head = Head + DirV(Dir) * L;
 			Body.Dir = Dir;
 			Body.Route.Add(Body.Head);
@@ -1151,7 +1227,10 @@ namespace AreaGen
 				Gate.DoorDir = S.DoorDir;
 				Gate.PoweredSeconds = S.PoweredSeconds;
 				const float DoorS = Plan.Project(S.DoorPos);
-				const float Needed = S.PoweredSeconds * WalkSpeed * FMath::Clamp(G.TerminalDistanceFactor, 1.05f, 5.f);
+				// A timed door: the walk from the terminal must outlast it. A door that stays open: a short, fixed distance.
+				const float Needed = S.PoweredSeconds > 0.f
+					? S.PoweredSeconds * WalkSpeed * FMath::Clamp(G.TerminalDistanceFactor, 1.05f, 5.f)
+					: FMath::Clamp(G.UntimedTerminalDistance, 200.f, 5000.f);
 				const float TerminalS = DoorS - Needed;
 				if (TerminalS < 150.f || !FindSideSpot(TerminalS, 100.f, Gate.Terminal, Gate.TerminalFacing))
 				{
@@ -1180,7 +1259,7 @@ namespace AreaGen
 					if (Plan.Segs[Index].Type == Preferred) { Order.Add(Index); }
 				}
 			}
-			for (int32 Group = 0; Group < G.LightGroupCount; ++Group)
+			for (int32 Group = 0; Group < R.LightGroupCount; ++Group)
 			{
 				if (!Order.IsValidIndex(Group))
 				{
@@ -1208,10 +1287,10 @@ namespace AreaGen
 		bool PlaceResidues()
 		{
 			const int32 Gates = GatePlacements.Num();
-			const int32 Normal = G.ResidueCount - Gates;
+			const int32 Normal = R.ResidueCount - Gates;
 			if (Normal < 0)
 			{
-				Error = FString::Printf(TEXT("ResidueCount %d is below the gate count %d (each gate has a regenerating residue)"), G.ResidueCount, Gates);
+				Error = FString::Printf(TEXT("ResidueCount %d is below the gate count %d (each gate has a regenerating residue)"), R.ResidueCount, Gates);
 				return false;
 			}
 			TArray<FVector2D> Placed;
@@ -1320,16 +1399,16 @@ namespace AreaGen
 
 	// --- Geometry from the plan ---
 
+	/** The plan's boxes; structure kinds carry their XY footprint (their Z comes from FAreaPieceHeights). */
 	struct FGeometryPlan
 	{
-		TArray<FTransform> Floors, Walls, Curbs, Pillars, Ceilings, Backdrop;
+		TArray<FBox> Floors, Walls, Curbs, Pillars, Ceilings, Backdrop;
 		TArray<FAreaFloorRect> FloorRects;
 	};
 
-	static FTransform BoxTransform(const FVector& Min, const FVector& Max)
+	static FBox BoxTransform(const FVector& Min, const FVector& Max)
 	{
-		const FVector Size = Max - Min;
-		return FTransform(FRotator::ZeroRotator, (Min + Max) * 0.5, Size / CubeSize);
+		return FBox(Min, Max);
 	}
 
 	/** Greedy merge of a cell set into rectangles (row-major, deterministic). */
@@ -1543,6 +1622,219 @@ namespace AreaGen
 	static FRotator YawOf(const FVector2D& Dir) { return FRotator(0.0, FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X)), 0.0); }
 }
 
+namespace AreaHash
+{
+	static void AddTransform(FString& Out, const FTransform& T)
+	{
+		const FVector L = T.GetLocation();
+		const FRotator R = T.Rotator();
+		const FVector S = T.GetScale3D();
+		Out += FString::Printf(TEXT("|%d,%d,%d|%d,%d,%d|%d,%d,%d"),
+			FMath::RoundToInt(L.X), FMath::RoundToInt(L.Y), FMath::RoundToInt(L.Z),
+			FMath::RoundToInt(R.Pitch * 10.0), FMath::RoundToInt(R.Yaw * 10.0), FMath::RoundToInt(R.Roll * 10.0),
+			FMath::RoundToInt(S.X * 100.0), FMath::RoundToInt(S.Y * 100.0), FMath::RoundToInt(S.Z * 100.0));
+	}
+
+	static FString TransformKey(const FTransform& T)
+	{
+		FString Out;
+		AddTransform(Out, T);
+		return Out;
+	}
+
+	static uint64 Fnv1a(const FString& Text, uint64 Hash)
+	{
+		for (const TCHAR Char : Text)
+		{
+			Hash ^= static_cast<uint64>(Char);
+			Hash *= 1099511628211ull;
+		}
+		return Hash;
+	}
+
+	static constexpr EAreaPieceKind Kinds[] = { EAreaPieceKind::Floors, EAreaPieceKind::Walls, EAreaPieceKind::Curbs,
+		EAreaPieceKind::Pillars, EAreaPieceKind::Ceilings, EAreaPieceKind::Backdrop };
+}
+
+// --- Queries ---
+
+TArray<UInstancedStaticMeshComponent*> AAreaGenerator::GetPCGComponents(EAreaPieceKind Kind) const
+{
+	const FName Tag(*FString::Printf(TEXT("Area%s"), LexToString(Kind)));
+	TArray<UInstancedStaticMeshComponent*> All;
+	GetComponents(All);
+	TArray<UInstancedStaticMeshComponent*> Out;
+	for (UInstancedStaticMeshComponent* Component : All)
+	{
+		if (Component && Component->ComponentHasTag(Tag))
+		{
+			Out.Add(Component);
+		}
+	}
+	Out.Sort([](const UInstancedStaticMeshComponent& A, const UInstancedStaticMeshComponent& B) { return A.GetName() < B.GetName(); });
+	return Out;
+}
+
+int32 AAreaGenerator::GetPCGInstanceCountOf(EAreaPieceKind Kind) const
+{
+	int32 Count = 0;
+	for (const UInstancedStaticMeshComponent* Component : GetPCGComponents(Kind))
+	{
+		Count += Component->GetInstanceCount();
+	}
+	return Count;
+}
+
+int32 AAreaGenerator::GetPCGInstanceCount() const
+{
+	int32 Count = 0;
+	for (const EAreaPieceKind Kind : AreaHash::Kinds)
+	{
+		Count += GetPCGInstanceCountOf(Kind);
+	}
+	return Count;
+}
+
+int64 AAreaGenerator::ComputeLayoutHash(int32& OutLines, TArray<FString>* OutText) const
+{
+	using namespace AreaHash;
+	OutLines = 0;
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return 0;
+	}
+	TArray<FString> Lines;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		const AActor* Actor = *It;
+		if (!Actor || !Actor->ActorHasTag(AAreaInfo::GeneratedTag) || Actor->IsA<AAreaInfo>())
+		{
+			continue;
+		}
+		FString Line = Actor->GetClass()->GetName();
+		AddTransform(Line, Actor->GetActorTransform());
+		if (const AResidue* Residue = Cast<AResidue>(Actor))
+		{
+			Line += FString::Printf(TEXT("|regen=%d"), Residue->bRegenerates ? 1 : 0);
+		}
+		else if (const ADoorDevice* Door = Cast<ADoorDevice>(Actor))
+		{
+			Line += FString::Printf(TEXT("|powered=%d"), FMath::RoundToInt(Door->PoweredSeconds * 100.f));
+		}
+		else if (const APowerTerminal* Terminal = Cast<APowerTerminal>(Actor))
+		{
+			Line += FString::Printf(TEXT("|targets=%d"), Terminal->Targets.Num());
+		}
+		Lines.Add(MoveTemp(Line));
+	}
+
+	// The plan's boxes, in plan order, as the 4b-1 geometry actor (at the origin, one component per kind) hashed them.
+	FString Geometry = TEXT("AreaGeometry");
+	AddTransform(Geometry, FTransform::Identity);
+	const FAreaPieceHeights Heights = GetPieceHeights();
+	for (const EAreaPieceKind Kind : Kinds)
+	{
+		const TArray<FBox>& Boxes = GetPublishedPieces(Kind);
+		Geometry += FString::Printf(TEXT("|%s:%d"), LexToString(Kind), Boxes.Num());
+		for (const FBox& Box : Boxes)
+		{
+			AddTransform(Geometry, Heights.MakeTransform(Kind, Box));
+		}
+	}
+	Lines.Add(MoveTemp(Geometry));
+
+	for (TActorIterator<APlayerStart> It(World); It; ++It)
+	{
+		FString Line = It->GetClass()->GetName();
+		AddTransform(Line, It->GetActorTransform());
+		Lines.Add(MoveTemp(Line));
+		break;
+	}
+	for (TActorIterator<AEntity> It(World); It; ++It)
+	{
+		FString Line = It->GetClass()->GetName();
+		AddTransform(Line, FTransform(It->GetActorRotation(), PlannedEntity));
+		Lines.Add(MoveTemp(Line));
+		break;
+	}
+	if (NavigationBounds.IsValid)
+	{
+		FString Line = TEXT("NavMeshBoundsVolume");
+		AddTransform(Line, FTransform(FRotator::ZeroRotator, NavigationBounds.GetCenter()));
+		Lines.Add(MoveTemp(Line));
+	}
+	if (const AAreaInfo* Info = AAreaInfo::Find(World))
+	{
+		Lines.Add(FString::Printf(TEXT("AreaInfo|seed=%d|segments=%d|route=%d"), Info->Seed, Info->Segments.Num(), FMath::RoundToInt(Info->GetRouteLength())));
+	}
+	Lines.Sort();
+	OutLines = Lines.Num();
+	if (OutText)
+	{
+		*OutText = Lines;
+	}
+	uint64 Hash = 14695981039346656037ull;
+	for (const FString& Line : Lines)
+	{
+		Hash = Fnv1a(Line, Hash);
+		Hash = Fnv1a(TEXT("\n"), Hash);
+	}
+	return static_cast<int64>(Hash);
+}
+
+bool AAreaGenerator::DoesPCGMatchPlan(FString& OutWhy) const
+{
+	using namespace AreaHash;
+	const FAreaPieceHeights Heights = GetPieceHeights();
+	TArray<FString> Problems;
+	for (const EAreaPieceKind Kind : Kinds)
+	{
+		TArray<FString> Planned;
+		for (const FBox& Box : GetPublishedPieces(Kind))
+		{
+			Planned.Add(TransformKey(Heights.MakeTransform(Kind, Box)));
+		}
+		TArray<FString> Built;
+		for (const UInstancedStaticMeshComponent* Component : GetPCGComponents(Kind))
+		{
+			for (int32 Index = 0; Index < Component->GetInstanceCount(); ++Index)
+			{
+				FTransform T;
+				Component->GetInstanceTransform(Index, T, /*bWorldSpace=*/true);
+				Built.Add(TransformKey(T));
+			}
+		}
+		if (Planned.Num() != Built.Num())
+		{
+			Problems.Add(FString::Printf(TEXT("%s: planned %d, built %d"), LexToString(Kind), Planned.Num(), Built.Num()));
+			continue;
+		}
+		Planned.Sort();
+		Built.Sort();
+		int32 Different = 0;
+		FString First;
+		for (int32 Index = 0; Index < Planned.Num(); ++Index)
+		{
+			if (Planned[Index] != Built[Index])
+			{
+				if (Different++ == 0)
+				{
+					First = FString::Printf(TEXT(" (first: planned %s, built %s)"), *Planned[Index], *Built[Index]);
+				}
+			}
+		}
+		if (Different > 0)
+		{
+			Problems.Add(FString::Printf(TEXT("%s: %d of %d transforms differ%s"), LexToString(Kind), Different, Planned.Num(), *First));
+		}
+	}
+	OutWhy = FString::Join(Problems, TEXT("; "));
+	return Problems.Num() == 0;
+}
+
+// --- Clearing ---
+
 int32 AAreaGenerator::ClearArea()
 {
 	UWorld* World = GetWorld();
@@ -1560,88 +1852,507 @@ int32 AAreaGenerator::ClearArea()
 	}
 	for (AActor* Actor : ToRemove)
 	{
-		World->EditorDestroyActor(Actor, true);
+#if WITH_EDITOR
+		if (!World->IsGameWorld())
+		{
+			World->EditorDestroyActor(Actor, true);
+			continue;
+		}
+#endif
+		Actor->Destroy();
 	}
-	if (ToRemove.Num() > 0)
+	for (UPCGComponent* Component : { StructurePCG.Get(), BackdropPCG.Get() })
 	{
-		MarkPackageDirty();
+		if (Component && Component->IsRegistered())
+		{
+			Component->CleanupLocalImmediate(/*bRemoveComponents=*/true);
+		}
 	}
+	PublishedPieces.Reset();
+	for (TArray<FTransform>* Plan : { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop })
+	{
+		Plan->Reset();
+	}
+	NavigationBounds = FBox(ForceInit);
+	RouteLength = 0.f;
 	return ToRemove.Num();
 }
 
+#if WITH_EDITOR
 void AAreaGenerator::Clear()
 {
 	const int32 Removed = ClearArea();
-	UE_LOG(LogArea, Log, TEXT("%s: cleared %d generated actors."), *GetName(), Removed);
+	UE_LOG(LogArea, Log, TEXT("%s: cleared the preview (%d actors and the PCG output)."), *GetName(), Removed);
 }
 
 void AAreaGenerator::Generate()
 {
-	FString Error;
-	if (!GenerateArea(Error))
-	{
-		UE_LOG(LogArea, Error, TEXT("%s: generation failed for seed %d: %s"), *GetName(), Seed, *Error);
-	}
-}
-
-float AAreaGenerator::BuildNavigation()
-{
-	UWorld* World = GetWorld();
-	UNavigationSystemV1* NavSys = World ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
-	if (!NavSys)
-	{
-		return -1.f;
-	}
-	if (NavSys->IsNavigationBuildingLocked(static_cast<uint8>(~ENavigationBuildLock::NoUpdateInEditor)))
-	{
-		// Typically AsyncLoadLock right after a map load: Build() would silently do nothing and leave a stale navmesh.
-		UE_LOG(LogArea, Error, TEXT("%s: the navmesh was NOT rebuilt: navigation building is locked (wait for the map to finish loading, then regenerate)."), *GetName());
-		return -1.f;
-	}
-	for (TActorIterator<ANavMeshBoundsVolume> It(World); It; ++It)
-	{
-		NavSys->OnNavigationBoundsUpdated(*It);
-	}
-	const double T0 = FPlatformTime::Seconds();
-	// Pending bounds and octree updates (the geometry just spawned or removed).
-	NavSys->Tick(0.f);
-	ANavigationData* NavData = NavSys->GetDefaultNavDataInstance(FNavigationSystem::DontCreate);
-	FNavDataGenerator* NavGenerator = NavData ? NavData->GetGenerator() : nullptr;
-	if (NavGenerator)
-	{
-		// Not UNavigationSystemV1::Build(): ANavigationData::RebuildAll first waits for every pending asset and shader
-		// compilation, and a shader job that never completes then freezes the editor. The tiles built are the same.
-		NavGenerator->OnNavigationBoundsChanged();
-		NavGenerator->RebuildAll();
-		NavGenerator->EnsureBuildCompletion();
-	}
-	else
-	{
-		NavSys->Build();
-	}
-	return static_cast<float>(FPlatformTime::Seconds() - T0);
-}
-
-bool AAreaGenerator::GenerateArea(FString& OutError, bool bBuildNavigation)
-{
-	using namespace AreaGen;
 	UWorld* World = GetWorld();
 	if (!World || World->IsGameWorld())
 	{
-		OutError = TEXT("generation runs only in the editor world");
-		LastError = OutError;
+		UE_LOG(LogArea, Warning, TEXT("%s: Generate() is the editor preview; at runtime the area is generated at load (tls.AreaGenerate regenerates it)."), *GetName());
+		return;
+	}
+	Act = URunSubsystem::GetActIndexOf(World);
+	const int32 PreviewSeed = UTheLastShiftSettings::Get()->GetSeed(Act);
+	for (UPCGComponent* Component : { StructurePCG.Get(), BackdropPCG.Get() })
+	{
+		// The preview's PCG output is never saved with the map.
+		Component->SetEditingMode(EPCGEditorDirtyMode::Preview, EPCGEditorDirtyMode::Preview);
+	}
+	FString Error;
+	if (!StartAttempt(PreviewSeed, Error))
+	{
+		UE_LOG(LogArea, Error, TEXT("%s: preview of act %d seed %d failed: %s"), *GetName(), Act, PreviewSeed, *Error);
+	}
+	State = EAreaGenerationState::Idle;
+}
+#endif
+
+// --- Lifecycle ---
+
+void AAreaGenerator::BeginPlay()
+{
+	Super::BeginPlay();
+	for (UPCGComponent* Component : { StructurePCG.Get(), BackdropPCG.Get() })
+	{
+		Component->OnPCGGraphGeneratedDelegate.AddUObject(this, &AAreaGenerator::HandlePCGGenerated);
+	}
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		return;
+	}
+	Act = URunSubsystem::GetActIndexOf(World);
+	const int32 ActSeed = UTheLastShiftSettings::Get()->GetSeed(Act);
+	UE_LOG(LogArea, Log, TEXT("%s: %s is act %d; generating from seed %d."), *GetName(), *UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), Act, ActSeed);
+	StartGeneration(ActSeed, true);
+}
+
+void AAreaGenerator::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	SetCoverHold(false);
+	for (UPCGComponent* Component : { StructurePCG.Get(), BackdropPCG.Get() })
+	{
+		if (Component)
+		{
+			Component->OnPCGGraphGeneratedDelegate.RemoveAll(this);
+		}
+	}
+	Super::EndPlay(EndPlayReason);
+}
+
+void AAreaGenerator::Regenerate(int32 InSeed, bool bInTryNextSeeds)
+{
+	if (GetWorld() && GetWorld()->IsGameWorld())
+	{
+		StartGeneration(InSeed, bInTryNextSeeds);
+	}
+}
+
+void AAreaGenerator::RevalidateAfterNavigationRebuild()
+{
+	if (!GetWorld() || !GetWorld()->IsGameWorld())
+	{
+		return;
+	}
+	bRevalidateOnly = true;
+	GenerationStartTime = FPlatformTime::Seconds();
+	StartNavigationRebuild();
+}
+
+void AAreaGenerator::StartGeneration(int32 InSeed, bool bInTryNextSeeds)
+{
+	FirstSeed = InSeed;
+	bTryNextSeeds = bInTryNextSeeds;
+	bRevalidateOnly = false;
+	LastSeedsTried = 0;
+	LayoutHash = 0;
+	TimeToReadySeconds = 0.f;
+	GenerationStartTime = FPlatformTime::Seconds();
+	State = EAreaGenerationState::BuildingWorld;
+	SetCoverHold(true);
+	HoldPlayer();
+	if (InSeed < 0 || !GetRecipe() || GetRecipe()->Segments.Num() == 0)
+	{
+		LastError = FString::Printf(TEXT("act %d has no recipe or seed in UTheLastShiftSettings (Config/DefaultGame.ini)"), Act);
+		GiveUp();
+		return;
+	}
+	TryAttempt(InSeed);
+}
+
+void AAreaGenerator::TryAttempt(int32 InSeed)
+{
+	for (;;)
+	{
+		++LastSeedsTried;
+		FString Error;
+		if (StartAttempt(InSeed, Error))
+		{
+			State = EAreaGenerationState::BuildingWorld;
+			PhaseStartTime = FPlatformTime::Seconds();
+			return;
+		}
+		LastError = FString::Printf(TEXT("seed %d: %s"), InSeed, *Error);
+		UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d cannot be built: %s"), *GetName(), Act, InSeed, *Error);
+		if (!bTryNextSeeds || LastSeedsTried >= FMath::Clamp(SeedAttempts, 1, 32))
+		{
+			GiveUp();
+			return;
+		}
+		++InSeed;
+	}
+}
+
+void AAreaGenerator::FailAttempt(const FString& Why)
+{
+	LastError = FString::Printf(TEXT("seed %d: %s"), Seed, *Why);
+	UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d failed: %s"), *GetName(), Act, Seed, *Why);
+	if (bRevalidateOnly)
+	{
+		bRevalidateOnly = false;
+		State = EAreaGenerationState::Ready;
+		OnGenerationFinished.Broadcast(this, false);
+		return;
+	}
+	if (bTryNextSeeds && LastSeedsTried < FMath::Clamp(SeedAttempts, 1, 32))
+	{
+		TryAttempt(Seed + 1);
+		return;
+	}
+	GiveUp();
+}
+
+void AAreaGenerator::GiveUp()
+{
+	State = EAreaGenerationState::Failed;
+	TimeToReadySeconds = static_cast<float>(FPlatformTime::Seconds() - GenerationStartTime);
+	UE_LOG(LogArea, Error, TEXT("%s: act %d: no valid area after %d seed(s) from %d (last error: %s). The player is released on an invalid area."),
+		*GetName(), Act, LastSeedsTried, FirstSeed, *LastError);
+	ReleasePlayer();
+	SetCoverHold(false);
+	OnGenerationFinished.Broadcast(this, false);
+}
+
+void AAreaGenerator::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld())
+	{
+		return;
+	}
+	const bool bBuilding = State == EAreaGenerationState::BuildingWorld || State == EAreaGenerationState::BuildingNavigation;
+	if (bBuilding && !bRevalidateOnly)
+	{
+		HoldPlayer();
+	}
+	const double Now = FPlatformTime::Seconds();
+	const float Timeout = FMath::Clamp(BuildTimeoutSeconds, 1.f, 120.f);
+	if (State == EAreaGenerationState::BuildingWorld)
+	{
+		if (bStructureDone && bBackdropDone)
+		{
+			LastPCGSeconds = static_cast<float>(Now - PhaseStartTime);
+			FString Why;
+			bLastPCGMatchedPlan = DoesPCGMatchPlan(Why);
+			if (!bLastPCGMatchedPlan)
+			{
+				FailAttempt(FString::Printf(TEXT("PCG did not build the plan: %s"), *Why));
+				return;
+			}
+			StartNavigationRebuild();
+		}
+		else if (Now - PhaseStartTime > Timeout)
+		{
+			FailAttempt(FString::Printf(TEXT("PCG did not finish within %.0f s (structure %d, backdrop %d)"), Timeout, bStructureDone ? 1 : 0, bBackdropDone ? 1 : 0));
+		}
+	}
+	else if (State == EAreaGenerationState::BuildingNavigation)
+	{
+		UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+		if (!NavSys)
+		{
+			FailAttempt(TEXT("the world has no navigation system"));
+			return;
+		}
+		if (!bNavigationRequested)
+		{
+			ANavigationData* NavData = NavSys->GetDefaultNavDataInstance(FNavigationSystem::DontCreate);
+			if (NavData)
+			{
+				if (FNavDataGenerator* Generator = NavData->GetGenerator())
+				{
+					// Not ANavigationData::RebuildAll(): in the editor it first waits for every pending shader
+					// compilation. The tiles rebuilt are the same; the build is asynchronous.
+					Generator->OnNavigationBoundsChanged();
+					Generator->RebuildAll();
+				}
+				else
+				{
+					NavData->RebuildAll();
+				}
+				bNavigationRequested = true;
+				NavigationIdleTicks = 0;
+			}
+		}
+		else if (!NavSys->IsNavigationBuildInProgress())
+		{
+			if (++NavigationIdleTicks >= 3)
+			{
+				LastNavigationSeconds = static_cast<float>(Now - PhaseStartTime);
+				FinishWithValidation();
+				return;
+			}
+		}
+		else
+		{
+			NavigationIdleTicks = 0;
+		}
+		if (State == EAreaGenerationState::BuildingNavigation && Now - PhaseStartTime > Timeout)
+		{
+			FailAttempt(FString::Printf(TEXT("the navmesh was not built within %.0f s (navigation data %s)"), Timeout, bNavigationRequested ? TEXT("rebuilding") : TEXT("missing")));
+		}
+	}
+}
+
+void AAreaGenerator::HandlePCGGenerated(UPCGComponent* Component)
+{
+	if (Component == StructurePCG)
+	{
+		bStructureDone = true;
+	}
+	else if (Component == BackdropPCG)
+	{
+		bBackdropDone = true;
+	}
+	UE_LOG(LogArea, Verbose, TEXT("%s: PCG %s done (%d instances so far)."), *GetName(), *GetNameSafe(Component), GetPCGInstanceCount());
+}
+
+void AAreaGenerator::RunPCG(UPCGComponent* Component, UPCGGraphInterface* Graph)
+{
+	const bool bStructure = Component == StructurePCG;
+	if (!Component || !Graph)
+	{
+		UE_LOG(LogArea, Error, TEXT("%s: no %s graph assigned: that part of the area is not built."), *GetName(), bStructure ? TEXT("structure") : TEXT("backdrop"));
+		(bStructure ? bStructureDone : bBackdropDone) = true;
+		return;
+	}
+	if (Component->GetGraph() != Graph)
+	{
+		Component->SetGraphLocal(Graph);
+	}
+	Component->Seed = Seed;
+	Component->GenerateLocal(/*bForce=*/true);
+}
+
+void AAreaGenerator::StartNavigationRebuild()
+{
+	State = EAreaGenerationState::BuildingNavigation;
+	PhaseStartTime = FPlatformTime::Seconds();
+	bNavigationRequested = false;
+	NavigationIdleTicks = 0;
+	FitNavigationBounds();
+}
+
+void AAreaGenerator::FinishWithValidation()
+{
+	const double T0 = FPlatformTime::Seconds();
+	LastValidation = AreaValidator::Validate(GetWorld());
+	const FAreaValidationResult& Result = LastValidation;
+	LastValidationSeconds = static_cast<float>(FPlatformTime::Seconds() - T0);
+	bLastValidationPassed = Result.AllPassed();
+	Result.Log(*FString::Printf(TEXT("%s act %d seed %d:"), *GetName(), Act, Seed), !bLastValidationPassed);
+	if (bRevalidateOnly)
+	{
+		bRevalidateOnly = false;
+		State = EAreaGenerationState::Ready;
+		OnGenerationFinished.Broadcast(this, bLastValidationPassed);
+		return;
+	}
+	if (bLastValidationPassed)
+	{
+		BecomeReady();
+		return;
+	}
+	TArray<FString> Failed;
+	for (const FAreaRuleResult& Rule : Result.Rules)
+	{
+		if (!Rule.bPass)
+		{
+			Failed.Add(FString::Printf(TEXT("rule %d %s: %s"), Rule.Rule, *Rule.Name, *Rule.Summary));
+		}
+	}
+	if (!Result.FatalError.IsEmpty())
+	{
+		Failed.Add(FString::Printf(TEXT("fatal: %s"), *Result.FatalError));
+	}
+	FailAttempt(FString::Printf(TEXT("validation failed: %s"), *FString::Join(Failed, TEXT("; "))));
+}
+
+void AAreaGenerator::BecomeReady()
+{
+	UWorld* World = GetWorld();
+	int32 Lines = 0;
+	LayoutHash = ComputeLayoutHash(Lines);
+	LastActorCount = Lines;
+	TimeToReadySeconds = static_cast<float>(FPlatformTime::Seconds() - GenerationStartTime);
+	if (AAreaInfo* Info = AAreaInfo::Find(World))
+	{
+		Info->LayoutHash = LayoutHash;
+		Info->GeneratedActorCount = Lines;
+		Info->Act = Act;
+		Info->SeedsTried = LastSeedsTried;
+		Info->PCGInstanceCount = GetPCGInstanceCount();
+		Info->PCGSeconds = LastPCGSeconds;
+		Info->NavBuildSeconds = LastNavigationSeconds;
+		Info->ValidationSeconds = LastValidationSeconds;
+		Info->TimeToReadySeconds = TimeToReadySeconds;
+	}
+	State = EAreaGenerationState::Ready;
+	ReleasePlayer();
+	SetCoverHold(false);
+	UE_LOG(LogArea, Display, TEXT("%s: AREA READY: act %d, map %s, seed %d (%d tried), hash %016llx, route %.1f m, %d PCG instances (plan %s), plan %.3f s, PCG %.3f s, navmesh %.3f s, validation %.3f s, time to ready %.2f s."),
+		*GetName(), Act, *UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), Seed, LastSeedsTried, static_cast<uint64>(LayoutHash), RouteLength / 100.f,
+		GetPCGInstanceCount(), bLastPCGMatchedPlan ? TEXT("matched") : TEXT("NOT MATCHED"), LastGenerationSeconds, LastPCGSeconds, LastNavigationSeconds,
+		LastValidationSeconds, TimeToReadySeconds);
+	if (URunSubsystem* Run = URunSubsystem::Get(this))
+	{
+		Run->NotifyAreaReady(World);
+	}
+	OnAreaReady.Broadcast();
+	OnGenerationFinished.Broadcast(this, true);
+}
+
+// --- Player and screen ---
+
+void AAreaGenerator::HoldPlayer()
+{
+	UWorld* World = GetWorld();
+	APlayerController* Controller = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
+	if (!Pawn || HeldPawn.Get() == Pawn)
+	{
+		return;
+	}
+	Pawn->DisableInput(Controller);
+	if (ACharacter* Character = Cast<ACharacter>(Pawn))
+	{
+		Character->GetCharacterMovement()->DisableMovement();
+	}
+	HeldPawn = Pawn;
+	UE_LOG(LogArea, Log, TEXT("%s: holding %s (no movement, no input) until the area is ready."), *GetName(), *Pawn->GetName());
+}
+
+void AAreaGenerator::ReleasePlayer()
+{
+	UWorld* World = GetWorld();
+	APlayerController* Controller = World ? World->GetFirstPlayerController() : nullptr;
+	APawn* Pawn = HeldPawn.Get();
+	if (!Pawn && Controller)
+	{
+		Pawn = Controller->GetPawn();
+	}
+	if (!Pawn)
+	{
+		return;
+	}
+	Pawn->SetActorLocationAndRotation(PlannedStart, PlannedStartRotation, false, nullptr, ETeleportType::TeleportPhysics);
+	if (Controller)
+	{
+		Controller->SetControlRotation(PlannedStartRotation);
+	}
+	if (ACharacter* Character = Cast<ACharacter>(Pawn))
+	{
+		Character->GetCharacterMovement()->StopMovementImmediately();
+		Character->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+	}
+	Pawn->EnableInput(Controller);
+	HeldPawn.Reset();
+}
+
+void AAreaGenerator::SetCoverHold(bool bHold)
+{
+	UWorld* World = GetWorld();
+	UGameInstance* GameInstance = World && World->IsGameWorld() ? World->GetGameInstance() : nullptr;
+	UStdFlowSubsystem* Flow = GameInstance ? GameInstance->GetSubsystem<UStdFlowSubsystem>() : nullptr;
+	if (!Flow || bHold == bCoverHeld)
+	{
+		return;
+	}
+	if (bHold)
+	{
+		Flow->AddCoverHold(TEXT("AreaGenerator"));
+	}
+	else
+	{
+		Flow->RemoveCoverHold(TEXT("AreaGenerator"));
+	}
+	bCoverHeld = bHold;
+}
+
+void AAreaGenerator::FitNavigationBounds()
+{
+	UWorld* World = GetWorld();
+	if (!World || !World->IsGameWorld() || !NavigationBounds.IsValid)
+	{
+		return;
+	}
+	ANavMeshBoundsVolume* Volume = nullptr;
+	for (TActorIterator<ANavMeshBoundsVolume> It(World); It; ++It)
+	{
+		Volume = *It;
+		break;
+	}
+	if (!Volume || !Volume->GetBrushComponent())
+	{
+		UE_LOG(LogArea, Error, TEXT("%s: the map has no NavMeshBoundsVolume to fit to the route."), *GetName());
+		return;
+	}
+	// The map's volume keeps its brush; scaling the actor fits it to the route.
+	const FBox Local = Volume->GetBrushComponent()->CalcBounds(FTransform::Identity).GetBox();
+	const FVector LocalSize = Local.GetSize().ComponentMax(FVector(1.0));
+	const FVector Scale = NavigationBounds.GetSize() / LocalSize;
+	const FVector Location = NavigationBounds.GetCenter() - Local.GetCenter() * Scale;
+	Volume->GetRootComponent()->SetMobility(EComponentMobility::Movable);
+	Volume->SetActorTransform(FTransform(FRotator::ZeroRotator, Location, Scale));
+	if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
+	{
+		NavSys->OnNavigationBoundsUpdated(Volume);
+	}
+}
+
+// --- One attempt ---
+
+bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
+{
+	using namespace AreaGen;
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		OutError = TEXT("no world");
 		return false;
 	}
+	const bool bGame = World->IsGameWorld();
 	const double T0 = FPlatformTime::Seconds();
 	ClearArea();
+	Seed = InSeed;
+	bStructureDone = false;
+	bBackdropDone = false;
 
+	const FAreaRecipe* Recipe = GetRecipe();
+	if (!Recipe || Recipe->Segments.Num() == 0)
+	{
+		OutError = FString::Printf(TEXT("act %d has no recipe"), Act);
+		return false;
+	}
 	const FAreaPawnMetrics Pawn = GetAreaPawnMetrics(World);
 	const ADoorDevice* DoorDefaults = DoorClass ? DoorClass->GetDefaultObject<ADoorDevice>() : nullptr;
 	const APowerTerminal* TerminalDefaults = TerminalClass ? TerminalClass->GetDefaultObject<APowerTerminal>() : nullptr;
-	if (!DoorDefaults || !TerminalDefaults || !ResidueClass || !LightGroupClass || !EntityClass || !BlockMesh)
+	if (!DoorDefaults || !TerminalDefaults || !ResidueClass || !LightGroupClass)
 	{
-		OutError = TEXT("a class or the block mesh is not set");
-		LastError = OutError;
+		OutError = TEXT("a gameplay class is not set");
 		return false;
 	}
 	if (CurbHeight <= Pawn.MaxStepHeight)
@@ -1650,21 +2361,23 @@ bool AAreaGenerator::GenerateArea(FString& OutError, bool bBuildNavigation)
 	}
 
 	// The layout is redrawn (from a seed derived from Seed and the attempt) until it fits and its route centreline is
-	// inside the recipe's route length range, with a small margin for the corners the navigation path cuts.
+	// inside the recipe's route length range, with RouteCornerCut for the corners the navigation path cuts.
 	TUniquePtr<FBuilder> Built;
 	FString AttemptErrors;
 	const int32 Layouts = FMath::Clamp(LayoutAttempts, 1, 32);
+	// The walked path cuts corners: the centreline must be long enough for the path to reach the recipe's minimum.
+	const float MinCentreline = Recipe->RouteLengthMin / (1.f - FMath::Clamp(RouteCornerCut, 0.f, 0.3f));
 	for (int32 Attempt = 0; Attempt < Layouts && !Built; ++Attempt)
 	{
-		TUniquePtr<FBuilder> Builder = MakeUnique<FBuilder>(*this, Attempt, DoorDefaults->GetDoorSize().Y, Pawn.WalkSpeed, TerminalDefaults->Cost);
+		TUniquePtr<FBuilder> Builder = MakeUnique<FBuilder>(*this, *Recipe, Seed, Attempt, DoorDefaults->GetDoorSize().Y, Pawn.WalkSpeed, TerminalDefaults->Cost);
 		FString Why;
 		if (!Builder->Build())
 		{
 			Why = Builder->Error;
 		}
-		else if (Builder->Plan.RouteLength() < RouteLengthMin * 1.02f || Builder->Plan.RouteLength() > RouteLengthMax * 0.98f)
+		else if (Builder->Plan.RouteLength() < MinCentreline || Builder->Plan.RouteLength() > Recipe->RouteLengthMax * 0.98f)
 		{
-			Why = FString::Printf(TEXT("route %.0f m outside %.0f-%.0f m"), Builder->Plan.RouteLength() / 100.f, RouteLengthMin / 100.f, RouteLengthMax / 100.f);
+			Why = FString::Printf(TEXT("route centreline %.0f m outside %.0f-%.0f m"), Builder->Plan.RouteLength() / 100.f, MinCentreline / 100.f, Recipe->RouteLengthMax * 0.98f / 100.f);
 		}
 		if (Why.IsEmpty())
 		{
@@ -1682,7 +2395,6 @@ bool AAreaGenerator::GenerateArea(FString& OutError, bool bBuildNavigation)
 	if (!Built)
 	{
 		OutError = FString::Printf(TEXT("no layout in %d attempts: %s"), Layouts, *AttemptErrors);
-		LastError = OutError;
 		return false;
 	}
 	FBuilder& Builder = *Built;
@@ -1690,51 +2402,59 @@ bool AAreaGenerator::GenerateArea(FString& OutError, bool bBuildNavigation)
 	FGeometryPlan Geometry;
 	BuildGeometry(*this, Plan, Builder.Rng, Geometry);
 
-	// --- Spawn ---
+	// --- Publish the plan to the PCG graphs ---
+	PublishedPieces.SetNum(6);
+	PublishedPieces[static_cast<int32>(EAreaPieceKind::Floors)].Boxes = Geometry.Floors;
+	PublishedPieces[static_cast<int32>(EAreaPieceKind::Walls)].Boxes = Geometry.Walls;
+	PublishedPieces[static_cast<int32>(EAreaPieceKind::Curbs)].Boxes = Geometry.Curbs;
+	PublishedPieces[static_cast<int32>(EAreaPieceKind::Pillars)].Boxes = Geometry.Pillars;
+	PublishedPieces[static_cast<int32>(EAreaPieceKind::Ceilings)].Boxes = Geometry.Ceilings;
+	PublishedPieces[static_cast<int32>(EAreaPieceKind::Backdrop)].Boxes = Geometry.Backdrop;
+	{
+		const FAreaPieceHeights Heights = GetPieceHeights();
+		TArray<FTransform>* Targets[] = { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop };
+		for (int32 Kind = 0; Kind < 6; ++Kind)
+		{
+			for (const FBox& Box : PublishedPieces[Kind].Boxes)
+			{
+				Targets[Kind]->Add(Heights.MakeTransform(static_cast<EAreaPieceKind>(Kind), Box));
+			}
+		}
+	}
+	RouteLength = Plan.RouteLength();
+
+	// --- Spawn the gameplay actors ---
 	ULevel* Level = GetLevel();
 	auto Spawn = [&](UClass* Class, const FVector& Location, const FRotator& Rotation, const FString& Label, const TCHAR* Folder) -> AActor*
 	{
 		FActorSpawnParameters Params;
 		Params.OverrideLevel = Level;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		if (!bGame)
+		{
+			Params.ObjectFlags |= RF_Transient;
+		}
 		AActor* Actor = World->SpawnActor(Class, &Location, &Rotation, Params);
 		if (Actor)
 		{
 			Actor->Tags.Add(AAreaInfo::GeneratedTag);
-			Actor->SetActorLabel(Label);
-			Actor->SetFolderPath(FName(*FString::Printf(TEXT("Area/%s"), Folder)));
+#if WITH_EDITOR
+			if (!bGame)
+			{
+				Actor->SetActorLabel(Label);
+				Actor->SetFolderPath(FName(*FString::Printf(TEXT("Area/%s"), Folder)));
+			}
+#endif
 		}
 		return Actor;
 	};
 	auto At = [](const FVector2D& P, float Z) { return FVector(P.X, P.Y, Z); };
-
-	// Geometry
-	AAreaGeometry* Geo = Cast<AAreaGeometry>(Spawn(AAreaGeometry::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, TEXT("Area_Geometry"), TEXT("Geometry")));
-	if (!Geo)
-	{
-		OutError = TEXT("could not spawn the geometry actor");
-		LastError = OutError;
-		return false;
-	}
-	const TArray<FTransform>* Sets[] = { &Geometry.Floors, &Geometry.Walls, &Geometry.Curbs, &Geometry.Pillars, &Geometry.Ceilings, &Geometry.Backdrop };
-	const TArray<UInstancedStaticMeshComponent*> Components = Geo->GetAllComponents();
-	for (int32 I = 0; I < Components.Num(); ++I)
-	{
-		Components[I]->SetStaticMesh(BlockMesh);
-		if (GreyboxMaterial)
-		{
-			Components[I]->SetMaterial(0, GreyboxMaterial);
-		}
-		Components[I]->ClearInstances();
-		Components[I]->AddInstances(*Sets[I], false, false);
-	}
 
 	// Info
 	AAreaInfo* Info = Cast<AAreaInfo>(Spawn(AAreaInfo::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, TEXT("Area_Info"), TEXT("Info")));
 	if (!Info)
 	{
 		OutError = TEXT("could not spawn the area info");
-		LastError = OutError;
 		return false;
 	}
 	Info->Seed = Seed;
@@ -1758,9 +2478,25 @@ bool AAreaGenerator::GenerateArea(FString& OutError, bool bBuildNavigation)
 		Info->Segments.Add(Record);
 	}
 
-	// Start, exit, entity
+	// Start (the map's PlayerStart moves to it), exit, entity (the map's entity moves to it)
 	const FVector2D StartDir = Plan.Route.Num() > 1 ? (Plan.Route[1] - Plan.Route[0]).GetSafeNormal() : FVector2D(1.0, 0.0);
-	Spawn(APlayerStart::StaticClass(), At(Plan.Route[0] + StartDir * 150.0, 100.f), YawOf(StartDir), TEXT("Area_PlayerStart"), TEXT("Flow"));
+	PlannedStart = At(Plan.Route[0] + StartDir * 150.0, 100.f);
+	PlannedStartRotation = YawOf(StartDir);
+	PlannedEntity = At(Plan.PointAt(Plan.RouteLength() * 0.5f), 0.f);
+	if (bGame)
+	{
+		for (TActorIterator<APlayerStart> It(World); It; ++It)
+		{
+			It->GetRootComponent()->SetMobility(EComponentMobility::Movable);
+			It->SetActorLocationAndRotation(PlannedStart, PlannedStartRotation);
+			break;
+		}
+		for (TActorIterator<AEntity> It(World); It; ++It)
+		{
+			It->SetActorLocation(PlannedEntity);
+			break;
+		}
+	}
 	const FVector2D EndDir = (Plan.Route.Last() - Plan.Route[Plan.Route.Num() - 2]).GetSafeNormal();
 	AAreaExit* Exit = Cast<AAreaExit>(Spawn(AAreaExit::StaticClass(), At(Plan.Route.Last() - EndDir * 150.0, 150.f), YawOf(EndDir), TEXT("Area_Exit"), TEXT("Flow")));
 	if (Exit)
@@ -1768,7 +2504,6 @@ bool AAreaGenerator::GenerateArea(FString& OutError, bool bBuildNavigation)
 		const float HalfWidth = FMath::Max(100.f, Plan.Segs.Last().Width * 0.5f - 10.f);
 		Exit->GetVolume()->SetBoxExtent(FVector(150.f, HalfWidth, 150.f));
 	}
-	Spawn(EntityClass, At(Plan.PointAt(Plan.RouteLength() * 0.5f), 0.f), FRotator::ZeroRotator, TEXT("Area_Entity"), TEXT("Flow"));
 
 	// Gates
 	for (int32 I = 0; I < Builder.GatePlacements.Num(); ++I)
@@ -1832,7 +2567,7 @@ bool AAreaGenerator::GenerateArea(FString& OutError, bool bBuildNavigation)
 		Spawn(ResidueClass, At(Builder.NormalResidues[I], ResidueHeight), FRotator::ZeroRotator, FString::Printf(TEXT("Area_Residue%02d"), I), TEXT("Residues"));
 	}
 
-	// Navigation bounds fitted to the walkable route.
+	// Navigation bounds fitted to the walkable route (applied to the map's NavMeshBoundsVolume in game worlds).
 	FBox2D Walkable(ForceInit);
 	for (const FAreaFloorRect& R : Geometry.FloorRects)
 	{
@@ -1842,36 +2577,19 @@ bool AAreaGenerator::GenerateArea(FString& OutError, bool bBuildNavigation)
 	Walkable = Grow(Walkable, 200.0);
 	const float BoundsBottom = -100.f;
 	const float BoundsTop = FMath::Max(250.f, WallHeight - 50.f);
-	const FVector BoundsCenter(Walkable.GetCenter().X, Walkable.GetCenter().Y, (BoundsBottom + BoundsTop) * 0.5f);
-	if (ANavMeshBoundsVolume* Bounds = Cast<ANavMeshBoundsVolume>(Spawn(ANavMeshBoundsVolume::StaticClass(), BoundsCenter, FRotator::ZeroRotator, TEXT("Area_NavMeshBounds"), TEXT("Flow"))))
-	{
-		UCubeBuilder* Cube = NewObject<UCubeBuilder>();
-		Cube->X = Walkable.GetSize().X;
-		Cube->Y = Walkable.GetSize().Y;
-		Cube->Z = BoundsTop - BoundsBottom;
-		UActorFactory::CreateBrushForVolumeActor(Bounds, Cube);
-		Bounds->PostEditChange();
-	}
+	NavigationBounds = FBox(FVector(Walkable.Min.X, Walkable.Min.Y, BoundsBottom), FVector(Walkable.Max.X, Walkable.Max.Y, BoundsTop));
+	FitNavigationBounds();
 
-	const float GenerationSeconds = static_cast<float>(FPlatformTime::Seconds() - T0);
-	const float NavSeconds = bBuildNavigation ? BuildNavigation() : 0.f;
+	LastGenerationSeconds = static_cast<float>(FPlatformTime::Seconds() - T0);
+	Info->GenerationSeconds = LastGenerationSeconds;
 
-	int32 ActorCount = 0;
-	Info->GenerationSeconds = GenerationSeconds;
-	Info->NavBuildSeconds = NavSeconds;
-	Info->LayoutHash = AAreaInfo::ComputeLayoutHash(World, ActorCount);
-	Info->GeneratedActorCount = ActorCount;
-	LastLayoutHash = Info->LayoutHash;
-	LastActorCount = ActorCount;
-	LastGenerationSeconds = GenerationSeconds;
-	LastError.Reset();
-	MarkPackageDirty();
+	// --- Build the world from the plan (asynchronous; Tick waits for both) ---
+	RunPCG(StructurePCG, StructureGraph);
+	RunPCG(BackdropPCG, BackdropGraph);
 
-	UE_LOG(LogArea, Log, TEXT("%s: generated seed %d in %.3f s (navmesh %.3f s): %d segments, route %.1f m, %d actors, %d instances (floors %d, walls %d, curbs %d, pillars %d, ceilings %d, backdrop %d), %d residues, %d gates, %d light groups, hash %016llx."),
-		*GetName(), Seed, GenerationSeconds, NavSeconds, Plan.Segs.Num(), Plan.RouteLength() / 100.f, ActorCount, Geo->GetTotalInstanceCount(),
+	UE_LOG(LogArea, Log, TEXT("%s: act %d seed %d planned in %.3f s: %d segments, route %.1f m, boxes (floors %d, walls %d, curbs %d, pillars %d, ceilings %d, backdrop %d), %d residues, %d gates, %d light groups; PCG started."),
+		*GetName(), Act, Seed, LastGenerationSeconds, Plan.Segs.Num(), Plan.RouteLength() / 100.f,
 		Geometry.Floors.Num(), Geometry.Walls.Num(), Geometry.Curbs.Num(), Geometry.Pillars.Num(), Geometry.Ceilings.Num(), Geometry.Backdrop.Num(),
-		Builder.NormalResidues.Num() + Builder.GatePlacements.Num(), Builder.GatePlacements.Num(), Builder.LightPlacements.Num(), static_cast<uint64>(Info->LayoutHash));
+		Builder.NormalResidues.Num() + Builder.GatePlacements.Num(), Builder.GatePlacements.Num(), Builder.LightPlacements.Num());
 	return true;
 }
-
-#endif // WITH_EDITOR

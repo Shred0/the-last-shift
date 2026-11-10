@@ -3,6 +3,8 @@
 // Debug console commands for testing the time state and scan cadence without a keyboard
 // (agents through the editor console, or the developer in PIE). Development builds only.
 
+#include "Area/AreaGenerator.h"
+#include "Run/RunSubsystem.h"
 #include "Components/SpotLightComponent.h"
 #include "Debug/ScanTestListener.h"
 #include "Debug/TlsDebugCommon.h"
@@ -202,6 +204,16 @@ namespace TimeStateDebug
 				Entity->GetLastGatheredFigurePoints(), Entity->GetLastGatheredTrailPoints());
 		}
 
+		if (const AAreaGenerator* Area = AAreaGenerator::Find(World))
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("%s   area: act=%d map=%s ready=%d seed=%d hash=%016llx route=%.1fm pcgInstances=%d timeToReady=%.2fs"),
+				Prefix, Area->GetAct(), *UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), Area->IsReady() ? 1 : 0, Area->GetSeed(),
+				static_cast<uint64>(Area->GetLayoutHash()), Area->GetRouteLength() / 100.f, Area->GetPCGInstanceCount(), Area->GetTimeToReadySeconds());
+		}
+		else
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("%s   area: none (act=%d map=%s)"), Prefix, URunSubsystem::GetActIndexOf(World), *UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()));
+		}
 		if (const UEnergySubsystem* Energy = UEnergySubsystem::Get(World))
 		{
 			UE_LOG(LogTheLastShift, Log, TEXT("%s   energy: banked=%d session=%d total=%d boundDirector=%d"),

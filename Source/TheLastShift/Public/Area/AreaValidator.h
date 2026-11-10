@@ -4,8 +4,6 @@
 
 #include "CoreMinimal.h"
 
-#if WITH_EDITOR
-
 class UWorld;
 
 /** Outcome of one validator rule. */
@@ -31,8 +29,8 @@ struct THELASTSHIFT_API FAreaValidationResult
 };
 
 /**
- * Checks a generated area in World against the rules a hand-built level must meet, reading the recipe from the
- * map's AAreaGenerator, the layout from its AAreaInfo, and the rest from the actors and the navmesh themselves:
+ * Checks a generated area in World against the rules a hand-built level must meet, reading the recipe through the
+ * map's AAreaGenerator (from UTheLastShiftSettings), the layout from its AAreaInfo, and the rest from the actors and the navmesh themselves:
  *
  * 1. A navigation path exists from the PlayerStart to the exit, with a length in the recipe's range.
  * 2. Every residue, terminal and door is reachable on the navmesh, and the counts match the recipe.
@@ -51,4 +49,3 @@ namespace AreaValidator
 	THELASTSHIFT_API FAreaValidationResult Validate(UWorld* World);
 }
 
-#endif // WITH_EDITOR

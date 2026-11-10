@@ -637,33 +637,43 @@ namespace EnergyDebug
 	};
 	static FResidueTestState GResidue;
 
+	/** Residues collected per loss round: 2 (residues 2 and 3) with four or more normal residues, else 1 (residue 2). */
+	static int32 LossRoundSize()
+	{
+		return Residues(false).Num() >= 4 ? 2 : 1;
+	}
+
 	static void AddCollectTwoAndExit(TArray<FStep>& Steps, EStopExitReason Reason)
 	{
 		const FString R = LexToString(Reason);
+		const int32 N = LossRoundSize();
 		Steps.Add(Do(FString::Printf(TEXT("stop (%s round)"), *R), []() { StopTime(); return 1.3f; }));
 		AddHold(Steps, []() { return NormalResidue(2); }, 2.7f);
-		AddHold(Steps, []() { return NormalResidue(3); }, 2.7f);
-		Steps.Add(Do(TEXT("exit"), [Reason, R]()
+		if (N == 2)
+		{
+			AddHold(Steps, []() { return NormalResidue(3); }, 2.7f);
+		}
+		Steps.Add(Do(TEXT("exit"), [Reason, R, N]()
 		{
 			const AResidue* A = NormalResidue(2);
-			const AResidue* B = NormalResidue(3);
-			Check(Session() == 2 && A && B && A->GetState() == EResidueState::Collected && B->GetState() == EResidueState::Collected,
-				FString::Printf(TEXT("%s round: two collected before the exit (session %d)"), *R, Session()));
+			const AResidue* B = N == 2 ? NormalResidue(3) : A;
+			Check(Session() == N && A && B && A->GetState() == EResidueState::Collected && B->GetState() == EResidueState::Collected,
+				FString::Printf(TEXT("%s round: %d collected before the exit (session %d)"), *R, N, Session()));
 			UScanDirectorComponent* D = Director();
 			Check(D && D->ForceExit(Reason), FString::Printf(TEXT("ForceExit(%s)"), *R));
 			return 0.3f;
 		}));
-		Steps.Add(Do(TEXT("after exit"), [Reason, R]()
+		Steps.Add(Do(TEXT("after exit"), [Reason, R, N]()
 		{
 			const AResidue* A = NormalResidue(2);
-			const AResidue* B = NormalResidue(3);
+			const AResidue* B = N == 2 ? NormalResidue(3) : A;
 			const UTimeStateSubsystem* T = TS();
 			Check(T && !T->IsStopped() && T->GetLastExitReason() == Reason, FString::Printf(TEXT("%s: time Normal, last exit %s"), *R,
 				T ? LexToString(T->GetLastExitReason()) : TEXT("-")));
 			Check(Banked() == GResidue.Banked0 + 2 && Session() == 0, FString::Printf(TEXT("%s: banked unchanged %d (expected %d), session %d"),
 				*R, Banked(), GResidue.Banked0 + 2, Session()));
 			Check(A && B && A->GetState() == EResidueState::Available && B->GetState() == EResidueState::Available,
-				FString::Printf(TEXT("%s: both residues back in place (%s, %s)"), *R, A ? LexToString(A->GetState()) : TEXT("-"),
+				FString::Printf(TEXT("%s: the residues are back in place (%s, %s)"), *R, A ? LexToString(A->GetState()) : TEXT("-"),
 					B ? LexToString(B->GetState()) : TEXT("-")));
 			return 0.3f;
 		}));
@@ -676,9 +686,9 @@ namespace EnergyDebug
 		S.Add(Do(TEXT("setup"), []()
 		{
 			ResumeTime();
-			if (Residues(false).Num() < 4 || !RegenResidue() || !Energy() || !Pawn() || !TerminalFor<ADoorDevice>())
+			if (Residues(false).Num() < 3 || !RegenResidue() || !Energy() || !Pawn() || !TerminalFor<ADoorDevice>())
 			{
-				Check(false, FString::Printf(TEXT("setup: needs 4 residues, 1 regenerating, a door terminal, a pawn (have %d, %d)"),
+				Check(false, FString::Printf(TEXT("setup: needs 3 normal residues, 1 regenerating, a door terminal, a pawn (have %d, %d)"),
 					Residues(false).Num(), Residues(true).Num()));
 				return -1.f;
 			}
@@ -772,10 +782,8 @@ namespace EnergyDebug
 			Check(R && R->GetState() == EResidueState::Collected, TEXT("a residue lost to RewoundAndJumped is collectable again"));
 			return 0.f;
 		}));
-		AddHold(S, []() { return NormalResidue(3); }, 2.7f);
-		// Maps with more than four normal residues (generated areas): collect the rest in the same Stop, so every normal
-		// residue is spent before the dead end.
-		for (int32 Extra = 4; Extra < Residues(false).Num(); ++Extra)
+		// Collect the rest in the same Stop, so every normal residue is spent before the dead end.
+		for (int32 Extra = 3; Extra < Residues(false).Num(); ++Extra)
 		{
 			AddHold(S, [Extra]() { return NormalResidue(Extra); }, 2.7f);
 		}
@@ -929,7 +937,56 @@ namespace EnergyDebug
 				FString::Printf(TEXT("Normal, 1 energy: spent, door powered and open (%s), banked %d, OnActivated %d"), *DeviceLine(D), Banked(), L->Activations));
 			return 0.f;
 		}));
-		S.Add(WaitFor(TEXT("door closes when its time runs out"), []() { return !Door()->IsOpen(); }, DoorSeconds() + 2.f));
+		if (DoorSeconds() > 0.f)
+		{
+			S.Add(WaitFor(TEXT("door closes when its time runs out"), []() { return !Door()->IsOpen(); }, DoorSeconds() + 2.f));
+			return;
+		}
+		// A door that stays open once paid (PoweredSeconds 0): still open after a while in Normal time and after a Stop.
+		S.Add(Wait(3.f));
+		S.Add(Do(TEXT("untimed door: stop for 5 s"), []()
+		{
+			Check(Door()->IsPowered() && Door()->IsOpen(), FString::Printf(TEXT("untimed door still open 3 s after paying: %s"), *DeviceLine(Door())));
+			StopTime();
+			return 5.f;
+		}));
+		S.Add(Do(TEXT("untimed door: resume"), []()
+		{
+			ResumeTime();
+			Check(Door()->IsPowered() && Door()->IsOpen(), FString::Printf(TEXT("untimed door still open after a Stop: %s"), *DeviceLine(Door())));
+			return 0.f;
+		}));
+	}
+
+	/** A door that stays open once paid: walking from its terminal in Normal time gets through (it is paid already). */
+	static void AddUntimedCrossingPhase(TArray<FStep>& S)
+	{
+		S.Add(Do(TEXT("untimed crossing: pay if needed"), []()
+		{
+			ResumeTime();
+			if (!Door()->IsPowered())
+			{
+				Energy()->AddBankedEnergy(1);
+			}
+			return 0.1f;
+		}));
+		AddPay(S, []() { return TerminalFor<ADoorDevice>(); }, TEXT("door terminal"));
+		S.Add(Do(TEXT("walk in Normal time through the open door"), []()
+		{
+			Check(Door()->IsOpen(), FString::Printf(TEXT("paid: %s"), *DeviceLine(Door())));
+			const bool bStarted = StartWalker(BeyondDoor(Door(), TerminalFor<ADoorDevice>()), Door());
+			Check(bStarted, FString::Printf(TEXT("navigation path from the terminal to 2.5 m past the door: %.0f cm"), GWalker.PathLength));
+			return bStarted ? 0.f : -1.f;
+		}));
+		S.Add(WaitFor(TEXT("walk in Normal time arrives past the door"), []() { return !GWalker.bActive; }, 40.f, []()
+		{
+			StopWalker();
+			Check(GWalker.bArrived && GWalker.CrossTime > 0.0 && GWalker.bDoorOpenAtCross,
+				FString::Printf(TEXT("crossed the untimed door in Normal time, door open (crossed at +%.2f s of walking, arrived %d, stuck %d)"),
+					GWalker.CrossTime - GWalker.StartTime, GWalker.bArrived ? 1 : 0, GWalker.bStuck ? 1 : 0));
+			TeleportTo(TerminalFor<ADoorDevice>());
+			return 0.2f;
+		}));
 	}
 
 	static void AddTimerPhase(TArray<FStep>& S)
@@ -1056,11 +1113,15 @@ namespace EnergyDebug
 		{
 			Steps.Add(Do(TEXT("give 2"), []() { ResumeTime(); Energy()->AddBankedEnergy(2); return 0.1f; }));
 			AddPay(Steps, []() { return TerminalFor<ADoorDevice>(); }, TEXT("door terminal"));
-			AddPay(Steps, []() { return TerminalFor<ALightGroupDevice>(); }, TEXT("light terminal"));
-			Steps.Add(Do(TEXT("check both powered"), []()
+			if (LightGroup())
 			{
-				Check(Door()->IsPowered() && LightGroup()->IsPowered() && LightGroup()->GetLitCount() == LightGroup()->Lights.Num(),
-					FString::Printf(TEXT("paid: %s; %s"), *DeviceLine(Door()), *DeviceLine(LightGroup())));
+				AddPay(Steps, []() { return TerminalFor<ALightGroupDevice>(); }, TEXT("light terminal"));
+			}
+			Steps.Add(Do(TEXT("check powered"), []()
+			{
+				const ALightGroupDevice* L = LightGroup();
+				Check(Door()->IsPowered() && (!L || (L->IsPowered() && L->GetLitCount() == L->Lights.Num())),
+					FString::Printf(TEXT("paid: %s; %s"), *DeviceLine(Door()), L ? *DeviceLine(L) : TEXT("no light group")));
 				return 0.f;
 			}));
 		};
@@ -1075,14 +1136,15 @@ namespace EnergyDebug
 					return -1.f;
 				}
 				StopTime();
+				const ALightGroupDevice* L = LightGroup();
 				GDevice.DoorLightsRemaining[0] = Door()->GetRemainingSeconds();
-				GDevice.DoorLightsRemaining[1] = LightGroup()->GetRemainingSeconds();
+				GDevice.DoorLightsRemaining[1] = L ? L->GetRemainingSeconds() : 0.f;
 				E->ContactResponse = Response;
 				const bool bSpawned = E->SpawnNow(E->MinSpawnDistance);
 				Note(FString::Printf(TEXT("stopped: door %.3f s, lights %.3f s; entity spawned %d at path distance %.0f cm"),
 					GDevice.DoorLightsRemaining[0], GDevice.DoorLightsRemaining[1], bSpawned ? 1 : 0, E->GetPathDistanceToPlayer()));
-				Check(Door()->IsPowered() && LightGroup()->IsPowered() && LightGroup()->GetLitCount() == 0,
-					FString::Printf(TEXT("while Stopped both stay powered and the lights are dark: %s; %s"), *DeviceLine(Door()), *DeviceLine(LightGroup())));
+				Check(Door()->IsPowered() && (!L || (L->IsPowered() && L->GetLitCount() == 0)),
+					FString::Printf(TEXT("while Stopped the devices stay powered and the lights are dark: %s; %s"), *DeviceLine(Door()), L ? *DeviceLine(L) : TEXT("no light group")));
 				return bSpawned ? 0.f : -1.f;
 			}));
 			Steps.Add(WaitFor(TEXT("contact ends the Stop"), []() { return !IsStopped(); }, 20.f));
@@ -1090,10 +1152,14 @@ namespace EnergyDebug
 
 		S.Add(Do(TEXT("reset: setup"), []()
 		{
-			if (!Entity() || !LightGroup() || !TerminalFor<ALightGroupDevice>())
+			if (!Entity() || (LightGroup() && !TerminalFor<ALightGroupDevice>()))
 			{
-				Check(false, TEXT("reset: needs an entity, a light group and its terminal"));
+				Check(false, TEXT("reset: needs an entity (and a terminal for the light group, if any)"));
 				return -1.f;
+			}
+			if (!LightGroup())
+			{
+				Note(TEXT("no light group in this area: the reset checks the door only"));
 			}
 			GDevice.SavedResponse = Entity()->ContactResponse;
 			return 0.f;
@@ -1103,21 +1169,23 @@ namespace EnergyDebug
 		S.Add(Do(TEXT("check jump"), []()
 		{
 			Check(TS()->GetLastExitReason() == EStopExitReason::Jumped, FString::Printf(TEXT("exit %s"), LexToString(TS()->GetLastExitReason())));
-			Check(!Door()->IsPowered() && !Door()->IsOpen() && !LightGroup()->IsPowered() && LightGroup()->GetLitCount() == 0,
-				FString::Printf(TEXT("contact with Jump switches both off: %s; %s"), *DeviceLine(Door()), *DeviceLine(LightGroup())));
+			const ALightGroupDevice* L = LightGroup();
+			Check(!Door()->IsPowered() && !Door()->IsOpen() && (!L || (!L->IsPowered() && L->GetLitCount() == 0)),
+				FString::Printf(TEXT("contact with Jump switches the devices off: %s; %s"), *DeviceLine(Door()), L ? *DeviceLine(L) : TEXT("no light group")));
 			return 0.3f;
 		}));
 		PayBoth(S);
 		ContactStop(S, EEntityContactResponse::Rewind);
 		S.Add(Do(TEXT("check rewind"), []()
 		{
+			const ALightGroupDevice* L = LightGroup();
 			const float DoorAfter = Door()->GetRemainingSeconds();
-			const float LightsAfter = LightGroup()->GetRemainingSeconds();
+			const float LightsAfter = L ? L->GetRemainingSeconds() : 0.f;
 			Check(TS()->GetLastExitReason() == EStopExitReason::Rewound, FString::Printf(TEXT("exit %s"), LexToString(TS()->GetLastExitReason())));
-			Check(Door()->IsPowered() && Door()->IsOpen() && LightGroup()->IsPowered() && LightGroup()->GetLitCount() == LightGroup()->Lights.Num()
+			Check(Door()->IsPowered() && Door()->IsOpen() && (!L || (L->IsPowered() && L->GetLitCount() == L->Lights.Num()))
 				&& FMath::Abs(DoorAfter - GDevice.DoorLightsRemaining[0]) <= 0.05f && FMath::Abs(LightsAfter - GDevice.DoorLightsRemaining[1]) <= 0.05f,
-				FString::Printf(TEXT("contact with Rewind keeps both: door %.3f -> %.3f s, lights %.3f -> %.3f s; %s; %s"),
-					GDevice.DoorLightsRemaining[0], DoorAfter, GDevice.DoorLightsRemaining[1], LightsAfter, *DeviceLine(Door()), *DeviceLine(LightGroup())));
+				FString::Printf(TEXT("contact with Rewind keeps the devices: door %.3f -> %.3f s, lights %.3f -> %.3f s; %s; %s"),
+					GDevice.DoorLightsRemaining[0], DoorAfter, GDevice.DoorLightsRemaining[1], LightsAfter, *DeviceLine(Door()), L ? *DeviceLine(L) : TEXT("no light group")));
 			Entity()->ContactResponse = GDevice.SavedResponse;
 			return 0.f;
 		}));
@@ -1138,9 +1206,18 @@ namespace EnergyDebug
 			return 0.f;
 		}));
 		const bool bAll = Phase.IsEmpty() || Phase == TEXT("all");
+		const bool bTimed = DoorSeconds() > 0.f;
 		if (bAll || Phase == TEXT("terminal")) { AddTerminalPhase(S); }
-		if (bAll || Phase == TEXT("timer")) { if (!bAll) { S.Add(Do(TEXT("bind"), []() { GRun.Listener->BindDoor(Door()); return 0.f; })); } AddTimerPhase(S); }
-		if (bAll || Phase == TEXT("crossing")) { if (!bAll) { S.Add(Do(TEXT("bind"), []() { GRun.Listener->BindDoor(Door()); return 0.f; })); } AddCrossingPhase(S); }
+		if (bTimed && (bAll || Phase == TEXT("timer"))) { if (!bAll) { S.Add(Do(TEXT("bind"), []() { GRun.Listener->BindDoor(Door()); return 0.f; })); } AddTimerPhase(S); }
+		if (bAll || Phase == TEXT("crossing"))
+		{
+			if (!bAll) { S.Add(Do(TEXT("bind"), []() { GRun.Listener->BindDoor(Door()); return 0.f; })); }
+			if (bTimed) { AddCrossingPhase(S); } else { AddUntimedCrossingPhase(S); }
+		}
+		if (!bTimed)
+		{
+			S.Add(Do(TEXT("untimed door"), []() { Note(TEXT("the door stays open once paid (PoweredSeconds 0): timer phase skipped, crossing walks through in Normal time")); return 0.f; }));
+		}
 		if (bAll || Phase == TEXT("reset")) { AddResetPhase(S); }
 		return S;
 	}
