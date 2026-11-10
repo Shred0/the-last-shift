@@ -773,6 +773,12 @@ namespace EnergyDebug
 			return 0.f;
 		}));
 		AddHold(S, []() { return NormalResidue(3); }, 2.7f);
+		// Maps with more than four normal residues (generated areas): collect the rest in the same Stop, so every normal
+		// residue is spent before the dead end.
+		for (int32 Extra = 4; Extra < Residues(false).Num(); ++Extra)
+		{
+			AddHold(S, [Extra]() { return NormalResidue(Extra); }, 2.7f);
+		}
 		S.Add(Do(TEXT("resume: every normal residue spent"), []() { ResumeTime(); return 0.3f; }));
 
 		// Criterion 8: dead end. Collect the regenerating residue, spend everything, it comes back and pays for the door.
@@ -783,7 +789,8 @@ namespace EnergyDebug
 			{
 				bAllSpent &= R->GetState() == EResidueState::Spent;
 			}
-			Check(bAllSpent && Banked() == GResidue.Banked0 + 4, FString::Printf(TEXT("every normal residue spent, banked %d"), Banked()));
+			const int32 Normal = Residues(false).Num();
+			Check(bAllSpent && Banked() == GResidue.Banked0 + Normal, FString::Printf(TEXT("every normal residue spent (%d), banked %d"), Normal, Banked()));
 			StopTime();
 			return 1.3f;
 		}));

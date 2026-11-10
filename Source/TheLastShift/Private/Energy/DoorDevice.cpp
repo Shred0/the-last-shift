@@ -71,6 +71,11 @@ void ADoorDevice::BeginPlay()
 	Super::BeginPlay();
 }
 
+FVector ADoorDevice::GetDoorSize() const
+{
+	return Blocker ? Blocker->GetScaledBoxExtent() * 2.f : FVector::ZeroVector;
+}
+
 bool ADoorDevice::IsDoorwayOccupied() const
 {
 	TArray<AActor*> Pawns;

@@ -25,5 +25,11 @@ public class TheLastShift : ModuleRules
 			"StdCore",
 			"SlateCore"
 		});
+
+		// Area generator and validator (editor-time): volume brushes, editor world access.
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("UnrealEd");
+		}
 	}
 }

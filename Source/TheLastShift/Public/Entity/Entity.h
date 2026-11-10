@@ -293,6 +293,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Entity")
 	FVector GetFigureLocation() const { return FigureLocation; }
 
+	/**
+	 * True when a figure standing at FigureBase (feet, on the navmesh) can be seen from Eye: the same line-of-sight
+	 * traces the spawn uses (any of the figure's visibility heights unobstructed on the visibility channel).
+	 */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	bool CanBeSeenFrom(const FVector& Eye, const FVector& FigureBase) const { return HasLineOfSight(Eye, FigureBase); }
+
 	/** Fresh navigation path distance from the figure to the player; -1 when not manifested or unreachable. */
 	UFUNCTION(BlueprintPure, Category = "Entity", meta = (Units = "cm"))
 	float GetPathDistanceToPlayer() const;

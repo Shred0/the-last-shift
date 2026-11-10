@@ -30,6 +30,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Door")
 	bool IsOpen() const { return bOpen; }
 
+	/** Full size of the doorway the door closes (Blocker's scaled box): X thickness along the passage, Y width, Z height. */
+	UFUNCTION(BlueprintPure, Category = "Door", meta = (Units = "cm"))
+	FVector GetDoorSize() const;
+
+
 	/** True when the power is gone but a pawn in the doorway keeps the door open. */
 	UFUNCTION(BlueprintPure, Category = "Door")
 	bool IsClosePending() const { return bClosePending; }
