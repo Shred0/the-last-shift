@@ -10,7 +10,9 @@
 class UCameraComponent;
 class UInputAction;
 class UInputMappingContext;
+class AResidue;
 class ULidarScanComponent;
+class UResidueCollectCueWidget;
 class UScanCueWidget;
 class UScanDirectorComponent;
 class USpotLightComponent;
@@ -18,8 +20,9 @@ struct FInputActionValue;
 
 /**
  * Test harness pawn for the LidarScan spike (TestLidar map only).
- * First-person movement, toggleable flashlight, time stop toggle, scan requests through the scan director, and the
- * scan-ready cue. Input assets and the cue widget class are assigned in BP_TestPawn.
+ * First-person movement, toggleable flashlight, time stop toggle, scan requests through the scan director, the
+ * scan-ready cue, and Interact: held near an Available residue while Stopped it collects (with the collect cue),
+ * pressed near a power terminal it activates it. Input assets and the cue widget class are assigned in BP_TestPawn.
  */
 UCLASS(Abstract)
 class THELASTSHIFT_API ATestLidarCharacter : public ACharacter
@@ -58,6 +61,13 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
 	TObjectPtr<UScanCueWidget> ScanCue;
 
+	/** Hold-to-collect ring created for the local player. None = no cue. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Test|UI")
+	TSubclassOf<UResidueCollectCueWidget> CollectCueClass;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
+	TObjectPtr<UResidueCollectCueWidget> CollectCue;
+
 	UPROPERTY(EditDefaultsOnly, Category = "Test|Input")
 	TObjectPtr<UInputMappingContext> InputMapping;
 
@@ -76,6 +86,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Test|Input")
 	TObjectPtr<UInputAction> TimeStopAction;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Test|Input")
+	TObjectPtr<UInputAction> InteractAction;
+
 private:
 	void AddInputMapping() const;
 	void CreateScanCue();
@@ -84,10 +97,15 @@ private:
 	void OnScan();
 	void OnToggleFlashlight();
 	void OnToggleTimeStop();
+	void OnInteractPressed();
+	void OnInteractReleased();
 
 	UFUNCTION()
 	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
 
 	/** Flashlight state at the moment time was stopped, restored on Resume. */
 	bool bFlashlightWasOnBeforeStop = false;
+
+	/** Residue being held for, between Interact pressed and released. */
+	TWeakObjectPtr<AResidue> HeldResidue;
 };

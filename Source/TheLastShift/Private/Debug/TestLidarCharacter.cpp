@@ -12,7 +12,10 @@
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
+#include "Energy/PowerTerminal.h"
 #include "LidarScanComponent.h"
+#include "Residue/Residue.h"
+#include "Residue/ResidueCollectCueWidget.h"
 #include "Scan/ScanCueWidget.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "TheLastShift.h"
@@ -45,6 +48,8 @@ ATestLidarCharacter::ATestLidarCharacter()
 	LidarScan->SetupAttachment(Camera);
 
 	ScanDirector = CreateDefaultSubobject<UScanDirectorComponent>(TEXT("ScanDirector"));
+
+	CollectCueClass = UResidueCollectCueWidget::StaticClass();
 }
 
 void ATestLidarCharacter::BeginPlay()
@@ -69,6 +74,12 @@ void ATestLidarCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		ScanCue->RemoveFromParent();
 		ScanCue = nullptr;
 	}
+	if (CollectCue)
+	{
+		CollectCue->SetResidue(nullptr);
+		CollectCue->RemoveFromParent();
+		CollectCue = nullptr;
+	}
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -92,6 +103,15 @@ void ATestLidarCharacter::CreateScanCue()
 	{
 		ScanCue->SetScanDirector(ScanDirector);
 		ScanCue->AddToViewport(0);
+	}
+
+	if (!CollectCue && CollectCueClass)
+	{
+		CollectCue = CreateWidget<UResidueCollectCueWidget>(PC, CollectCueClass);
+		if (CollectCue)
+		{
+			CollectCue->AddToViewport(0);
+		}
 	}
 }
 
@@ -139,6 +159,12 @@ void ATestLidarCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInput
 	{
 		Input->BindAction(TimeStopAction, ETriggerEvent::Started, this, &ATestLidarCharacter::OnToggleTimeStop);
 	}
+	if (InteractAction)
+	{
+		Input->BindAction(InteractAction, ETriggerEvent::Started, this, &ATestLidarCharacter::OnInteractPressed);
+		Input->BindAction(InteractAction, ETriggerEvent::Completed, this, &ATestLidarCharacter::OnInteractReleased);
+		Input->BindAction(InteractAction, ETriggerEvent::Canceled, this, &ATestLidarCharacter::OnInteractReleased);
+	}
 }
 
 void ATestLidarCharacter::OnMove(const FInputActionValue& Value)
@@ -178,6 +204,42 @@ void ATestLidarCharacter::OnToggleTimeStop()
 	if (UTimeStateSubsystem* TimeState = GetWorld()->GetSubsystem<UTimeStateSubsystem>())
 	{
 		TimeState->Toggle();
+	}
+}
+
+void ATestLidarCharacter::OnInteractPressed()
+{
+	// While Stopped, a residue in reach takes the hold; anything else goes to the nearest terminal in reach, which
+	// refuses (and says so) while time is stopped.
+	const UTimeStateSubsystem* TimeState = GetWorld()->GetSubsystem<UTimeStateSubsystem>();
+	if (TimeState && TimeState->IsStopped())
+	{
+		if (AResidue* Residue = AResidue::FindCollectable(this); Residue && Residue->BeginCollect(this))
+		{
+			HeldResidue = Residue;
+			if (CollectCue)
+			{
+				CollectCue->SetResidue(Residue);
+			}
+			return;
+		}
+	}
+	if (APowerTerminal* Terminal = APowerTerminal::FindNearestInRange(this))
+	{
+		Terminal->TryActivate(this);
+	}
+}
+
+void ATestLidarCharacter::OnInteractReleased()
+{
+	if (AResidue* Residue = HeldResidue.Get())
+	{
+		Residue->EndCollect();
+	}
+	HeldResidue.Reset();
+	if (CollectCue)
+	{
+		CollectCue->SetResidue(nullptr);
 	}
 }
 

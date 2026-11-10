@@ -17,6 +17,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDirectedScanReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDirectedBeat, int32, BeatIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStopExited, EStopExitReason, Reason, float, StoppedSeconds);
 
+/** Native, global: a director began or is ending play. */
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnScanDirectorLifecycle, UScanDirectorComponent* /*Director*/);
+
 /**
  * Drives the owner's ULidarScanComponent from the time state and owns the two clocks of a stop:
  *
@@ -162,6 +165,14 @@ public:
 	/** Fires when a Stop ends, after the director has cleared its timers: why, and how long the Stop lasted. */
 	UPROPERTY(BlueprintAssignable, Category = "Scan|Events")
 	FOnStopExited OnStopExited;
+
+	/**
+	 * Every director's BeginPlay (after its own setup) and EndPlay (before its teardown), in any world. For systems that
+	 * outlive a world (game-instance subsystems) and must follow the director of the current one; actors bind to the
+	 * player's director directly.
+	 */
+	static FOnScanDirectorLifecycle OnDirectorBeganPlay;
+	static FOnScanDirectorLifecycle OnDirectorEndingPlay;
 
 protected:
 	virtual void BeginPlay() override;

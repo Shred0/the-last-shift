@@ -6,6 +6,11 @@
 #include "Components/SpotLightComponent.h"
 #include "Debug/ScanTestListener.h"
 #include "Debug/TlsDebugCommon.h"
+#include "Energy/DoorDevice.h"
+#include "Energy/EnergySubsystem.h"
+#include "Energy/LightGroupDevice.h"
+#include "Energy/PoweredDevice.h"
+#include "Energy/PowerTerminal.h"
 #include "Entity/Entity.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -17,6 +22,7 @@
 #include "InputKeyEventArgs.h"
 #include "LidarScanComponent.h"
 #include "Particles/ParticleSystemComponent.h"
+#include "Residue/Residue.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
@@ -195,6 +201,39 @@ namespace TimeStateDebug
 				Entity->GetProximity01(), Entity->GetSpawnDistanceForNextStop(), Entity->GetLastExitPathDistance(),
 				Entity->GetLastGatheredFigurePoints(), Entity->GetLastGatheredTrailPoints());
 		}
+
+		if (const UEnergySubsystem* Energy = UEnergySubsystem::Get(World))
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("%s   energy: banked=%d session=%d total=%d boundDirector=%d"),
+				Prefix, Energy->GetBankedEnergy(), Energy->GetSessionEnergy(), Energy->GetTotalEnergy(), Energy->HasBoundDirector() ? 1 : 0);
+		}
+		for (TActorIterator<AResidue> It(World); It; ++It)
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("%s   residue %s: state=%s regenerates=%d collecting=%d progress=%.2f lastGathered=%d at %s"),
+				Prefix, *It->GetName(), LexToString(It->GetState()), It->bRegenerates ? 1 : 0, It->IsCollecting() ? 1 : 0,
+				It->GetCollectProgress(), It->GetLastGatheredPoints(), *It->GetActorLocation().ToString());
+		}
+		for (TActorIterator<APoweredDevice> It(World); It; ++It)
+		{
+			FString Extra;
+			if (const ADoorDevice* Door = Cast<ADoorDevice>(*It))
+			{
+				Extra = FString::Printf(TEXT(" open=%d closePending=%d doorwayOccupied=%d"), Door->IsOpen() ? 1 : 0,
+					Door->IsClosePending() ? 1 : 0, Door->IsDoorwayOccupied() ? 1 : 0);
+			}
+			else if (const ALightGroupDevice* Lights = Cast<ALightGroupDevice>(*It))
+			{
+				Extra = FString::Printf(TEXT(" lit=%d/%d"), Lights->GetLitCount(), Lights->Lights.Num());
+			}
+			UE_LOG(LogTheLastShift, Log, TEXT("%s   device %s: powered=%d remaining=%.3fs fraction=%.3f PoweredSeconds=%.2f resetOnJump=%d%s"),
+				Prefix, *It->GetName(), It->IsPowered() ? 1 : 0, It->GetRemainingSeconds(), It->GetPoweredFraction(), It->PoweredSeconds,
+				It->bResetOnJump ? 1 : 0, *Extra);
+		}
+		for (TActorIterator<APowerTerminal> It(World); It; ++It)
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("%s   terminal %s: cost=%d targets=%d at %s"), Prefix, *It->GetName(), It->Cost, It->Targets.Num(),
+				*It->GetActorLocation().ToString());
+		}
 	}
 
 	/** Stop/Resume cycle test driven by simulated presses of the time stop key. */
@@ -296,7 +335,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsKeyCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsReportCommand(
 	TEXT("tls.Report"),
-	TEXT("Logs time state, alive scans, scan timer state, flashlight and Niagara component counts."),
+	TEXT("Logs time state, alive scans, scan timer state, flashlight, Niagara component counts, entities, energy, residues, powered devices and terminals."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		if (UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld))

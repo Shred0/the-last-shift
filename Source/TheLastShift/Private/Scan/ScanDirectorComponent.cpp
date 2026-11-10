@@ -26,6 +26,9 @@ namespace ScanDirector
 	static float FadeOut(float Value) { return FMath::Clamp(Value, 0.f, 2.f); }
 }
 
+FOnScanDirectorLifecycle UScanDirectorComponent::OnDirectorBeganPlay;
+FOnScanDirectorLifecycle UScanDirectorComponent::OnDirectorEndingPlay;
+
 UScanDirectorComponent::UScanDirectorComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -55,6 +58,7 @@ void UScanDirectorComponent::BeginPlay()
 		RecordStopAnchor();
 		StartCycle();
 	}
+	OnDirectorBeganPlay.Broadcast(this);
 }
 
 ULidarScanComponent* UScanDirectorComponent::ResolveLidarScan()
@@ -150,6 +154,8 @@ bool UScanDirectorComponent::ForceExit(EStopExitReason Reason)
 
 void UScanDirectorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	OnDirectorEndingPlay.Broadcast(this);
+
 	if (UWorld* World = GetWorld())
 	{
 		FTimerManager& Timers = World->GetTimerManager();
