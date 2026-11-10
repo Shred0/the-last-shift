@@ -5,6 +5,8 @@
 
 #include "Components/SpotLightComponent.h"
 #include "Debug/ScanTestListener.h"
+#include "Debug/TlsDebugCommon.h"
+#include "Entity/Entity.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -88,8 +90,7 @@ void UTlsScanTestListener::HandleBeat(int32 BeatIndex)
 
 namespace TimeStateDebug
 {
-	/** The world the command should act on: the given one if it is a game world, else the first PIE/game world. */
-	static UWorld* ResolveGameWorld(UWorld* World)
+	UWorld* ResolveGameWorld(UWorld* World)
 	{
 		if (World && World->IsGameWorld())
 		{
@@ -109,8 +110,7 @@ namespace TimeStateDebug
 		return nullptr;
 	}
 
-	/** Simulates a real key press on the first local player controller: pressed now, released next tick. */
-	static bool PressKey(UWorld* World, const FKey& Key)
+	bool PressKey(UWorld* World, const FKey& Key)
 	{
 		APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
 		if (!PC || !Key.IsValid())
@@ -131,32 +131,14 @@ namespace TimeStateDebug
 		return true;
 	}
 
-	struct FReport
-	{
-		ETimeState State = ETimeState::Normal;
-		float StopDuration = 0.f;
-		float TotalStopped = 0.f;
-		int32 AliveScans = 0;
-		int32 ScanCount = 0;
-		bool bCycleActive = false;
-		bool bTimersPending = false;
-		bool bScanReady = false;
-		float CooldownRemaining = 0.f;
-		int32 BeatCount = 0;
-		float TimeToNextBeat = 0.f;
-		bool bFlashlightOn = false;
-		int32 NiagaraComponents = 0;
-		int32 ActiveNiagaraComponents = 0;
-	};
-
-	static FReport BuildReport(UWorld* World)
+	FReport BuildReport(UWorld* World)
 	{
 		FReport Report;
 		if (const UTimeStateSubsystem* TimeState = World->GetSubsystem<UTimeStateSubsystem>())
 		{
 			Report.State = TimeState->GetState();
 			Report.StopDuration = TimeState->GetCurrentStopDuration();
-			Report.TotalStopped = TimeState->GetTotalStoppedSeconds();
+			Report.TotalStopped = TimeState->GetCumulativeStoppedSeconds();
 		}
 
 		for (TObjectIterator<UScanDirectorComponent> It; It; ++It)
@@ -193,15 +175,26 @@ namespace TimeStateDebug
 		return Report;
 	}
 
-	static void LogReport(UWorld* World, const TCHAR* Prefix)
+	void LogReport(UWorld* World, const TCHAR* Prefix)
 	{
 		const FReport R = BuildReport(World);
 		UE_LOG(LogTheLastShift, Log,
-			TEXT("%s t=%.3f state=%s stop=%.3fs total=%.3fs aliveScans=%d scanCount=%d cycleActive=%d timers=%d ready=%d cooldownLeft=%.3fs beats=%d nextBeat=%.3fs flashlight=%s niagara=%d (active %d)"),
+			TEXT("%s t=%.3f state=%s stop=%.3fs cumulative=%.3fs aliveScans=%d scanCount=%d cycleActive=%d timers=%d ready=%d cooldownLeft=%.3fs beats=%d nextBeat=%.3fs flashlight=%s niagara=%d (active %d)"),
 			Prefix, World->GetTimeSeconds(), R.State == ETimeState::Stopped ? TEXT("Stopped") : TEXT("Normal"),
 			R.StopDuration, R.TotalStopped, R.AliveScans, R.ScanCount, R.bCycleActive ? 1 : 0, R.bTimersPending ? 1 : 0,
 			R.bScanReady ? 1 : 0, R.CooldownRemaining, R.BeatCount, R.TimeToNextBeat,
 			R.bFlashlightOn ? TEXT("on") : TEXT("off"), R.NiagaraComponents, R.ActiveNiagaraComponents);
+
+		for (TActorIterator<AEntity> It(World); It; ++It)
+		{
+			const AEntity* Entity = *It;
+			UE_LOG(LogTheLastShift, Log,
+				TEXT("%s   entity %s: state=%s manifested=%d figure=%s pathDistance=%.1fcm proximity=%.3f nextSpawn=%.1fcm lastExit=%.1fcm lastGathered figure=%d trail=%d"),
+				Prefix, *Entity->GetName(), Entity->GetState() == EEntityState::Awake ? TEXT("Awake") : TEXT("Dormant"),
+				Entity->IsManifested() ? 1 : 0, *Entity->GetFigureLocation().ToString(), Entity->GetPathDistanceToPlayer(),
+				Entity->GetProximity01(), Entity->GetSpawnDistanceForNextStop(), Entity->GetLastExitPathDistance(),
+				Entity->GetLastGatheredFigurePoints(), Entity->GetLastGatheredTrailPoints());
+		}
 	}
 
 	/** Stop/Resume cycle test driven by simulated presses of the time stop key. */
@@ -376,7 +369,7 @@ namespace TimeStateDebug
 	};
 	static FScanTest GScanTest;
 
-	static UScanDirectorComponent* FindPlayerDirector(UWorld* World)
+	UScanDirectorComponent* FindPlayerDirector(UWorld* World)
 	{
 		const APlayerController* PC = World->GetFirstPlayerController();
 		if (const APawn* Pawn = PC ? PC->GetPawn() : nullptr)

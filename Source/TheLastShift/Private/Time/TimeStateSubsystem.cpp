@@ -28,11 +28,11 @@ void UTimeStateSubsystem::Stop()
 	}
 
 	StopStartTime = GetNow();
-	UE_LOG(LogTimeState, Log, TEXT("Stop at t=%.3f (total stopped so far %.3f s)."), StopStartTime, CompletedStoppedSeconds);
-	SetState(ETimeState::Stopped);
+	UE_LOG(LogTimeState, Log, TEXT("Stop at t=%.3f (cumulative stopped so far %.3f s)."), StopStartTime, CompletedStoppedSeconds);
+	SetState(ETimeState::Stopped, EStopExitReason::Resumed);
 }
 
-void UTimeStateSubsystem::Resume()
+void UTimeStateSubsystem::Resume(EStopExitReason Reason)
 {
 	if (State == ETimeState::Normal)
 	{
@@ -41,17 +41,19 @@ void UTimeStateSubsystem::Resume()
 	}
 
 	const double Now = GetNow();
-	const double Duration = FMath::Max(Now - StopStartTime, 0.0);
-	CompletedStoppedSeconds += Duration;
-	UE_LOG(LogTimeState, Log, TEXT("Resume at t=%.3f after %.3f s stopped (total %.3f s)."), Now, Duration, CompletedStoppedSeconds);
-	SetState(ETimeState::Normal);
+	LastStopDuration = FMath::Max(Now - StopStartTime, 0.0);
+	LastExitReason = Reason;
+	CompletedStoppedSeconds += GetCountedCurrentStop(Now);
+	UE_LOG(LogTimeState, Log, TEXT("Resume (%s) at t=%.3f after %.3f s stopped (cumulative %.3f s)."),
+		LexToString(Reason), Now, LastStopDuration, CompletedStoppedSeconds);
+	SetState(ETimeState::Normal, Reason);
 }
 
 void UTimeStateSubsystem::Toggle()
 {
 	if (IsStopped())
 	{
-		Resume();
+		Resume(EStopExitReason::Resumed);
 	}
 	else
 	{
@@ -64,14 +66,26 @@ float UTimeStateSubsystem::GetCurrentStopDuration() const
 	return IsStopped() ? static_cast<float>(FMath::Max(GetNow() - StopStartTime, 0.0)) : 0.f;
 }
 
-float UTimeStateSubsystem::GetTotalStoppedSeconds() const
+double UTimeStateSubsystem::GetCountedCurrentStop(double Now) const
 {
-	return static_cast<float>(CompletedStoppedSeconds) + GetCurrentStopDuration();
+	return IsStopped() ? FMath::Max(Now - FMath::Max(StopStartTime, CumulativeResetTime), 0.0) : 0.0;
 }
 
-void UTimeStateSubsystem::SetState(ETimeState NewState)
+float UTimeStateSubsystem::GetCumulativeStoppedSeconds() const
+{
+	return static_cast<float>(CompletedStoppedSeconds + GetCountedCurrentStop(GetNow()));
+}
+
+void UTimeStateSubsystem::ResetCumulativeStoppedSeconds()
+{
+	CompletedStoppedSeconds = 0.0;
+	CumulativeResetTime = GetNow();
+	UE_LOG(LogTimeState, Log, TEXT("Cumulative stopped time reset at t=%.3f."), CumulativeResetTime);
+}
+
+void UTimeStateSubsystem::SetState(ETimeState NewState, EStopExitReason Reason)
 {
 	const ETimeState OldState = State;
 	State = NewState;
-	OnTimeStateChanged.Broadcast(NewState, OldState);
+	OnTimeStateChanged.Broadcast(NewState, OldState, Reason);
 }

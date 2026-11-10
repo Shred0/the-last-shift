@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
+#include "LidarPointSource.h"
+#include "UObject/ScriptInterface.h"
 #include "LidarScanComponent.generated.h"
 
 class UNiagaraComponent;
@@ -31,6 +33,10 @@ struct FLidarScanSlot
 
 	/** Real (undilated) world time at which the scan was taken. */
 	double StartRealTime = 0.0;
+
+	/** Pose and coverage of the capture this slot's scan was taken with. */
+	UPROPERTY(Transient)
+	FLidarScanContext Context;
 
 	/** Fade-out started by ClearScans: total duration (0 = not fading) and time elapsed so far. */
 	float FadeOutDuration = 0.f;
@@ -86,6 +92,30 @@ public:
 	/** Total number of scans taken since BeginPlay; also the index the next scan will get. */
 	UFUNCTION(BlueprintPure, Category = "Lidar")
 	int32 GetScanCount() const { return ScanCount; }
+
+	/** Capture pose and coverage of every alive scan (those counted by GetAliveScanCount), oldest first. */
+	UFUNCTION(BlueprintPure, Category = "Lidar")
+	TArray<FLidarScanContext> GetAliveScans() const;
+
+	// --- Injected points ---
+
+	/**
+	 * Adds a point source: from the next scan on, its points are gathered right after each depth capture and added to
+	 * that scan. Held weakly; a source that is destroyed is dropped silently. Registering twice has no effect.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Injected")
+	void RegisterPointSource(TScriptInterface<ILidarPointSource> Source);
+
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Injected")
+	void UnregisterPointSource(TScriptInterface<ILidarPointSource> Source);
+
+	/** Number of registered sources that are still alive. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Injected")
+	int32 GetPointSourceCount() const;
+
+	/** Counters of the last scan's injection (all zero, ScanIndex -1, before the first scan). */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Injected")
+	FLidarInjectionStats GetLastInjectionStats() const { return LastInjectionStats; }
 
 	/** Broadcast right after the depth capture for a scan has been issued. */
 	UPROPERTY(BlueprintAssignable, Category = "Lidar|Events")
@@ -231,6 +261,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Fade", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float AlphaFloor = 0.12f;
 
+	// --- Injected (applied on the next scan) ---
+
+	/** Upper bound on the points all sources together add to one scan; points beyond it are dropped. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Injected", meta = (ClampMin = "0", ClampMax = "65536", UIMin = "0", UIMax = "65536"))
+	int32 MaxInjectedPointsPerScan = 4096;
+
+	/**
+	 * Diagnostics: when injected points that use bOccludeByCapture were uploaded, read the depth capture back on the
+	 * CPU (a synchronous GPU readback, a few ms) and count how many of them the GPU depth test will remove, into
+	 * GetLastInjectionStats().BehindCapturedDepth. The depth test itself always runs on the GPU; this only counts.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Injected")
+	bool bVerifyInjectedOcclusion = false;
+
 	// --- Scans ---
 
 	/** Scans kept alive at once; the oldest is recycled first. */
@@ -266,6 +310,12 @@ private:
 	void ReleaseSlot(FLidarScanSlot& Slot);
 	void BroadcastScanCompleted(int32 ScanIndex);
 
+	/** Gathers every source for this scan, filters by coverage and the cap, and hands the points to the slot's system. */
+	void InjectPoints(const FLidarScanSlot& Slot, UTextureRenderTarget2D* Target);
+
+	/** CPU count of uploaded points that lie behind the captured depth (see bVerifyInjectedOcclusion). */
+	int32 CountBehindCapturedDepth(UTextureRenderTarget2D* Target, const FLidarScanContext& Context) const;
+
 	UPROPERTY(Transient)
 	TObjectPtr<USceneCaptureComponent2D> DepthCapture;
 
@@ -276,6 +326,17 @@ private:
 	TObjectPtr<UNiagaraSystem> LoadedPointSystem;
 
 	int32 ScanCount = 0;
+
+	/** Registered point sources, held weakly. */
+	TArray<TWeakObjectPtr<UObject>> PointSources;
+
+	FLidarInjectionStats LastInjectionStats;
+
+	/** Per-scan upload buffers, kept to avoid reallocating at every scan. */
+	TArray<FVector> InjectedPositions;
+	TArray<FLinearColor> InjectedColors;
+	TArray<FVector2D> InjectedParams;
+	TArray<FVector2D> InjectedTransient;
 
 	/** World size of one screen pixel at unit view depth for the current view, last value pushed to the scans. */
 	float ViewPixelScale = 0.f;

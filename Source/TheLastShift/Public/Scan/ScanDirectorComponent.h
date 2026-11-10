@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Engine/TimerHandle.h"
+#include "LidarPointSource.h"
 #include "Time/TimeState.h"
 #include "ScanDirectorComponent.generated.h"
 
@@ -14,6 +15,7 @@ class UTimeStateSubsystem;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDirectedScanCompleted, int32, ScanIndex, float, Timestamp);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDirectedScanReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDirectedBeat, int32, BeatIndex);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStopExited, EStopExitReason, Reason, float, StoppedSeconds);
 
 /**
  * Drives the owner's ULidarScanComponent from the time state and owns the two clocks of a stop:
@@ -24,7 +26,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDirectedBeat, int32, BeatIndex);
  * - Beat: every BeatInterval from the Stop, OnBeat is broadcast, whether or not the player scans.
  *
  * The two clocks are independent. On Resume every timer is cleared and the scans fade out over ResumeFadeOut.
- * This is the only game object that talks to the lidar plugin; game systems subscribe to the events here.
+ * On every Stop the owner's transform (and its controller's view rotation) is recorded as the Stop anchor; Rewind()
+ * puts the owner back there and ends the Stop with reason Rewound; ForceExit() ends it with any reason, teleporting only
+ * for the rewind reasons.
+ * This is the only game object that talks to the lidar plugin, point-source registration included; game systems
+ * subscribe to the events here.
  * All clocks use world time, the same clock as UTimeStateSubsystem (the game never dilates time).
  */
 UCLASS(ClassGroup = (TheLastShift), meta = (BlueprintSpawnableComponent))
@@ -63,6 +69,29 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Scan")
 	bool RequestScan();
 
+	/**
+	 * Sends the owner back to the Stop anchor (location, rotation and controller view rotation, velocity cleared) and
+	 * resumes time with reason Rewound. Whatever listens to the time state restores itself as on any Resume (the
+	 * flashlight returns to its pre-Stop state). Returns false and does nothing in Normal time.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Scan")
+	bool Rewind();
+
+	/**
+	 * Ends the Stop with the given reason. Rewound and RewoundAndJumped send the owner back to the Stop anchor first,
+	 * as Rewind(); Resumed and Jumped resume where the owner stands. Every reason restores what a Resume restores
+	 * (flashlight, scans cleared with ResumeFadeOut, timers cleared). Returns false and does nothing in Normal time.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Scan")
+	bool ForceExit(EStopExitReason Reason);
+
+	/** Adds a point source to the owner's lidar scans (see ULidarScanComponent::RegisterPointSource). */
+	UFUNCTION(BlueprintCallable, Category = "Scan")
+	void RegisterPointSource(TScriptInterface<ILidarPointSource> Source);
+
+	UFUNCTION(BlueprintCallable, Category = "Scan")
+	void UnregisterPointSource(TScriptInterface<ILidarPointSource> Source);
+
 	// --- State ---
 
 	/** True between a Stop and the following Resume. */
@@ -100,6 +129,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
 	ULidarScanComponent* GetLidarScan() const { return LidarScan; }
 
+	/** Owner transform recorded at the last Stop (identity before the first Stop). */
+	UFUNCTION(BlueprintPure, Category = "Scan|State")
+	FTransform GetStopAnchor() const { return StopAnchor; }
+
+	/** Controller view rotation recorded at the last Stop (the owner's rotation if it has no controller). */
+	UFUNCTION(BlueprintPure, Category = "Scan|State")
+	FRotator GetStopAnchorViewRotation() const { return StopAnchorViewRotation; }
+
+	/** True once a Stop anchor has been recorded. */
+	UFUNCTION(BlueprintPure, Category = "Scan|State")
+	bool HasStopAnchor() const { return bHasStopAnchor; }
+
+	/** Capture origin, forward and coverage of every alive scan, oldest first; empty in Normal time. */
+	UFUNCTION(BlueprintPure, Category = "Scan|State")
+	TArray<FLidarScanContext> GetRecentScanOrigins() const;
+
 	// --- Events ---
 
 	/** Re-broadcast of the lidar component's OnScanCompleted (every scan, automatic or requested). */
@@ -114,17 +159,23 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Scan|Events")
 	FOnDirectedBeat OnBeat;
 
+	/** Fires when a Stop ends, after the director has cleared its timers: why, and how long the Stop lasted. */
+	UPROPERTY(BlueprintAssignable, Category = "Scan|Events")
+	FOnStopExited OnStopExited;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
 	UFUNCTION()
-	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState);
+	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
 
 	UFUNCTION()
 	void HandleLidarScanCompleted(int32 ScanIndex, float Timestamp);
 
+	ULidarScanComponent* ResolveLidarScan();
+	void RecordStopAnchor();
 	void StartCycle();
 	void StopCycle();
 
@@ -177,4 +228,8 @@ private:
 
 	int32 BeatCount = 0;
 	int32 ScansThisStop = 0;
+
+	FTransform StopAnchor = FTransform::Identity;
+	FRotator StopAnchorViewRotation = FRotator::ZeroRotator;
+	bool bHasStopAnchor = false;
 };

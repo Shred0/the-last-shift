@@ -4,6 +4,9 @@
 
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Controller.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PawnMovementComponent.h"
 #include "LidarScanComponent.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
@@ -32,8 +35,7 @@ void UScanDirectorComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	LidarScan = GetOwner() ? GetOwner()->FindComponentByClass<ULidarScanComponent>() : nullptr;
-	if (!LidarScan)
+	if (!ResolveLidarScan())
 	{
 		UE_LOG(LogTheLastShift, Warning, TEXT("%s: owner has no LidarScanComponent, scans disabled."), *GetPathName());
 		return;
@@ -50,8 +52,100 @@ void UScanDirectorComponent::BeginPlay()
 
 	if (TimeState->IsStopped())
 	{
+		RecordStopAnchor();
 		StartCycle();
 	}
+}
+
+ULidarScanComponent* UScanDirectorComponent::ResolveLidarScan()
+{
+	// Lazy, so sources can register before this component's BeginPlay.
+	if (!LidarScan && GetOwner())
+	{
+		LidarScan = GetOwner()->FindComponentByClass<ULidarScanComponent>();
+	}
+	return LidarScan;
+}
+
+void UScanDirectorComponent::RegisterPointSource(TScriptInterface<ILidarPointSource> Source)
+{
+	if (ULidarScanComponent* Lidar = ResolveLidarScan())
+	{
+		Lidar->RegisterPointSource(Source);
+		UE_LOG(LogTheLastShift, Log, TEXT("ScanDirector: point source %s registered (%d sources)."),
+			*GetNameSafe(Source.GetObject()), Lidar->GetPointSourceCount());
+	}
+	else
+	{
+		UE_LOG(LogTheLastShift, Warning, TEXT("ScanDirector: cannot register %s, owner has no LidarScanComponent."), *GetNameSafe(Source.GetObject()));
+	}
+}
+
+void UScanDirectorComponent::UnregisterPointSource(TScriptInterface<ILidarPointSource> Source)
+{
+	if (ULidarScanComponent* Lidar = ResolveLidarScan())
+	{
+		Lidar->UnregisterPointSource(Source);
+	}
+}
+
+TArray<FLidarScanContext> UScanDirectorComponent::GetRecentScanOrigins() const
+{
+	return LidarScan ? LidarScan->GetAliveScans() : TArray<FLidarScanContext>();
+}
+
+void UScanDirectorComponent::RecordStopAnchor()
+{
+	const AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return;
+	}
+	StopAnchor = Owner->GetActorTransform();
+	StopAnchorViewRotation = Owner->GetActorRotation();
+	if (const APawn* Pawn = Cast<APawn>(Owner))
+	{
+		if (const AController* Controller = Pawn->GetController())
+		{
+			StopAnchorViewRotation = Controller->GetControlRotation();
+		}
+	}
+	bHasStopAnchor = true;
+}
+
+bool UScanDirectorComponent::Rewind()
+{
+	return ForceExit(EStopExitReason::Rewound);
+}
+
+bool UScanDirectorComponent::ForceExit(EStopExitReason Reason)
+{
+	if (!bCycleActive || !TimeState || !TimeState->IsStopped())
+	{
+		return false;
+	}
+
+	// Jumped resumes in place: no teleport. Every exit restores the flashlight and clears the scans through the
+	// time state change, as on a voluntary Resume.
+	if (AActor* Owner = GetOwner(); Owner && bHasStopAnchor && IsRewindExit(Reason))
+	{
+		Owner->SetActorLocationAndRotation(StopAnchor.GetLocation(), StopAnchor.GetRotation(), false, nullptr, ETeleportType::TeleportPhysics);
+		if (APawn* Pawn = Cast<APawn>(Owner))
+		{
+			if (UPawnMovementComponent* Movement = Pawn->GetMovementComponent())
+			{
+				Movement->StopMovementImmediately();
+			}
+			if (AController* Controller = Pawn->GetController())
+			{
+				Controller->SetControlRotation(StopAnchorViewRotation);
+			}
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("ScanDirector: rewind to %s (view %s)."), *StopAnchor.GetLocation().ToString(), *StopAnchorViewRotation.ToString());
+	}
+
+	TimeState->Resume(Reason);
+	return true;
 }
 
 void UScanDirectorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -158,15 +252,22 @@ bool UScanDirectorComponent::RequestScan()
 
 // --- Cycle ---
 
-void UScanDirectorComponent::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState)
+void UScanDirectorComponent::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason)
 {
 	if (NewState == ETimeState::Stopped)
 	{
+		RecordStopAnchor();
 		StartCycle();
+		return;
 	}
-	else
+
+	StopCycle();
+	if (OldState == ETimeState::Stopped)
 	{
-		StopCycle();
+		const float StoppedSeconds = TimeState ? TimeState->GetLastStopDuration() : 0.f;
+		UE_LOG(LogTheLastShift, Log, TEXT("ScanDirector: stop exited (%s) after %.3f s."),
+			LexToString(Reason), StoppedSeconds);
+		OnStopExited.Broadcast(Reason, StoppedSeconds);
 	}
 }
 

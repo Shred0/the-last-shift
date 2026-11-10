@@ -14,9 +14,11 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "NiagaraComponent.h"
+#include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
 #include "SceneView.h"
+#include "TextureResource.h"
 #include "TimerManager.h"
 #include "UnrealClient.h"
 
@@ -78,6 +80,29 @@
  * Injected points (not produced by the depth capture) write LidarSurfacePosition and Position, and LidarNormal = 0:
  * they get the toward-viewer offset capped by ViewOffsetMaxCm and an angle term of 1. MinSampleDepth and the near
  * thinning are capture-sampling rules and do not apply to them.
+ *
+ * Injected emitter (second emitter of the same system, so it shares the instance: ghost cap, ClearScans, recycling).
+ * Spawn (once per activation): burst of InjectedPointCount particles; particle i reads InjectedPositions[i] (P),
+ * InjectedColors[i], InjectedParams[i] = (FadeWeight, OcclusionTolerance) and InjectedTransient[i] = (Hold, Vanish).
+ * With d = dot(P - CaptureOrigin,
+ * CaptureForward), u' = dot(P - CaptureOrigin, CaptureRight) / (d * TanHalfFov.x), v' = dot(P - CaptureOrigin,
+ * CaptureUp) / (d * TanHalfFov.y), the point reads the depth texel at UV = ((u' + 1) / 2, (1 - v') / 2) (same
+ * texel-to-ray convention as the captured emitter, nearest texel) and is killed if OcclusionTolerance >= 0,
+ * 1 < Depth < MaxRange and Depth < d - OcclusionTolerance: the capture saw a surface in front of it. Points with
+ * OcclusionTolerance < 0 skip the test. (Points outside the coverage of an occluding source are already removed on the
+ * CPU, so u', v' are in [-1, 1] whenever the test runs.) The particle stores LidarSurfacePosition = Position = P,
+ * LidarNormal = 0 and a raw depth of d + SurfaceBias, so SampleDepth = d and the update's depth term is exactly 1
+ * from the scan's own pose, as for captured points.
+ * Update: as above, except
+ *   rgb   = InjectedColors[i].rgb * InjectedIntensity * clamp(compensation, DensityBoostMin, DensityBoostMax),
+ *   alpha = InjectedColors[i].a * FadeOutAlpha * lerp(1, lerp(1, AlphaFloor, Age / FadeDuration), FadeWeight)
+ *           * TransientAlpha,
+ *   TransientAlpha = 1                                                        if Hold < 0,
+ *   TransientAlpha = saturate(1 - (ScanRealAge - Hold) / max(Vanish, 0.001))  otherwise,
+ * so FadeWeight 0 skips the age fade but not the ClearScans fade-out. ELidarFadeMode maps to
+ * ScanFade = (FadeWeight 1, Hold -1), None = (0, -1), Transient = (0, HoldSeconds) with Vanish = VanishSeconds.
+ * ScanRealAge is the real time since the scan, pushed live, so a transient point is timed from its own scan only.
+ * InjectedIntensity is PointIntensity and FadeOutAlpha the ClearScans multiplier, both pushed live.
  */
 namespace LidarScanParams
 {
@@ -107,6 +132,27 @@ namespace LidarScanParams
 	static const FName AngleCompensation(TEXT("User.AngleCompensation"));
 	static const FName DensityBoostMin(TEXT("User.DensityBoostMin"));
 	static const FName DensityBoostMax(TEXT("User.DensityBoostMax"));
+
+	static const FName InjectedPointCount(TEXT("User.InjectedPointCount"));
+	static const FName InjectedPositions(TEXT("User.InjectedPositions"));
+	static const FName InjectedColors(TEXT("User.InjectedColors"));
+	static const FName InjectedParams(TEXT("User.InjectedParams"));
+	static const FName InjectedTransient(TEXT("User.InjectedTransient"));
+	static const FName ScanRealAge(TEXT("User.ScanRealAge"));
+	static const FName InjectedIntensity(TEXT("User.InjectedIntensity"));
+	static const FName FadeOutAlpha(TEXT("User.FadeOutAlpha"));
+}
+
+bool FLidarScanContext::IsInCoverage(const FVector& WorldPosition, double& OutDepth) const
+{
+	const FVector Offset = WorldPosition - CaptureOrigin;
+	OutDepth = FVector::DotProduct(Offset, CaptureForward);
+	if (OutDepth <= 0.0 || OutDepth >= MaxRange)
+	{
+		return false;
+	}
+	return FMath::Abs(FVector::DotProduct(Offset, CaptureRight)) <= OutDepth * TanHalfFOV.X
+		&& FMath::Abs(FVector::DotProduct(Offset, CaptureUp)) <= OutDepth * TanHalfFOV.Y;
 }
 
 ULidarScanComponent::ULidarScanComponent()
@@ -276,6 +322,20 @@ void ULidarScanComponent::Scan()
 	const int32 ScanIndex = ScanCount++;
 	Points->SetVariableInt(LidarScanParams::JitterSeed, static_cast<int32>(HashCombineFast(GetTypeHash(ScanIndex), 0x9E3779B9u) & 0x7FFFFFFF));
 
+	UWorld* World = GetWorld();
+	Slot.Context.CaptureOrigin = Origin;
+	Slot.Context.CaptureForward = CaptureTransform.GetUnitAxis(EAxis::X);
+	Slot.Context.CaptureRight = CaptureTransform.GetUnitAxis(EAxis::Y);
+	Slot.Context.CaptureUp = CaptureTransform.GetUnitAxis(EAxis::Z);
+	Slot.Context.TanHalfFOV = FVector2D(TanX, TanY);
+	Slot.Context.MaxRange = MaxRange;
+	Slot.Context.ScanIndex = ScanIndex;
+	Slot.Context.Timestamp = World ? static_cast<float>(World->GetTimeSeconds()) : 0.f;
+	Slot.StartRealTime = World ? World->GetRealTimeSeconds() : 0.0;
+
+	// Sources are gathered right after the capture, so their points describe the same instant as the depth samples.
+	InjectPoints(Slot, Target);
+
 	// A recycled slot may still be fading out from a previous ClearScans.
 	Slot.FadeOutDuration = 0.f;
 	Slot.FadeOutElapsed = 0.f;
@@ -284,9 +344,6 @@ void ULidarScanComponent::Scan()
 
 	Slot.ScanIndex = ScanIndex;
 	SetComponentTickEnabled(true);
-
-	UWorld* World = GetWorld();
-	Slot.StartRealTime = World ? World->GetRealTimeSeconds() : 0.0;
 
 	// A depth target created by this call is bound to the point system's texture interface on the render thread
 	// only when the system next ticks; spawning in that same tick can sample the unbound texture and kill every
@@ -302,7 +359,180 @@ void ULidarScanComponent::Scan()
 		ActivateScanPoints(ScanIndex);
 	}
 
-	OnScanStarted.Broadcast(ScanIndex, World ? static_cast<float>(World->GetTimeSeconds()) : 0.f);
+	OnScanStarted.Broadcast(ScanIndex, Slot.Context.Timestamp);
+}
+
+void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRenderTarget2D* Target)
+{
+	const FLidarScanContext& Context = Slot.Context;
+	FLidarInjectionStats Stats;
+	Stats.ScanIndex = Context.ScanIndex;
+
+	InjectedPositions.Reset();
+	InjectedColors.Reset();
+	InjectedParams.Reset();
+	InjectedTransient.Reset();
+
+	const int32 Cap = FMath::Clamp(MaxInjectedPointsPerScan, 0, 65536);
+	bool bAnyOccluding = false;
+
+	// A source may (un)register sources while gathering: iterate over a copy.
+	PointSources.RemoveAll([](const TWeakObjectPtr<UObject>& Source) { return !Source.IsValid(); });
+	const TArray<TWeakObjectPtr<UObject>> Sources = PointSources;
+
+	TArray<FLidarInjectedPoint> Gathered;
+	for (const TWeakObjectPtr<UObject>& WeakSource : Sources)
+	{
+		UObject* Source = WeakSource.Get();
+		if (!Source || !Source->GetClass()->ImplementsInterface(ULidarPointSource::StaticClass()))
+		{
+			continue;
+		}
+		++Stats.Sources;
+
+		const FLidarSourceSettings Settings = ILidarPointSource::Execute_GetLidarSourceSettings(Source);
+		Gathered.Reset();
+		ILidarPointSource::Execute_GatherLidarPoints(Source, Context, Gathered);
+		Stats.Gathered += Gathered.Num();
+
+		const float Multiplier = FMath::Clamp(Settings.IntensityMultiplier, 0.f, 16.f);
+		const FVector2D Params(Settings.FadeMode == ELidarFadeMode::ScanFade ? 1.0 : 0.0,
+			Settings.bOccludeByCapture ? FMath::Clamp(Settings.OcclusionTolerance, 0.f, 200.f) : -1.0);
+		const FVector2D Transient = Settings.FadeMode == ELidarFadeMode::Transient
+			? FVector2D(FMath::Clamp(Settings.HoldSeconds, 0.f, 30.f), FMath::Clamp(Settings.VanishSeconds, 0.f, 30.f))
+			: FVector2D(-1.0, 0.0);
+
+		for (const FLidarInjectedPoint& Point : Gathered)
+		{
+			double Depth = 0.0;
+			if (Settings.bOccludeByCapture && !Context.IsInCoverage(Point.WorldPosition, Depth))
+			{
+				++Stats.OutsideCoverage;
+				continue;
+			}
+			if (InjectedPositions.Num() >= Cap)
+			{
+				++Stats.OverCap;
+				continue;
+			}
+
+			FLinearColor Color = Settings.Color * (Multiplier * FMath::Clamp(Point.Intensity, 0.f, 16.f));
+			Color.A = Settings.Color.A;
+			InjectedPositions.Add(Point.WorldPosition);
+			InjectedColors.Add(Color);
+			InjectedParams.Add(Params);
+			InjectedTransient.Add(Transient);
+			bAnyOccluding |= Settings.bOccludeByCapture;
+		}
+	}
+	Stats.Uploaded = InjectedPositions.Num();
+
+	if (UNiagaraComponent* Points = Slot.Points)
+	{
+		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(Points, LidarScanParams::InjectedPositions, InjectedPositions);
+		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(Points, LidarScanParams::InjectedColors, InjectedColors);
+		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector2D(Points, LidarScanParams::InjectedParams, InjectedParams);
+		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector2D(Points, LidarScanParams::InjectedTransient, InjectedTransient);
+		Points->SetVariableInt(LidarScanParams::InjectedPointCount, Stats.Uploaded);
+	}
+
+	if (bVerifyInjectedOcclusion && bAnyOccluding && Target)
+	{
+		Stats.BehindCapturedDepth = CountBehindCapturedDepth(Target, Context);
+	}
+
+	LastInjectionStats = Stats;
+	if (Stats.Gathered > 0)
+	{
+		UE_LOG(LogLidarScan, Log, TEXT("%s: scan %d injected points: %d sources, %d gathered, %d outside coverage, %d over cap, %d uploaded, %d behind captured depth%s."),
+			*GetName(), Stats.ScanIndex, Stats.Sources, Stats.Gathered, Stats.OutsideCoverage, Stats.OverCap, Stats.Uploaded,
+			Stats.BehindCapturedDepth, Stats.BehindCapturedDepth < 0 ? TEXT(" (not verified)") : TEXT(""));
+	}
+}
+
+int32 ULidarScanComponent::CountBehindCapturedDepth(UTextureRenderTarget2D* Target, const FLidarScanContext& Context) const
+{
+	FTextureRenderTargetResource* Resource = Target ? Target->GameThread_GetRenderTargetResource() : nullptr;
+	TArray<FLinearColor> Pixels;
+	if (!Resource || !Resource->ReadLinearColorPixels(Pixels))
+	{
+		return -1;
+	}
+
+	const int32 Width = Target->SizeX;
+	const int32 Height = Target->SizeY;
+	if (Width <= 0 || Height <= 0 || Pixels.Num() < Width * Height)
+	{
+		return -1;
+	}
+
+	// Same rule as the GPU spawn of the injected emitter (see the contract at the top of this file).
+	int32 Behind = 0;
+	for (int32 Index = 0; Index < InjectedPositions.Num(); ++Index)
+	{
+		const double Tolerance = InjectedParams[Index].Y;
+		if (Tolerance < 0.0)
+		{
+			continue;
+		}
+		const FVector Offset = InjectedPositions[Index] - Context.CaptureOrigin;
+		const double PointDepth = FVector::DotProduct(Offset, Context.CaptureForward);
+		if (PointDepth <= 0.0)
+		{
+			continue;
+		}
+		const double U = FVector::DotProduct(Offset, Context.CaptureRight) / (PointDepth * Context.TanHalfFOV.X);
+		const double V = FVector::DotProduct(Offset, Context.CaptureUp) / (PointDepth * Context.TanHalfFOV.Y);
+		const int32 X = FMath::Clamp(FMath::FloorToInt32((U + 1.0) * 0.5 * Width), 0, Width - 1);
+		const int32 Y = FMath::Clamp(FMath::FloorToInt32((1.0 - V) * 0.5 * Height), 0, Height - 1);
+		const double Captured = Pixels[Y * Width + X].R;
+		if (Captured > 1.0 && Captured < Context.MaxRange && Captured < PointDepth - Tolerance)
+		{
+			++Behind;
+		}
+	}
+	return Behind;
+}
+
+void ULidarScanComponent::RegisterPointSource(TScriptInterface<ILidarPointSource> Source)
+{
+	UObject* Object = Source.GetObject();
+	if (!Object || !Object->GetClass()->ImplementsInterface(ULidarPointSource::StaticClass()))
+	{
+		return;
+	}
+	PointSources.RemoveAll([](const TWeakObjectPtr<UObject>& Existing) { return !Existing.IsValid(); });
+	PointSources.AddUnique(Object);
+}
+
+void ULidarScanComponent::UnregisterPointSource(TScriptInterface<ILidarPointSource> Source)
+{
+	const UObject* Object = Source.GetObject();
+	PointSources.RemoveAll([Object](const TWeakObjectPtr<UObject>& Existing) { return !Existing.IsValid() || Existing.Get() == Object; });
+}
+
+int32 ULidarScanComponent::GetPointSourceCount() const
+{
+	int32 Count = 0;
+	for (const TWeakObjectPtr<UObject>& Source : PointSources)
+	{
+		Count += Source.IsValid() ? 1 : 0;
+	}
+	return Count;
+}
+
+TArray<FLidarScanContext> ULidarScanComponent::GetAliveScans() const
+{
+	TArray<FLidarScanContext> Result;
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.IsActive() && !Slot.IsFadingOut())
+		{
+			Result.Add(Slot.Context);
+		}
+	}
+	Result.Sort([](const FLidarScanContext& A, const FLidarScanContext& B) { return A.ScanIndex < B.ScanIndex; });
+	return Result;
 }
 
 void ULidarScanComponent::ActivateScanPoints(int32 ScanIndex)
@@ -369,11 +599,20 @@ void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetRealTimeSeconds() : 0.0;
+
 	bool bAnyActive = false;
 	for (FLidarScanSlot& Slot : Slots)
 	{
 		if (!Slot.IsFadingOut())
 		{
+			// Transient injected points are timed from their own scan on real time: the age is the only live value a
+			// steady scan needs every frame.
+			if (Slot.IsActive() && Slot.Points)
+			{
+				Slot.Points->SetVariableFloat(LidarScanParams::ScanRealAge, static_cast<float>(FMath::Max(Now - Slot.StartRealTime, 0.0)));
+			}
 			bAnyActive |= Slot.IsActive();
 			continue;
 		}
@@ -642,4 +881,10 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 	Points->SetVariableFloat(LidarScanParams::AngleCompensation, FMath::Clamp(AngleCompensation, 0.f, 1.f));
 	Points->SetVariableFloat(LidarScanParams::DensityBoostMin, FMath::Clamp(DensityBoostMin, 0.01f, 1.f));
 	Points->SetVariableFloat(LidarScanParams::DensityBoostMax, FMath::Clamp(DensityBoostMax, 1.f, 16.f));
+	Points->SetVariableFloat(LidarScanParams::InjectedIntensity, FMath::Clamp(PointIntensity, 0.f, 4.f));
+	Points->SetVariableFloat(LidarScanParams::FadeOutAlpha, Slot.GetFadeOutAlpha());
+
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetRealTimeSeconds() : Slot.StartRealTime;
+	Points->SetVariableFloat(LidarScanParams::ScanRealAge, static_cast<float>(FMath::Max(Now - Slot.StartRealTime, 0.0)));
 }

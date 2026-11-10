@@ -181,7 +181,7 @@ void ATestLidarCharacter::OnToggleTimeStop()
 	}
 }
 
-void ATestLidarCharacter::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState)
+void ATestLidarCharacter::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason)
 {
 	if (NewState == ETimeState::Stopped)
 	{

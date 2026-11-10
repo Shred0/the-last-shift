@@ -86,7 +86,7 @@ private:
 	void OnToggleTimeStop();
 
 	UFUNCTION()
-	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState);
+	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
 
 	/** Flashlight state at the moment time was stopped, restored on Resume. */
 	bool bFlashlightWasOnBeforeStop = false;
