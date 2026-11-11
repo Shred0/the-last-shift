@@ -13,6 +13,8 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/IConsoleManager.h"
+#include "Materials/MaterialInterface.h"
 #include "NiagaraComponent.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "NiagaraEmitterHandle.h"
@@ -45,6 +47,15 @@
  * the near field ends up with roughly the world spacing of a surface at NearThinningDistance. The raw depth is kept
  * per particle.
  *
+ * Channels: the particle also reads G of the same texel (the jitter stays inside it and the texture is sampled nearest,
+ * so it is the texel the depth came from, never filtered) and stores Particles.LidarChannel = G rounded to the nearest
+ * integer if that is in [1, NumChannels], else 0 (the default channel). With channels off the target is R32f, G reads
+ * 0 and every particle is in the default channel. With channels on the target is RGBA32f, filled by the capture's
+ * post-process material ChannelCaptureMaterial (it replaces the tonemapper, so it is the last pass and writes the target
+ * directly; the engine applies post-process materials only to a capture with a view state, so the channel capture keeps
+ * one and marks every scan a camera cut): R = SceneDepth, the same planar depth as the depth-only capture, and G = CustomStencil where the custom
+ * depth surface is the surface the sample hit (CustomDepth <= SceneDepth + max(1 cm, 0.1% of SceneDepth)), else 0.
+ *
  * Spawn also reconstructs a surface normal, Particles.LidarNormal, from the depth gradient. The particle's own texel
  * (the jitter stays inside it, so nearest filtering reads that texel) and its four neighbours (+-1 texel per axis,
  * read at texel centres) are unprojected through their texel-centre rays; per axis the one-sided difference whose
@@ -63,7 +74,9 @@
  * Update (every frame): draw position, colour and size from the live parameters,
  *   Position = S + N * SurfaceOffset                                  if |N|^2 > 0.25,
  *   Position = S + normalize(ViewOrigin - S) * min(ViewOffsetMaxCm, 0.5 * |ViewOrigin - S|)   otherwise,
- *   rgb   = PointColor.rgb * clamp(pow(SampleDepth / zs, DensityCompensation) * AngleTerm, DensityBoostMin, DensityBoostMax),
+ *   rgb   = BaseColor.rgb * clamp(pow(SampleDepth / zs, DensityCompensation) * AngleTerm, DensityBoostMin, DensityBoostMax),
+ *   BaseColor = ChannelColorK if LidarChannel = K in [1, NumChannels], PointColor otherwise (ChannelColor1..4, pushed
+ *           live: rgb = Channels[K-1].Color.rgb * PointIntensity * Channels[K-1].IntensityMultiplier, a unused),
  *   AngleTerm = pow(max(saturate(|dot(N, Vview)|), e) / max(saturate(|dot(N, Vcapture)|), e), AngleCompensation),
  *   Vview = normalize(S - ViewOrigin), Vcapture = normalize(S - CaptureOrigin), e = 0.02,
  *   alpha = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration),
@@ -79,7 +92,8 @@
  * carries a point through geometry thicker than the offset, whatever the viewing distance.
  * Compensation reads S, not the drawn position: SampleDepth is the depth of S along CaptureForward (raw depth minus
  * the bias it was placed with), so SampleDepth / zs is exactly 1 when the scan is viewed from its own pose.
- * PointColor.rgb already carries PointIntensity; the additive material multiplies rgb by alpha.
+ * PointColor.rgb already carries PointIntensity; the additive material multiplies rgb by alpha. The alpha of every
+ * captured point, channel or not, is PointColor.a * fade: a channel changes the colour and intensity only.
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
  *
  * Slots and the ghost cap: one instance holds exactly one scan. At most MaxAliveScans instances exist; when a scan
@@ -92,6 +106,10 @@
  * All MaxAliveScans slots are created at BeginPlay and each is activated once with PointCount = InjectedPointCount = 0
  * for a short warm-up, then released: the instance and its texture binding exist before the first scan uses the slot.
  * The system must therefore spawn nothing when both counts are 0.
+ *
+ * Injected points (not produced by the depth capture) are never in a channel: their colour is their source's.
+ * Sources are gathered by priority, higher first, ties in registration order; once MaxInjectedPointsPerScan points
+ * are taken the rest are dropped (counted in FLidarInjectionStats::OverCap, one warning per scan that drops any).
  *
  * Injected points (not produced by the depth capture) write LidarSurfacePosition and Position, and LidarNormal = 0:
  * they get the toward-viewer offset capped by ViewOffsetMaxCm and an angle term of 1. MinSampleDepth and the near
@@ -164,6 +182,12 @@ namespace LidarScanParams
 	static const FName InjectedIntensity(TEXT("User.InjectedIntensity"));
 	static const FName FadeOutAlpha(TEXT("User.FadeOutAlpha"));
 
+	/** Colour of channels 1 to 4 (ULidarScanComponent::NumChannels). */
+	static const FName ChannelColors[] = {
+		FName(TEXT("User.ChannelColor1")), FName(TEXT("User.ChannelColor2")),
+		FName(TEXT("User.ChannelColor3")), FName(TEXT("User.ChannelColor4")) };
+	static_assert(UE_ARRAY_COUNT(ChannelColors) == ULidarScanComponent::NumChannels, "One user parameter per channel.");
+
 	/** Emitter names in the point system, used only by GetScanSlotStats. */
 	static const FName CapturedEmitterName(TEXT("Points"));
 	static const FName InjectedEmitterName(TEXT("Injected"));
@@ -189,6 +213,53 @@ ULidarScanComponent::ULidarScanComponent()
 	PrimaryComponentTick.bStartWithTickEnabled = false;
 	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
 	PointSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/LidarScan/NS_LidarPoints.NS_LidarPoints")));
+	ChannelCaptureMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/LidarScan/M_LidarDepthStencil.M_LidarDepthStencil")));
+	Channels.SetNum(NumChannels);
+}
+
+namespace LidarScanCapture
+{
+	/** Show flags of the depth-only capture: drop everything that cannot change the depth buffer, never our own points. */
+	static void SetDepthOnlyFlags(FEngineShowFlags& Flags)
+	{
+		Flags.SetParticles(false);
+		Flags.SetTranslucency(false);
+		Flags.SetDecals(false);
+		Flags.SetFog(false);
+		Flags.SetVolumetricFog(false);
+		Flags.SetAtmosphere(false);
+		Flags.SetDynamicShadows(false);
+		Flags.SetAmbientOcclusion(false);
+		Flags.SetScreenSpaceReflections(false);
+		Flags.SetPostProcessing(false);
+		Flags.SetBloom(false);
+		Flags.SetMotionBlur(false);
+		Flags.SetEyeAdaptation(false);
+		Flags.SetAntiAliasing(false);
+		Flags.SetTemporalAA(false);
+	}
+
+	/**
+	 * Show flags of the channel capture: the depth-only flags, unlit, and post-processing on only so that the channel
+	 * material (which replaces the tonemapper) runs; every other post-process pass that can be turned off is off.
+	 */
+	static void SetChannelFlags(FEngineShowFlags& Flags)
+	{
+		SetDepthOnlyFlags(Flags);
+		Flags.SetLighting(false);
+		Flags.SetPostProcessing(true);
+		Flags.SetDepthOfField(false);
+		Flags.SetLocalExposure(false);
+		Flags.SetVignette(false);
+		Flags.SetToneCurve(false);
+	}
+
+	/** r.CustomDepth = 3: custom depth with stencil writes. */
+	static bool IsCustomStencilEnabled()
+	{
+		static const IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.CustomDepth"));
+		return CVar && CVar->GetInt() == 3;
+	}
 }
 
 void ULidarScanComponent::BeginPlay()
@@ -253,7 +324,7 @@ int32 ULidarScanComponent::CreateSlot()
 	const int32 Index = Slots.AddDefaulted();
 	Slots[Index].Points = Points;
 	bool bCreated = false;
-	EnsureDepthTarget(Slots[Index], bCreated);
+	EnsureDepthTarget(Slots[Index], ResolveChannels(), bCreated);
 	return Index;
 }
 
@@ -325,22 +396,8 @@ bool ULidarScanComponent::EnsureInitialized()
 		DepthCapture->bAlwaysPersistRenderingState = false;
 
 		// Depth only: drop everything that cannot change the depth buffer, and never capture our own points.
-		FEngineShowFlags& Flags = DepthCapture->ShowFlags;
-		Flags.SetParticles(false);
-		Flags.SetTranslucency(false);
-		Flags.SetDecals(false);
-		Flags.SetFog(false);
-		Flags.SetVolumetricFog(false);
-		Flags.SetAtmosphere(false);
-		Flags.SetDynamicShadows(false);
-		Flags.SetAmbientOcclusion(false);
-		Flags.SetScreenSpaceReflections(false);
-		Flags.SetPostProcessing(false);
-		Flags.SetBloom(false);
-		Flags.SetMotionBlur(false);
-		Flags.SetEyeAdaptation(false);
-		Flags.SetAntiAliasing(false);
-		Flags.SetTemporalAA(false);
+		LidarScanCapture::SetDepthOnlyFlags(DepthCapture->ShowFlags);
+		bCaptureHasChannels = false;
 
 		if (bHideOwnerInCapture)
 		{
@@ -352,6 +409,104 @@ bool ULidarScanComponent::EnsureInitialized()
 	}
 
 	return true;
+}
+
+bool ULidarScanComponent::AreChannelsActive() const
+{
+	return bUseChannels && LidarScanCapture::IsCustomStencilEnabled() && (LoadedChannelMaterial || ChannelCaptureMaterial.Get());
+}
+
+bool ULidarScanComponent::ResolveChannels()
+{
+	if (!bUseChannels)
+	{
+		return false;
+	}
+	if (!LoadedChannelMaterial)
+	{
+		LoadedChannelMaterial = ChannelCaptureMaterial.LoadSynchronous();
+		if (LoadedChannelMaterial)
+		{
+			// Shaders may be missing right after load (the editor compiles on demand; cooked builds ship them): compile
+			// them now, once, rather than draw the capture with a fallback material.
+			LoadedChannelMaterial->EnsureIsComplete();
+		}
+	}
+	const bool bStencil = LidarScanCapture::IsCustomStencilEnabled();
+	if (!bStencil || !LoadedChannelMaterial)
+	{
+		if (!bReportedChannelsUnavailable)
+		{
+			bReportedChannelsUnavailable = true;
+			UE_LOG(LogLidarScan, Warning, TEXT("%s: channels are on but %s; scanning without channels."), *GetPathName(),
+				!bStencil ? TEXT("the project has no custom depth with stencil (set r.CustomDepth=3)")
+				: *FString::Printf(TEXT("ChannelCaptureMaterial '%s' could not be loaded"), *ChannelCaptureMaterial.ToString()));
+		}
+		return false;
+	}
+	// With missing shaders the engine would draw the capture with a fallback material and the scan would have no depth
+	// at all: scan without channels until they exist.
+	if (!LoadedChannelMaterial->IsComplete())
+	{
+		UE_LOG(LogLidarScan, Log, TEXT("%s: the channel material's shaders are not ready yet; this scan has no channels."), *GetName());
+		return false;
+	}
+	return true;
+}
+
+void ULidarScanComponent::ConfigureCapture(bool bChannels)
+{
+	if (!DepthCapture || bChannels == bCaptureHasChannels)
+	{
+		return;
+	}
+	bCaptureHasChannels = bChannels;
+	FPostProcessSettings& Settings = DepthCapture->PostProcessSettings;
+	Settings.WeightedBlendables.Array.Reset();
+	if (bChannels)
+	{
+		DepthCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorHDR;
+		LidarScanCapture::SetChannelFlags(DepthCapture->ShowFlags);
+		Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.f, LoadedChannelMaterial));
+		DepthCapture->PostProcessBlendWeight = 1.f;
+		// The engine applies a post-process material only to a view with a view state; every channel scan is a camera
+		// cut (see Scan), so the state never carries occlusion or history from one scan pose to the next.
+		DepthCapture->bAlwaysPersistRenderingState = true;
+	}
+	else
+	{
+		// Exactly the capture a component without channels makes (its view state is released at the next capture).
+		DepthCapture->bAlwaysPersistRenderingState = false;
+		DepthCapture->CaptureSource = ESceneCaptureSource::SCS_SceneDepth;
+		DepthCapture->ShowFlags = GetDefault<USceneCaptureComponent2D>()->ShowFlags;
+		LidarScanCapture::SetDepthOnlyFlags(DepthCapture->ShowFlags);
+	}
+}
+
+void ULidarScanComponent::SetChannel(int32 Channel, FLinearColor Color, float IntensityMultiplier)
+{
+	if (Channel < 1 || Channel > NumChannels)
+	{
+		return;
+	}
+	if (Channels.Num() != NumChannels)
+	{
+		Channels.SetNum(NumChannels);
+	}
+	Channels[Channel - 1].Color = Color;
+	Channels[Channel - 1].IntensityMultiplier = FMath::Clamp(IntensityMultiplier, 0.f, 16.f);
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.IsActive())
+		{
+			PushLiveParameters(Slot);
+		}
+	}
+}
+
+FLidarChannel ULidarScanComponent::GetChannel(int32 Channel) const
+{
+	return Channel >= 1 && Channel <= NumChannels && Channels.IsValidIndex(Channel - 1) ? Channels[Channel - 1] : FLidarChannel();
 }
 
 void ULidarScanComponent::Scan()
@@ -383,8 +538,10 @@ void ULidarScanComponent::Scan()
 		ReleaseSlot(Slot);
 	}
 
+	const bool bChannels = ResolveChannels();
+	ConfigureCapture(bChannels);
 	bool bNewTarget = false;
-	UTextureRenderTarget2D* Target = EnsureDepthTarget(Slot, bNewTarget);
+	UTextureRenderTarget2D* Target = EnsureDepthTarget(Slot, bChannels, bNewTarget);
 	UNiagaraComponent* Points = Slot.Points;
 	if (!Target || !Points)
 	{
@@ -396,6 +553,10 @@ void ULidarScanComponent::Scan()
 	DepthCapture->FOVAngle = HorizontalFOV;
 	DepthCapture->MaxViewDistanceOverride = Range;
 	DepthCapture->TextureTarget = Target;
+	if (bCaptureHasChannels)
+	{
+		DepthCapture->bCameraCutThisFrame = true;
+	}
 	DepthCapture->CaptureScene();
 
 	// Basis of the view that was just rendered: X forward, Y screen right, Z screen up.
@@ -491,14 +652,19 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 	const int32 Cap = FMath::Clamp(MaxInjectedPointsPerScan, 0, 65536);
 	bool bAnyOccluding = false;
 
-	// A source may (un)register sources while gathering: iterate over a copy.
-	PointSources.RemoveAll([](const TWeakObjectPtr<UObject>& Source) { return !Source.IsValid(); });
-	const TArray<TWeakObjectPtr<UObject>> Sources = PointSources;
+	// A source may (un)register sources while gathering: iterate over a copy, highest priority first, ties in
+	// registration order, so that the cap cuts the lowest priorities.
+	PointSources.RemoveAll([](const FLidarPointSourceEntry& Entry) { return !Entry.Source.IsValid(); });
+	TArray<FLidarPointSourceEntry> Sources = PointSources;
+	Sources.StableSort([](const FLidarPointSourceEntry& A, const FLidarPointSourceEntry& B)
+	{
+		return A.Priority != B.Priority ? A.Priority > B.Priority : A.Order < B.Order;
+	});
 
 	TArray<FLidarInjectedPoint> Gathered;
-	for (const TWeakObjectPtr<UObject>& WeakSource : Sources)
+	for (const FLidarPointSourceEntry& Entry : Sources)
 	{
-		UObject* Source = WeakSource.Get();
+		UObject* Source = Entry.Source.Get();
 		if (!Source || !Source->GetClass()->ImplementsInterface(ULidarPointSource::StaticClass()))
 		{
 			continue;
@@ -559,6 +725,11 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 	}
 
 	LastInjectionStats = Stats;
+	if (Stats.OverCap > 0)
+	{
+		UE_LOG(LogLidarScan, Warning, TEXT("%s: scan %d dropped %d injected points over the cap of %d per scan (lowest priorities cut)."),
+			*GetName(), Stats.ScanIndex, Stats.OverCap, Cap);
+	}
 	if (Stats.Gathered > 0)
 	{
 		UE_LOG(LogLidarScan, Log, TEXT("%s: scan %d injected points: %d sources, %d gathered, %d outside coverage, %d over cap, %d uploaded, %d behind captured depth%s."),
@@ -611,31 +782,55 @@ int32 ULidarScanComponent::CountBehindCapturedDepth(UTextureRenderTarget2D* Targ
 	return Behind;
 }
 
-void ULidarScanComponent::RegisterPointSource(TScriptInterface<ILidarPointSource> Source)
+void ULidarScanComponent::RegisterPointSource(TScriptInterface<ILidarPointSource> Source, int32 Priority)
 {
 	UObject* Object = Source.GetObject();
 	if (!Object || !Object->GetClass()->ImplementsInterface(ULidarPointSource::StaticClass()))
 	{
 		return;
 	}
-	PointSources.RemoveAll([](const TWeakObjectPtr<UObject>& Existing) { return !Existing.IsValid(); });
-	PointSources.AddUnique(Object);
+	PointSources.RemoveAll([](const FLidarPointSourceEntry& Existing) { return !Existing.Source.IsValid(); });
+	for (FLidarPointSourceEntry& Existing : PointSources)
+	{
+		if (Existing.Source.Get() == Object)
+		{
+			Existing.Priority = Priority;
+			return;
+		}
+	}
+	FLidarPointSourceEntry& Entry = PointSources.AddDefaulted_GetRef();
+	Entry.Source = Object;
+	Entry.Priority = Priority;
+	Entry.Order = NextSourceOrder++;
 }
 
 void ULidarScanComponent::UnregisterPointSource(TScriptInterface<ILidarPointSource> Source)
 {
 	const UObject* Object = Source.GetObject();
-	PointSources.RemoveAll([Object](const TWeakObjectPtr<UObject>& Existing) { return !Existing.IsValid() || Existing.Get() == Object; });
+	PointSources.RemoveAll([Object](const FLidarPointSourceEntry& Existing) { return !Existing.Source.IsValid() || Existing.Source.Get() == Object; });
 }
 
 int32 ULidarScanComponent::GetPointSourceCount() const
 {
 	int32 Count = 0;
-	for (const TWeakObjectPtr<UObject>& Source : PointSources)
+	for (const FLidarPointSourceEntry& Entry : PointSources)
 	{
-		Count += Source.IsValid() ? 1 : 0;
+		Count += Entry.Source.IsValid() ? 1 : 0;
 	}
 	return Count;
+}
+
+int32 ULidarScanComponent::GetPointSourcePriority(TScriptInterface<ILidarPointSource> Source) const
+{
+	const UObject* Object = Source.GetObject();
+	for (const FLidarPointSourceEntry& Entry : PointSources)
+	{
+		if (Object && Entry.Source.Get() == Object)
+		{
+			return Entry.Priority;
+		}
+	}
+	return 0;
 }
 
 TArray<FLidarScanContext> ULidarScanComponent::GetAliveScans() const
@@ -877,6 +1072,34 @@ void ULidarScanComponent::ReleaseSlot(FLidarScanSlot& Slot)
 void ULidarScanComponent::ApplyLiveSettings()
 {
 	TrimSlots();
+	// An idle slot whose target does not match the next scan (channels switched) gets its new target now and is
+	// warmed up (again) like a new slot, so its first scan never binds a target in its own frame (in packaged builds that
+	// loses every captured point of that scan). Slots still warming from BeginPlay are converted too: channels are often
+	// switched on by another component's BeginPlay, right after this one's.
+	if (LoadedPointSystem && GetWorld() && GetWorld()->IsGameWorld())
+	{
+		const bool bChannels = ResolveChannels();
+		const double Now = GetWorld()->GetRealTimeSeconds();
+		bool bWarming = false;
+		for (FLidarScanSlot& Slot : Slots)
+		{
+			if (Slot.IsActive() || !Slot.Points || Slot.bDepthTargetHasChannels == bChannels)
+			{
+				continue;
+			}
+			bool bCreated = false;
+			EnsureDepthTarget(Slot, bChannels, bCreated);
+			Slot.Points->SetVariableInt(LidarScanParams::PointCount, 0);
+			Slot.Points->SetVariableInt(LidarScanParams::InjectedPointCount, 0);
+			Slot.Points->Activate(true);
+			Slot.WarmUntilRealTime = Now + LidarScanWarmUp::Seconds;
+			bWarming = true;
+		}
+		if (bWarming)
+		{
+			SetComponentTickEnabled(true);
+		}
+	}
 	for (const FLidarScanSlot& Slot : Slots)
 	{
 		PushLiveParameters(Slot);
@@ -955,17 +1178,19 @@ void ULidarScanComponent::TrimSlots()
 	}
 }
 
-UTextureRenderTarget2D* ULidarScanComponent::EnsureDepthTarget(FLidarScanSlot& Slot, bool& bOutCreated)
+UTextureRenderTarget2D* ULidarScanComponent::EnsureDepthTarget(FLidarScanSlot& Slot, bool bChannels, bool& bOutCreated)
 {
 	bOutCreated = false;
 	const int32 Resolution = FMath::Clamp(CaptureResolution, 64, 1024);
-	if (Slot.DepthTarget && Slot.DepthTarget->SizeX == Resolution && Slot.DepthTarget->SizeY == Resolution)
+	if (Slot.DepthTarget && Slot.DepthTarget->SizeX == Resolution && Slot.DepthTarget->SizeY == Resolution
+		&& Slot.bDepthTargetHasChannels == bChannels)
 	{
 		return Slot.DepthTarget;
 	}
 
+	// Depth alone in R (R32f), or depth in R and the channel in G (RGBA32f, written by the channel material).
 	UTextureRenderTarget2D* Target = NewObject<UTextureRenderTarget2D>(this, NAME_None, RF_Transient);
-	Target->RenderTargetFormat = RTF_R32f;
+	Target->RenderTargetFormat = bChannels ? RTF_RGBA32f : RTF_R32f;
 	Target->ClearColor = FLinearColor::Black; // depth 0 -> no point
 	Target->bAutoGenerateMips = false;
 	Target->Filter = TF_Nearest;
@@ -975,6 +1200,7 @@ UTextureRenderTarget2D* ULidarScanComponent::EnsureDepthTarget(FLidarScanSlot& S
 	Target->UpdateResourceImmediate(true);
 
 	Slot.DepthTarget = Target;
+	Slot.bDepthTargetHasChannels = bChannels;
 	bOutCreated = true;
 	UNiagaraFunctionLibrary::SetTextureObject(Slot.Points, LidarScanParams::DepthTexture.ToString(), Target);
 	return Target;
@@ -1076,6 +1302,13 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 	Points->SetVariableFloat(LidarScanParams::DensityBoostMax, FMath::Clamp(DensityBoostMax, 1.f, 16.f));
 	Points->SetVariableFloat(LidarScanParams::InjectedIntensity, FMath::Clamp(PointIntensity, 0.f, 4.f));
 	Points->SetVariableFloat(LidarScanParams::FadeOutAlpha, Slot.GetFadeOutAlpha());
+	for (int32 Index = 0; Index < NumChannels; ++Index)
+	{
+		const FLidarChannel Channel = Channels.IsValidIndex(Index) ? Channels[Index] : FLidarChannel();
+		FLinearColor ChannelEmissive = Channel.Color * (FMath::Clamp(PointIntensity, 0.f, 4.f) * FMath::Clamp(Channel.IntensityMultiplier, 0.f, 16.f));
+		ChannelEmissive.A = 1.f;
+		Points->SetVariableLinearColor(LidarScanParams::ChannelColors[Index], ChannelEmissive);
+	}
 
 	const UWorld* World = GetWorld();
 	const double Now = World ? World->GetRealTimeSeconds() : Slot.StartRealTime;

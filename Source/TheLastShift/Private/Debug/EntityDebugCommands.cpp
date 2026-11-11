@@ -500,11 +500,21 @@ namespace EntityDebug
 			L->Scans.FilterByPredicate([](const UTlsEntityTestListener::FScan& S) { return S.FigurePoints + S.TrailPoints > 0; }).Num(),
 			L->ContactTimes.Num() ? *FString::Printf(TEXT("at %.3f s"), L->ContactTimes[0]) : TEXT("none"));
 
+		// Verdicts, totalled at the end as passed and failed counts.
+		int32 Passed = 0;
+		int32 Failed = 0;
+		auto Verdict = [&Passed, &Failed](bool bOk) { (bOk ? Passed : Failed) += 1; };
+		Verdict(L->AwakenTimes.Num() == 1);
+		Verdict(L->Spawns.Num() >= 1);
+
 		float SpawnTime = -1.f;
 		float SpawnDistance = -1.f;
 		if (L->Spawns.Num())
 		{
 			const FEntitySpawnReport Report = Entity->GetLastSpawnReport();
+			Verdict(Report.bNoLineOfSight);
+			Verdict(Report.bDistanceInTolerance);
+			Verdict(!Report.bFallback);
 			SpawnTime = L->Spawns[0].Time;
 			SpawnDistance = Report.PathDistance;
 			UE_LOG(LogTheLastShift, Log, TEXT("  spawn at %.3f s (cumulative %.3f s): %s, path distance %.1f cm (target %.1f, %+.1f%%), %d queries, %d candidates, noLOS=%d onDistance=%d hiddenFromScans=%d forward=%d fallback=%d"),
@@ -530,6 +540,7 @@ namespace EntityDebug
 			}
 			const double Slope = N > 1 ? (N * SumTD - SumT * SumD) / FMath::Max(N * SumTT - SumT * SumT, 1e-6) : 0.0;
 			const bool bSlopeOk = Speed <= 0.f || FMath::Abs(-Slope - Speed) <= 0.05 * Speed;
+			Verdict(bSlopeOk);
 			UE_LOG(LogTheLastShift, Log, TEXT("  motion: %d samples, fitted speed %.2f cm/s (Speed %.2f, %+.1f%%) %s"),
 				N, -Slope, Speed, Speed > 0.f ? 100.0 * (-Slope - Speed) / Speed : 0.0, bSlopeOk ? TEXT("OK") : TEXT("OFF"));
 
@@ -559,16 +570,20 @@ namespace EntityDebug
 			const float Predicted = SpawnTime + (SpawnDistance - Radius) / Speed;
 			UE_LOG(LogTheLastShift, Log, TEXT("  contact at %.3f s; straight-path prediction (spawn %.3f s + (%.1f - %.1f) / %.2f) %.3f s, %+.3f s"),
 				L->ContactTimes[0], SpawnTime, SpawnDistance, Radius, Speed, Predicted, L->ContactTimes[0] - Predicted);
-			CheckContactExit(World, Director, Entity, L, GEntityTest.bFlashlightBefore, TEXT("EntityTest"));
+			Verdict(CheckContactExit(World, Director, Entity, L, GEntityTest.bFlashlightBefore, TEXT("EntityTest")));
 		}
 		else
 		{
+			// No contact within the run: the contact exit check did not run (regressions use 60 s so that it does).
+			Verdict(false);
 			LogReport(World, TEXT("EntityTest after resume:"));
 		}
 		UE_LOG(LogTheLastShift, Log, TEXT("  contact response %s, exit reason OnTimeStateChanged %s, OnStopExited %s"),
 			LexToString(Entity->ContactResponse),
 			L->TimeStateExitReasons.Num() ? ReasonName(L->TimeStateExitReasons.Last()) : TEXT("none"),
 			L->StopExitReasons.Num() ? ReasonName(L->StopExitReasons.Last()) : TEXT("none"));
+		UE_LOG(LogTheLastShift, Log, TEXT("EntityTest result (%s): %d checks passed, %d failed (awakened once, spawned, spawn without line of sight, on distance, without fallback, fitted speed within 5%%, contact exit)."),
+			Failed == 0 ? TEXT("PASS") : TEXT("FAIL"), Passed, Failed);
 		GEntityTest.Listener.Reset();
 	}
 

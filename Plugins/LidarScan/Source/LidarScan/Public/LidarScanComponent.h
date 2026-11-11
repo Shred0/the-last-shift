@@ -8,6 +8,7 @@
 #include "UObject/ScriptInterface.h"
 #include "LidarScanComponent.generated.h"
 
+class UMaterialInterface;
 class UNiagaraComponent;
 class UNiagaraSystem;
 class USceneCaptureComponent2D;
@@ -27,6 +28,9 @@ struct FLidarScanSlot
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTextureRenderTarget2D> DepthTarget;
+
+	/** DepthTarget carries a channel per texel (RGBA32f: R depth, G channel) instead of depth alone (R32f). */
+	bool bDepthTargetHasChannels = false;
 
 	/** Monotonic scan index this slot currently shows, INDEX_NONE when idle. */
 	int32 ScanIndex = INDEX_NONE;
@@ -80,6 +84,32 @@ struct FLidarScanSlotStats
 	/** Live particles of the injected-points emitter, same latency. */
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Diagnostics")
 	int32 InjectedParticles = 0;
+};
+
+/**
+ * Look of one colour channel: captured points whose surface carries the channel's custom depth stencil value take this
+ * colour and intensity instead of the component's PointColor.
+ */
+USTRUCT(BlueprintType)
+struct FLidarChannel
+{
+	GENERATED_BODY()
+
+	/** Point colour of the channel. RGB is multiplied by the component's PointIntensity, like PointColor; A is ignored (the alpha follows the scan). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Channels")
+	FLinearColor Color = FLinearColor::White;
+
+	/** Extra brightness factor for the channel's points, on top of PointIntensity. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Channels", meta = (ClampMin = "0.0", ClampMax = "16.0", UIMin = "0.0", UIMax = "16.0"))
+	float IntensityMultiplier = 1.f;
+};
+
+/** A registered point source with its priority and registration order (ties keep the order). */
+struct FLidarPointSourceEntry
+{
+	TWeakObjectPtr<UObject> Source;
+	int32 Priority = 0;
+	int32 Order = 0;
 };
 
 /** Scan lifecycle event: index of the scan (monotonic per component) and world time in seconds. */
@@ -143,10 +173,12 @@ public:
 
 	/**
 	 * Adds a point source: from the next scan on, its points are gathered right after each depth capture and added to
-	 * that scan. Held weakly; a source that is destroyed is dropped silently. Registering twice has no effect.
+	 * that scan. Held weakly; a source that is destroyed is dropped silently. Sources are served by Priority, higher
+	 * first, ties in registration order; when MaxInjectedPointsPerScan is reached the remaining (lowest-priority)
+	 * points are dropped. Registering a source again only changes its priority; it keeps its place among equals.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lidar|Injected")
-	void RegisterPointSource(TScriptInterface<ILidarPointSource> Source);
+	void RegisterPointSource(TScriptInterface<ILidarPointSource> Source, int32 Priority = 0);
 
 	UFUNCTION(BlueprintCallable, Category = "Lidar|Injected")
 	void UnregisterPointSource(TScriptInterface<ILidarPointSource> Source);
@@ -154,6 +186,14 @@ public:
 	/** Number of registered sources that are still alive. */
 	UFUNCTION(BlueprintPure, Category = "Lidar|Injected")
 	int32 GetPointSourceCount() const;
+
+	/** Priority the source was registered with; 0 when it is not registered. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Injected")
+	int32 GetPointSourcePriority(TScriptInterface<ILidarPointSource> Source) const;
+
+	/** Injected points the last scan dropped because MaxInjectedPointsPerScan was reached (0 before the first scan). */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Injected")
+	int32 GetLastDroppedInjectedPoints() const { return LastInjectionStats.OverCap; }
 
 	/** Counters of the last scan's injection (all zero, ScanIndex -1, before the first scan). */
 	UFUNCTION(BlueprintPure, Category = "Lidar|Injected")
@@ -320,6 +360,38 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Injected")
 	bool bVerifyInjectedOcclusion = false;
 
+	// --- Channels ---
+
+	/** Number of colour channels besides the default channel (stencil values 1 to NumChannels). */
+	static constexpr int32 NumChannels = 4;
+
+	/**
+	 * Colour channels. When on, every captured point reads the custom depth stencil value of the surface it was sampled
+	 * from (at its own texel, never filtered) and values 1 to NumChannels take that channel's colour and intensity; 0
+	 * and larger values keep PointColor. Only the colour and intensity change: size, compensation, offsets, thinning,
+	 * jitter, fade and slots are the same for every channel. Needs custom depth with stencil in the project
+	 * (r.CustomDepth=3); without it the component warns once and scans as if channels were off. Off: the capture and
+	 * the points are exactly those of a component without channels. Applied on the next scan.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Channels")
+	bool bUseChannels = false;
+
+	/** Channel 1 to NumChannels, in order. Change at runtime with SetChannel. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, EditFixedSize, Category = "Lidar|Channels")
+	TArray<FLidarChannel> Channels;
+
+	/** Sets the colour and intensity multiplier of Channel (1 to NumChannels); alive scans change at once. Ignored out of range. */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Channels")
+	void SetChannel(int32 Channel, FLinearColor Color, float IntensityMultiplier = 1.f);
+
+	/** Look of Channel (1 to NumChannels); a default FLidarChannel out of range. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Channels")
+	FLidarChannel GetChannel(int32 Channel) const;
+
+	/** True when the next scan will carry channels: bUseChannels, custom depth with stencil enabled and the capture material loaded. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Channels")
+	bool AreChannelsActive() const;
+
 	// --- Scans ---
 
 	/**
@@ -343,6 +415,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Lidar|Assets")
 	TSoftObjectPtr<UNiagaraSystem> PointSystem;
 
+	/**
+	 * Post-process material of the capture when channels are on (replaces the tonemapper): writes the scene depth to R
+	 * and, where the custom depth surface is the one the sample hit, the custom stencil value to G. Same cook rule as
+	 * PointSystem.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Lidar|Assets")
+	TSoftObjectPtr<UMaterialInterface> ChannelCaptureMaterial;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -354,6 +434,10 @@ protected:
 
 private:
 	bool EnsureInitialized();
+	/** Whether the next scan uses channels; loads the capture material and warns once when something is missing. */
+	bool ResolveChannels();
+	/** Sets the capture up for a depth-only scan (exactly as without channels) or for depth plus channel. */
+	void ConfigureCapture(bool bChannels);
 	/** Creates and warms up slots until MaxAliveScans exist, so no scan uses a point system instance created that frame. */
 	void PrepareSlots();
 	/** Adds a slot with its point system component and depth target; INDEX_NONE on failure. */
@@ -361,7 +445,7 @@ private:
 	int32 AcquireSlot();
 	void DestroySlot(FLidarScanSlot& Slot);
 	void TrimSlots();
-	UTextureRenderTarget2D* EnsureDepthTarget(FLidarScanSlot& Slot, bool& bOutCreated);
+	UTextureRenderTarget2D* EnsureDepthTarget(FLidarScanSlot& Slot, bool bChannels, bool& bOutCreated);
 	void ActivateScanPoints(int32 ScanIndex);
 	float ResolveHorizontalFOV() const;
 	float ResolveViewPixelScale() const;
@@ -388,10 +472,22 @@ private:
 	/** Set once the missing PointSystem has been reported, so the error is logged once per component. */
 	bool bReportedMissingPointSystem = false;
 
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> LoadedChannelMaterial;
+
+	/** Channels were requested but cannot run (no custom depth with stencil, or no material); reported once. */
+	bool bReportedChannelsUnavailable = false;
+
+	/** The capture is currently set up for channels. */
+	bool bCaptureHasChannels = false;
+
 	int32 ScanCount = 0;
 
-	/** Registered point sources, held weakly. */
-	TArray<TWeakObjectPtr<UObject>> PointSources;
+	/** Registered point sources, held weakly, in registration order. */
+	TArray<FLidarPointSourceEntry> PointSources;
+
+	/** Registration order of the next new source. */
+	int32 NextSourceOrder = 0;
 
 	FLidarInjectionStats LastInjectionStats;
 

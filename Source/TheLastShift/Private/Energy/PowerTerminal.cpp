@@ -4,12 +4,12 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Energy/EnergySubsystem.h"
-#include "Energy/InteractableScanComponent.h"
 #include "Energy/PoweredDevice.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
+#include "Run/TheLastShiftSettings.h"
 #include "Time/TimeStateSubsystem.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -37,8 +37,14 @@ APowerTerminal::APowerTerminal()
 		Mesh->SetStaticMesh(CubeMesh.Object);
 	}
 
-	InteractableScan = CreateDefaultSubobject<UInteractableScanComponent>(TEXT("InteractableScan"));
-	InteractableScan->AddTarget(Mesh);
+}
+
+void APowerTerminal::BeginPlay()
+{
+	Super::BeginPlay();
+	// Shown in scans through the lidar channel of InteractableScanChannel (one owner: the project settings).
+	Mesh->SetRenderCustomDepth(true);
+	Mesh->SetCustomDepthStencilValue(UTheLastShiftSettings::GetInteractableScanChannel());
 }
 
 bool APowerTerminal::HasUnpoweredTarget() const

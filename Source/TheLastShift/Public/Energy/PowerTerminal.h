@@ -8,7 +8,6 @@
 
 class APawn;
 class APoweredDevice;
-class UInteractableScanComponent;
 class UStaticMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTerminalActivated, int32, Cost);
@@ -17,7 +16,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnTerminalInsufficientEnergy, in
 /**
  * Where energy is spent: Interact within InteractRadius, in Normal time, spends Cost banked energy and powers every
  * device in Targets (which can be far away). With too little energy, or while time is Stopped (terminals work only in
- * Normal time), nothing changes and OnInsufficientEnergy fires. Shows in scans in the interactable colour (InteractableScan).
+ * Normal time), nothing changes and OnInsufficientEnergy fires. Shows in scans in the interactable colour: Mesh renders
+ * custom depth with the stencil value InteractableScanChannel of the project settings, the lidar channel the scan
+ * director gives ScanColors.Interactable.
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API APowerTerminal : public AActor
@@ -68,10 +69,9 @@ public:
 	FOnTerminalInsufficientEnergy OnInsufficientEnergy;
 
 protected:
+	virtual void BeginPlay() override;
+
+	/** The terminal's body; tagged for the interactable scan channel at BeginPlay. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")
 	TObjectPtr<UStaticMeshComponent> Mesh;
-
-	/** Shows the Mesh in scans in the interactable colour. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")
-	TObjectPtr<UInteractableScanComponent> InteractableScan;
 };

@@ -105,6 +105,13 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability")
 	FScanColors ScanColors;
 
+	/**
+	 * Custom depth stencil value of the meshes shown as interactables (terminals, closed doors) and the lidar colour
+	 * channel the scan director gives ScanColors.Interactable. The one owner of that number.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 InteractableScanChannel = 1;
+
 	/** The travel screen stays black at least this long, even when the next area is ready sooner. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float TravelHoldSeconds = 4.f;
@@ -130,6 +137,9 @@ public:
 
 	/** ScanColors of the project settings. */
 	static const FScanColors& GetScanColors() { return Get()->ScanColors; }
+
+	/** InteractableScanChannel of the project settings, clamped to [1, 4]. */
+	static int32 GetInteractableScanChannel() { return FMath::Clamp(Get()->InteractableScanChannel, 1, 4); }
 
 	/** The map a run starts in: the first entry of AreaMaps (null when the list is empty). */
 	TSoftObjectPtr<UWorld> GetFirstAreaMap() const { return AreaMaps.Num() > 0 ? AreaMaps[0] : TSoftObjectPtr<UWorld>(); }

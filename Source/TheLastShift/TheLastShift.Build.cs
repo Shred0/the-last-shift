@@ -29,5 +29,14 @@ public class TheLastShift : ModuleRules
 			"SlateCore"
 		});
 
+		// Frame timing for the tls.* debug commands (Private/Debug), which are compiled out of Shipping.
+		if (Target.Configuration != UnrealTargetConfiguration.Shipping)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[]
+			{
+				"RenderCore",
+				"RHI"
+			});
+		}
 	}
 }

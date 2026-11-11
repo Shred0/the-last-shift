@@ -88,9 +88,28 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Scan")
 	bool ForceExit(EStopExitReason Reason);
 
-	/** Adds a point source to the owner's lidar scans (see ULidarScanComponent::RegisterPointSource). */
+	/**
+	 * Adds a point source to the owner's lidar scans (see ULidarScanComponent::RegisterPointSource), at the priority
+	 * GetPointSourcePriority gives it: when a scan holds more injected points than the lidar accepts, the lowest
+	 * priorities are cut.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Scan")
 	void RegisterPointSource(TScriptInterface<ILidarPointSource> Source);
+
+	/**
+	 * Priority of a point source, the one place where priorities are set: the entity first, then residues, then
+	 * anything else (0).
+	 */
+	UFUNCTION(BlueprintPure, Category = "Scan")
+	static int32 GetPointSourcePriority(const UObject* Source);
+
+#if !UE_BUILD_SHIPPING
+	/** Debug only (tls.SourcePriorityTest): registers Source at an explicit priority, bypassing GetPointSourcePriority. */
+	void RegisterPointSourceAtPriorityForTest(TScriptInterface<ILidarPointSource> Source, int32 Priority);
+
+	/** Debug only (tls.Lidar.Channels): every director leaves the lidar's colour channels off while this is set. */
+	static bool bChannelsOffForTest;
+#endif
 
 	UFUNCTION(BlueprintCallable, Category = "Scan")
 	void UnregisterPointSource(TScriptInterface<ILidarPointSource> Source);
@@ -131,15 +150,6 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
 	ULidarScanComponent* GetLidarScan() const { return LidarScan; }
-
-	/**
-	 * World distance between neighbouring capture samples on a surface at PlanarDepth, seen head-on, for the scan
-	 * described by Context: 2 * Depth * TanHalfFOV.X / capture resolution, with Depth raised to the lidar's near
-	 * thinning distance (closer samples are thinned to that density). For point sources that want to match the density
-	 * of captured points. 0 when the owner has no lidar.
-	 */
-	UFUNCTION(BlueprintPure, Category = "Scan|State", meta = (Units = "cm"))
-	float GetCaptureSampleSpacing(const FLidarScanContext& Context, float PlanarDepth) const;
 
 	/** Owner transform recorded at the last Stop (identity before the first Stop). */
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
@@ -203,7 +213,11 @@ private:
 	void HandleReadyTimer();
 	void HandleBeatTimer();
 
-	/** Pushes the scan colour (ScanColors.Scan of the project settings, its one owner) to the lidar. */
+	/**
+	 * Pushes the scan colour (ScanColors.Scan of the project settings, its one owner) to the lidar, turns its colour
+	 * channels on and gives ScanColors.Interactable to channel InteractableScanChannel (the stencil value of terminals
+	 * and doors).
+	 */
 	void ApplyScanColor();
 
 	/** Issues the scan and restarts the cooldown from ScanTime. */

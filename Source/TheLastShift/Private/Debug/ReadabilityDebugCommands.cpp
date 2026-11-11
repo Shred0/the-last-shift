@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-// Debug console commands for readability (Brief 5b): the interactables' scan colour and the Interact prompt.
+// Debug console commands for readability (Briefs 5b, 2l): the interactables' scan colour (a lidar colour channel
+// chosen by the custom depth stencil of their meshes) and the Interact prompt.
 // tls.ReadabilityTest [all|scan|colors|prompt|area], tls.Readability.Spawn, tls.Readability.Clear,
-// tls.Readability.GatherCost. Development builds only.
+// tls.Readability.Tag, tls.Readability.Channels. Development builds only.
 
 #include "Containers/Ticker.h"
 #include "Debug/TlsDebugCommon.h"
@@ -12,10 +13,10 @@
 #include "Components/StaticMeshComponent.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/EnergySubsystem.h"
-#include "Energy/InteractableScanComponent.h"
 #include "Energy/PowerTerminal.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
@@ -31,10 +32,12 @@
 #include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanCueWidget.h"
 #include "Scan/ScanDirectorComponent.h"
+#include "TextureResource.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
 #include "UI/InteractPromptWidget.h"
 #include "UI/StdRadialProgress.h"
+#include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 
 #if !UE_BUILD_SHIPPING
@@ -368,7 +371,8 @@ namespace ReadabilityDebug
 	struct FScene
 	{
 		TArray<TWeakObjectPtr<AActor>> Actors;
-		TArray<TWeakObjectPtr<UInteractableScanComponent>> Sources;
+		/** The mesh of each spawned terminal and door: what shows in the interactable channel. */
+		TArray<TWeakObjectPtr<UStaticMeshComponent>> Targets;
 		TArray<FString> Labels;
 	};
 	static FScene GScene;
@@ -385,42 +389,216 @@ namespace ReadabilityDebug
 		GScene = FScene();
 	}
 
-	static void SetSourcesRegistered(bool bRegistered)
+	/** The mesh a terminal or a door is shown by (the terminal's body, the door's panel). */
+	static UStaticMeshComponent* InteractableMesh(const AActor* Actor)
 	{
-		UScanDirectorComponent* D = Director();
-		if (!D)
+		return Actor && (Actor->IsA<APowerTerminal>() || Actor->IsA<ADoorDevice>()) ? Actor->FindComponentByClass<UStaticMeshComponent>() : nullptr;
+	}
+
+	/** Tags (or untags) the scene's meshes for the interactable channel, as the game does at BeginPlay. */
+	static void SetSceneTagged(bool bTagged)
+	{
+		for (const TWeakObjectPtr<UStaticMeshComponent>& Target : GScene.Targets)
 		{
-			return;
-		}
-		for (const TWeakObjectPtr<UInteractableScanComponent>& Source : GScene.Sources)
-		{
-			if (UInteractableScanComponent* S = Source.Get())
+			if (UStaticMeshComponent* Mesh = Target.Get())
 			{
-				D->UnregisterPointSource(TScriptInterface<ILidarPointSource>(S));
-				if (bRegistered)
-				{
-					D->RegisterPointSource(TScriptInterface<ILidarPointSource>(S));
-				}
+				Mesh->SetRenderCustomDepth(bTagged);
 			}
 		}
 	}
 
-	static int32 SceneGathered(int32 ScanIndex, FString* OutDetail = nullptr)
+	// --- Channel readback (diagnostics: the newest scan's capture target, depth in R and channel in G) ---
+
+	struct FChannelImage
 	{
-		int32 Total = 0;
-		for (int32 I = 0; I < GScene.Sources.Num(); ++I)
+		TArray<float> Depth;
+		TArray<uint8> Channel;
+		int32 Width = 0;
+		int32 Height = 0;
+		FLidarScanContext Context;
+		/** The newest scan's target carried channels (RGBA32f) and was found. */
+		bool bHasChannels = false;
+		/** Raw statistics of the target that was read: min/max of R, G, B, A over all texels. */
+		FString Raw;
+	};
+
+	/**
+	 * Reads the depth of the newest alive scan through the lidar's diagnostics, then the channel of every texel from the
+	 * same render target. The target is found through the component's reflected Slots array (FLidarScanSlot::DepthTarget,
+	 * a UPROPERTY) at the position of the newest scan in GetScanSlotStats(), which lists the slots in the same order: the
+	 * slot itself, not a guess (two scans from the same pose have identical depth). Its R must equal the depth the lidar
+	 * returned (checked).
+	 */
+	static bool ReadNewestChannels(FChannelImage& Out)
+	{
+		Out = FChannelImage();
+		ULidarScanComponent* L = Lidar();
+		if (!L || !L->ReadNewestScanDepth(Out.Depth, Out.Width, Out.Height, Out.Context))
 		{
-			if (const UInteractableScanComponent* S = GScene.Sources[I].Get())
+			return false;
+		}
+		Out.Channel.Init(0, Out.Width * Out.Height);
+
+		const TArray<FLidarScanSlotStats> Slots = L->GetScanSlotStats();
+		int32 NewestSlot = INDEX_NONE;
+		for (int32 Index = 0; Index < Slots.Num(); ++Index)
+		{
+			if (Slots[Index].ScanIndex == Out.Context.ScanIndex)
 			{
-				const int32 N = S->GetLastGatheredScan() == ScanIndex ? S->GetLastGatheredPoints() : 0;
-				Total += N;
-				if (OutDetail)
+				NewestSlot = Index;
+			}
+		}
+		TArray<UTextureRenderTarget2D*> Candidates;
+		const FArrayProperty* SlotsProperty = FindFProperty<FArrayProperty>(ULidarScanComponent::StaticClass(), TEXT("Slots"));
+		const FStructProperty* SlotProperty = SlotsProperty ? CastField<FStructProperty>(SlotsProperty->Inner) : nullptr;
+		const FObjectPropertyBase* TargetProperty = SlotProperty ? FindFProperty<FObjectPropertyBase>(SlotProperty->Struct, TEXT("DepthTarget")) : nullptr;
+		if (TargetProperty && NewestSlot != INDEX_NONE)
+		{
+			FScriptArrayHelper Array(SlotsProperty, SlotsProperty->ContainerPtrToValuePtr<void>(L));
+			if (Array.IsValidIndex(NewestSlot))
+			{
+				Candidates.Add(Cast<UTextureRenderTarget2D>(TargetProperty->GetObjectPropertyValue_InContainer(Array.GetRawPtr(NewestSlot))));
+			}
+		}
+		for (UTextureRenderTarget2D* Target : Candidates)
+		{
+			if (!Target || Target->RenderTargetFormat != RTF_RGBA32f)
+			{
+				continue;
+			}
+			FTextureRenderTargetResource* Resource = Target->GameThread_GetRenderTargetResource();
+			TArray<FLinearColor> Pixels;
+			if (!Resource || !Resource->ReadLinearColorPixels(Pixels) || Pixels.Num() < Out.Width * Out.Height)
+			{
+				continue;
+			}
+			bool bMatch = true;
+			for (int32 Index = 0; Index < Out.Width * Out.Height && bMatch; ++Index)
+			{
+				bMatch = Pixels[Index].R == Out.Depth[Index];
+			}
+			if (!bMatch)
+			{
+				continue;
+			}
+			for (int32 Index = 0; Index < Out.Width * Out.Height; ++Index)
+			{
+				Out.Channel[Index] = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Pixels[Index].G), 0, 255));
+			}
+			Out.bHasChannels = true;
+			FLinearColor Lo(FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX), Hi(-FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX);
+			for (int32 Index = 0; Index < Out.Width * Out.Height; ++Index)
+			{
+				const FLinearColor& Px = Pixels[Index];
+				Lo = FLinearColor(FMath::Min(Lo.R, Px.R), FMath::Min(Lo.G, Px.G), FMath::Min(Lo.B, Px.B), FMath::Min(Lo.A, Px.A));
+				Hi = FLinearColor(FMath::Max(Hi.R, Px.R), FMath::Max(Hi.G, Px.G), FMath::Max(Hi.B, Px.B), FMath::Max(Hi.A, Px.A));
+			}
+			const FLinearColor& Mid = Pixels[(Out.Height / 2) * Out.Width + Out.Width / 2];
+			Out.Raw = FString::Printf(TEXT("min %s, max %s, centre %s"), *Lo.ToString(), *Hi.ToString(), *Mid.ToString());
+			break;
+		}
+		return true;
+	}
+
+	/** Texel counts of one scan: on a target mesh's surface (in the expected channel / in another / default), and overall. */
+	struct FChannelCounts
+	{
+		int32 Valid = 0;
+		int32 InChannel = 0;
+		int32 OnTarget = 0;
+		int32 OnTargetInChannel = 0;
+		int32 OnTargetDefault = 0;
+		int32 InChannelOffTarget = 0;
+		FString Detail;
+	};
+
+	/**
+	 * Classifies every texel of Image with a depth in (1, MaxRange): its point (texel-centre ray, no SurfaceBias) lies on
+	 * a target when it is inside the target mesh's box grown by ToleranceCm. Channel = the expected stencil value.
+	 */
+	static FChannelCounts CountChannels(const FChannelImage& Image, const TArray<UStaticMeshComponent*>& Targets, const TArray<FString>& Labels, int32 Channel, float ToleranceCm = 3.f)
+	{
+		FChannelCounts C;
+		const FLidarScanContext& X = Image.Context;
+		TArray<FIntVector> PerTarget;
+		PerTarget.Init(FIntVector::ZeroValue, Targets.Num());
+		for (int32 Y = 0; Y < Image.Height; ++Y)
+		{
+			for (int32 Xi = 0; Xi < Image.Width; ++Xi)
+			{
+				const int32 Index = Y * Image.Width + Xi;
+				const float Depth = Image.Depth[Index];
+				if (Depth <= 1.f || Depth >= X.MaxRange)
 				{
-					*OutDetail += FString::Printf(TEXT("%s%s %d"), OutDetail->IsEmpty() ? TEXT("") : TEXT(", "), *GScene.Labels[I], N);
+					continue;
+				}
+				++C.Valid;
+				const uint8 Ch = Image.Channel[Index];
+				const bool bIn = Ch == Channel;
+				C.InChannel += bIn ? 1 : 0;
+				const double U = ((Xi + 0.5) / Image.Width) * 2.0 - 1.0;
+				const double V = 1.0 - ((Y + 0.5) / Image.Height) * 2.0;
+				const FVector P = X.CaptureOrigin + (X.CaptureForward + U * X.TanHalfFOV.X * X.CaptureRight + V * X.TanHalfFOV.Y * X.CaptureUp) * Depth;
+				bool bOnAny = false;
+				for (int32 T = 0; T < Targets.Num(); ++T)
+				{
+					const UStaticMeshComponent* Mesh = Targets[T];
+					if (!Mesh || !Mesh->GetStaticMesh())
+					{
+						continue;
+					}
+					const FTransform& Xf = Mesh->GetComponentTransform();
+					const FVector Scale = Xf.GetScale3D().GetAbs();
+					const FVector Grow(ToleranceCm / FMath::Max(Scale.X, 0.001), ToleranceCm / FMath::Max(Scale.Y, 0.001), ToleranceCm / FMath::Max(Scale.Z, 0.001));
+					const FBox Box = Mesh->GetStaticMesh()->GetBoundingBox().ExpandBy(Grow, Grow);
+					if (Box.IsInside(Xf.InverseTransformPosition(P)))
+					{
+						bOnAny = true;
+						PerTarget[T].X += 1;
+						PerTarget[T].Y += bIn ? 1 : 0;
+						PerTarget[T].Z += Ch == 0 ? 1 : 0;
+					}
+				}
+				if (bOnAny)
+				{
+					++C.OnTarget;
+					C.OnTargetInChannel += bIn ? 1 : 0;
+					C.OnTargetDefault += Ch == 0 ? 1 : 0;
+				}
+				else
+				{
+					C.InChannelOffTarget += bIn ? 1 : 0;
 				}
 			}
 		}
-		return Total;
+		for (int32 T = 0; T < Targets.Num(); ++T)
+		{
+			C.Detail += FString::Printf(TEXT("%s%s: %d texels, %d in channel, %d default"), C.Detail.IsEmpty() ? TEXT("") : TEXT("; "),
+				Labels.IsValidIndex(T) ? *Labels[T] : TEXT("?"), PerTarget[T].X, PerTarget[T].Y, PerTarget[T].Z);
+		}
+		return C;
+	}
+
+	static TArray<UStaticMeshComponent*> SceneTargets()
+	{
+		TArray<UStaticMeshComponent*> Out;
+		for (const TWeakObjectPtr<UStaticMeshComponent>& T : GScene.Targets)
+		{
+			Out.Add(T.Get());
+		}
+		return Out;
+	}
+
+	/** Per target: texels on it and in the channel, from the last CountChannels call's detail order. */
+	static TArray<FIntVector> PerTargetCounts(const FChannelImage& Image, const TArray<UStaticMeshComponent*>& Targets, int32 Channel)
+	{
+		TArray<FIntVector> Out;
+		for (UStaticMeshComponent* T : Targets)
+		{
+			const FChannelCounts C = CountChannels(Image, { T }, { TEXT("") }, Channel);
+			Out.Add(FIntVector(C.OnTarget, C.OnTargetInChannel, C.OnTargetDefault));
+		}
+		return Out;
 	}
 
 	/** Floor point under (X, Y) near Z, or Z - capsule if none is found. */
@@ -491,9 +669,9 @@ namespace ReadabilityDebug
 		if (Actor)
 		{
 			GScene.Actors.Add(Actor);
-			if (UInteractableScanComponent* Source = Actor->template FindComponentByClass<UInteractableScanComponent>())
+			if (UStaticMeshComponent* Mesh = InteractableMesh(Actor))
 			{
-				GScene.Sources.Add(Source);
+				GScene.Targets.Add(Mesh);
 				GScene.Labels.Add(Label);
 			}
 		}
@@ -612,19 +790,21 @@ namespace ReadabilityDebug
 	// --- Shared step blocks ---
 
 	/**
-	 * Stop, automatic scan A with the scene's sources, then scan B (after the cooldown) without them, from the same pose.
-	 * The difference of the injected particles of A and B is what the scene's sources drew. Results go to OutDiff.
+	 * Stop, automatic scan A with the scene's meshes tagged for the interactable channel, then scan B (after the
+	 * cooldown) with them untagged, from the same pose. Each scan's channel image is read back right after it.
 	 */
 	struct FAB
 	{
 		int32 ScanA = -1;
 		int32 ScanB = -1;
-		int32 GatheredA = 0;
 		int32 InjectedA = -1;
 		int32 InjectedB = -1;
 		int32 CapturedA = -1;
 		int32 CapturedB = -1;
-		FString Detail;
+		FChannelImage ImageA;
+		FChannelImage ImageB;
+		FChannelCounts CountsA;
+		FChannelCounts CountsB;
 	};
 	static FAB GAB;
 
@@ -633,22 +813,26 @@ namespace ReadabilityDebug
 		S.Add(Do(What + TEXT(": stop time"), []()
 		{
 			GAB = FAB();
-			SetSourcesRegistered(true);
+			SetSceneTagged(true);
 			GAB.ScanA = ScanCount();
 			StopTime();
 			return 0.f;
 		}));
 		S.Add(WaitFor(What + TEXT(": automatic scan A completed"), []() { return ScanCount() > GAB.ScanA; }, 3.f, []() { return 0.5f; }));
-		S.Add(Do(What + TEXT(": read scan A, sources off"), [What]()
+		S.Add(Do(What + TEXT(": read scan A, untag"), [What]()
 		{
 			SlotParticles(GAB.ScanA, GAB.CapturedA, GAB.InjectedA);
-			GAB.GatheredA = SceneGathered(GAB.ScanA, &GAB.Detail);
 			const FLidarInjectionStats Stats = Lidar() ? Lidar()->GetLastInjectionStats() : FLidarInjectionStats();
-			Note(FString::Printf(TEXT("%s: scan A %d: captured %d, injected %d (all sources: %d gathered, %d outside coverage, %d over cap, %d uploaded); scene sources gathered %d (%s)"),
-				*What, GAB.ScanA, GAB.CapturedA, GAB.InjectedA, Stats.Gathered, Stats.OutsideCoverage, Stats.OverCap, Stats.Uploaded, GAB.GatheredA, *GAB.Detail));
-			Check(Stats.OverCap == 0, FString::Printf(TEXT("%s: no injected point over the lidar's cap (%d per scan)"), *What, Lidar() ? Lidar()->MaxInjectedPointsPerScan : -1));
+			ReadNewestChannels(GAB.ImageA);
+			const int32 Channel = UTheLastShiftSettings::GetInteractableScanChannel();
+			GAB.CountsA = CountChannels(GAB.ImageA, SceneTargets(), GScene.Labels, Channel);
+			Note(FString::Printf(TEXT("%s: scan A %d (tagged): captured %d, injected %d (%d sources, %d gathered, %d uploaded, %d over cap); texels: %d with depth, %d in channel %d (%d off the targets); %s"),
+				*What, GAB.ScanA, GAB.CapturedA, GAB.InjectedA, Stats.Sources, Stats.Gathered, Stats.Uploaded, Stats.OverCap,
+				GAB.CountsA.Valid, GAB.CountsA.InChannel, Channel, GAB.CountsA.InChannelOffTarget, *GAB.CountsA.Detail));
+			Check(GAB.ImageA.bHasChannels, FString::Printf(TEXT("%s: scan A carries channels (its target was read back)"), *What));
+			Check(Stats.OverCap == 0, FString::Printf(TEXT("%s: no injected point over the lidar's cap"), *What));
 			Shot(What + TEXT(" scan A"));
-			SetSourcesRegistered(false);
+			SetSceneTagged(false);
 			return 0.f;
 		}));
 		S.Add(WaitFor(What + TEXT(": cooldown over"), []() { const UScanDirectorComponent* D = Director(); return D && D->IsScanReady(); }, 6.f, []()
@@ -661,13 +845,21 @@ namespace ReadabilityDebug
 		S.Add(Do(What + TEXT(": read scan B"), [What]()
 		{
 			SlotParticles(GAB.ScanB, GAB.CapturedB, GAB.InjectedB);
+			ReadNewestChannels(GAB.ImageB);
+			GAB.CountsB = CountChannels(GAB.ImageB, SceneTargets(), GScene.Labels, UTheLastShiftSettings::GetInteractableScanChannel());
 			int32 CapturedAgain = 0, InjectedAgain = 0;
 			SlotParticles(GAB.ScanA, CapturedAgain, InjectedAgain);
-			Note(FString::Printf(TEXT("%s: scan B %d (scene sources off): captured %d, injected %d; scan A now: captured %d, injected %d; drawn by the scene's sources = %d"),
-				*What, GAB.ScanB, GAB.CapturedB, GAB.InjectedB, CapturedAgain, InjectedAgain, GAB.InjectedA - GAB.InjectedB));
+			Note(FString::Printf(TEXT("%s: scan B %d (untagged): captured %d, injected %d; texels: %d with depth, %d in channel; scan A now: captured %d, injected %d"),
+				*What, GAB.ScanB, GAB.CapturedB, GAB.InjectedB, GAB.CountsB.Valid, GAB.CountsB.InChannel, CapturedAgain, InjectedAgain));
+			// Only the scene's own meshes are untagged: other interactables in view (a generated area's) keep their channel.
+			Check(GAB.CountsB.OnTargetInChannel == 0 && GAB.CountsB.InChannel == GAB.CountsA.InChannelOffTarget,
+				FString::Printf(TEXT("%s: untagged, none of their texels is in the channel (%d on them; %d elsewhere, as tagged: %d)"),
+					*What, GAB.CountsB.OnTargetInChannel, GAB.CountsB.InChannel, GAB.CountsA.InChannelOffTarget));
+			Check(GAB.CountsA.Valid == GAB.CountsB.Valid, FString::Printf(TEXT("%s: tagging changes no depth sample (%d / %d texels with depth)"), *What, GAB.CountsA.Valid, GAB.CountsB.Valid));
+			Check(GAB.InjectedA == GAB.InjectedB, FString::Printf(TEXT("%s: the interactables add no injected point (injected %d tagged / %d untagged)"), *What, GAB.InjectedA, GAB.InjectedB));
 			Check(InjectedAgain == GAB.InjectedA && CapturedAgain == GAB.CapturedA,
-				FString::Printf(TEXT("%s: scan A keeps its points while it is alive (injected %d -> %d)"), *What, GAB.InjectedA, InjectedAgain));
-			SetSourcesRegistered(true);
+				FString::Printf(TEXT("%s: scan A keeps its points while it is alive (captured %d -> %d)"), *What, GAB.CapturedA, CapturedAgain));
+			SetSceneTagged(true);
 			return 0.f;
 		}));
 	}
@@ -693,17 +885,15 @@ namespace ReadabilityDebug
 		AddScanAB(S, TEXT("scan"));
 		S.Add(Do(TEXT("scan: check"), []()
 		{
-			bool bAllGathered = true;
-			for (const TWeakObjectPtr<UInteractableScanComponent>& Source : GScene.Sources)
+			const int32 Channel = UTheLastShiftSettings::GetInteractableScanChannel();
+			const TArray<FIntVector> Per = PerTargetCounts(GAB.ImageA, SceneTargets(), Channel);
+			for (int32 T = 0; T < Per.Num(); ++T)
 			{
-				const UInteractableScanComponent* Src = Source.Get();
-				bAllGathered &= Src && Src->GetLastGatheredScan() == GAB.ScanA && Src->GetLastGatheredPoints() > 0;
+				Check(Per[T].Y > 0 && Per[T].Y * 10 >= Per[T].X * 9, FString::Printf(TEXT("scan: %s reads in channel %d: %d of its %d texels (%d default: its outline)"),
+					*GScene.Labels[T], Channel, Per[T].Y, Per[T].X, Per[T].Z));
 			}
-			Check(bAllGathered, FString::Printf(TEXT("scan: each of the 4 interactables gave points (%s)"), *GAB.Detail));
-			const int32 Drawn = GAB.InjectedA - GAB.InjectedB;
-			Check(Drawn > 0 && Drawn <= GAB.GatheredA, FString::Printf(TEXT("scan: interactable points drawn %d of %d gathered"), Drawn, GAB.GatheredA));
-			Check(Drawn >= GAB.GatheredA * 7 / 10, TEXT("scan: at least 70 % of them survive the occlusion test (they lie on surfaces the scan saw)"));
-			Note(FString::Printf(TEXT("scan: captured points with / without the interactables' sources: %d / %d"), GAB.CapturedA, GAB.CapturedB));
+			Check(GAB.CountsA.InChannelOffTarget * 100 <= FMath::Max(GAB.CountsA.InChannel, 1) * 2,
+				FString::Printf(TEXT("scan: channel texels lie on the targets (%d of %d off them, at most 2 %%: edges)"), GAB.CountsA.InChannelOffTarget, GAB.CountsA.InChannel));
 			return 0.f;
 		}));
 		AddResumeAndCleared(S, TEXT("scan"));
@@ -713,22 +903,17 @@ namespace ReadabilityDebug
 			ClearScene();
 			PrepareLine();
 			SpawnOccluded(800.f);
-			if (ULidarScanComponent* L = Lidar())
-			{
-				L->bVerifyInjectedOcclusion = true;
-			}
 			return 0.3f;
 		}));
 		AddScanAB(S, TEXT("occlusion"));
 		S.Add(Do(TEXT("occlusion: check"), []()
 		{
-			if (ULidarScanComponent* L = Lidar())
-			{
-				L->bVerifyInjectedOcclusion = false;
-			}
-			const int32 Drawn = GAB.InjectedA - GAB.InjectedB;
-			Check(GAB.GatheredA > 0, FString::Printf(TEXT("occlusion: the hidden terminal is in the capture's coverage and gave %d points"), GAB.GatheredA));
-			Check(Drawn <= 2, FString::Printf(TEXT("occlusion: it adds no drawn point (difference %d)"), Drawn));
+			const ULidarScanComponent* L = Lidar();
+			const AActor* Hidden = GScene.Targets.Num() > 0 && GScene.Targets[0].IsValid() ? GScene.Targets[0]->GetOwner() : nullptr;
+			double Depth = 0.0;
+			const bool bInCoverage = Hidden && L && L->GetAliveScans().Num() > 0 && L->GetAliveScans()[0].IsInCoverage(Hidden->GetActorLocation() + FVector(0.f, 0.f, 60.f), Depth);
+			Check(bInCoverage, TEXT("occlusion: the hidden terminal is inside the capture's coverage"));
+			Check(GAB.CountsA.InChannel == 0, FString::Printf(TEXT("occlusion: it adds no channel texel (%d)"), GAB.CountsA.InChannel));
 			return 0.f;
 		}));
 		AddResumeAndCleared(S, TEXT("occlusion"));
@@ -736,6 +921,7 @@ namespace ReadabilityDebug
 	}
 
 	static FScanColors GSavedColors;
+	static int32 GSavedChannel = 1;
 
 	static bool SameColor(const FLinearColor& A, const FLinearColor& B) { return A.Equals(B, 1.e-4f); }
 
@@ -759,8 +945,11 @@ namespace ReadabilityDebug
 			M.Residue = FLinearColor(1.f, 0.5f, 0.f, 1.f);
 			M.Entity = FLinearColor(0.f, 1.f, 1.f, 1.f);
 			M.Interactable = FLinearColor(1.f, 0.f, 1.f, 1.f);
+			// And the interactables moved to another channel: the meshes spawned below read it at BeginPlay.
+			GSavedChannel = GetDefault<UTheLastShiftSettings>()->InteractableScanChannel;
+			GetMutableDefault<UTheLastShiftSettings>()->InteractableScanChannel = GSavedChannel == 2 ? 3 : 2;
 			ClearScene();
-			FaceLongestClearDirection();
+			PrepareLine(); // the scan below reads them back: they need a floor and a clear view
 			SpawnSet({ 500.f });
 			return 0.3f;
 		}));
@@ -787,16 +976,24 @@ namespace ReadabilityDebug
 				EntitiesOk += SameColor(ILidarPointSource::Execute_GetLidarSourceSettings(E).Color, C.Entity) ? 1 : 0;
 			}
 			Check(Entities == EntitiesOk, FString::Printf(TEXT("colors: %d of %d entities use the new entity colour"), EntitiesOk, Entities));
-			int32 Sources = 0, SourcesOk = 0;
-			for (TObjectIterator<UInteractableScanComponent> It; It; ++It)
+			const int32 Channel = UTheLastShiftSettings::GetInteractableScanChannel();
+			Check(L && L->AreChannelsActive() && SameColor(L->GetChannel(Channel).Color, C.Interactable),
+				FString::Printf(TEXT("colors: the lidar's channel %d (the moved InteractableScanChannel) has the new interactable colour (%s)"), Channel, L ? *L->GetChannel(Channel).Color.ToString() : TEXT("-")));
+			int32 Meshes = 0, MeshesOk = 0;
+			for (const TWeakObjectPtr<UStaticMeshComponent>& T : GScene.Targets)
 			{
-				if (IsValid(*It) && It->GetWorld() == W() && It->IsRegistered())
+				if (const UStaticMeshComponent* Mesh = T.Get())
 				{
-					++Sources;
-					SourcesOk += SameColor(ILidarPointSource::Execute_GetLidarSourceSettings(*It).Color, C.Interactable) ? 1 : 0;
+					++Meshes;
+					MeshesOk += Mesh->bRenderCustomDepth && Mesh->CustomDepthStencilValue == Channel ? 1 : 0;
 				}
 			}
-			Check(Sources > 0 && Sources == SourcesOk, FString::Printf(TEXT("colors: %d of %d interactables use the new interactable colour"), SourcesOk, Sources));
+			Check(Meshes > 0 && Meshes == MeshesOk, FString::Printf(TEXT("colors: %d of %d interactable meshes carry stencil value %d"), MeshesOk, Meshes, Channel));
+			FChannelImage Image;
+			ReadNewestChannels(Image);
+			const FChannelCounts Counts = CountChannels(Image, SceneTargets(), GScene.Labels, Channel);
+			Check(Counts.OnTargetInChannel > 0 && Counts.InChannelOffTarget * 50 <= FMath::Max(Counts.InChannel, 1),
+				FString::Printf(TEXT("colors: the scan shows them in channel %d (%s)"), Channel, *Counts.Detail));
 
 			bool bCueOk = false;
 			FString CueColor = TEXT("-");
@@ -818,6 +1015,7 @@ namespace ReadabilityDebug
 		S.Add(Do(TEXT("colors: restore the ini values"), []()
 		{
 			GetMutableDefault<UTheLastShiftSettings>()->ScanColors = GSavedColors;
+			GetMutableDefault<UTheLastShiftSettings>()->InteractableScanChannel = GSavedChannel;
 			ResumeTime();
 			ClearScene();
 			return 0.6f;
@@ -1132,9 +1330,9 @@ namespace ReadabilityDebug
 			{
 				return 0.f;
 			}
-			if (UInteractableScanComponent* Source = Item->FindComponentByClass<UInteractableScanComponent>())
+			if (UStaticMeshComponent* Mesh = InteractableMesh(Item))
 			{
-				GScene.Sources.Add(Source);
+				GScene.Targets.Add(Mesh);
 				GScene.Labels.Add(Item->GetName());
 			}
 			FVector Front = Item->GetActorForwardVector();
@@ -1191,8 +1389,10 @@ namespace ReadabilityDebug
 		AddScanAB(S, What);
 		S.Add(Do(What + TEXT(": check"), [What]()
 		{
-			const int32 Drawn = GAB.InjectedA - GAB.InjectedB;
-			Check(GAB.GatheredA > 0 && Drawn > 0, FString::Printf(TEXT("%s: shows in the interactable colour: %d drawn of %d gathered (%s)"), *What, Drawn, GAB.GatheredA, *GAB.Detail));
+			const int32 Channel = UTheLastShiftSettings::GetInteractableScanChannel();
+			const TArray<FIntVector> Per = PerTargetCounts(GAB.ImageA, SceneTargets(), Channel);
+			const FIntVector P = Per.Num() > 0 ? Per[0] : FIntVector::ZeroValue;
+			Check(P.Y > 0 && P.Y * 10 >= P.X * 9, FString::Printf(TEXT("%s: shows in the interactable channel: %d of its %d texels (%d default)"), *What, P.Y, P.X, P.Z));
 			ResumeTime();
 			return 0.6f;
 		}));
@@ -1321,7 +1521,7 @@ namespace ReadabilityDebug
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsReadabilityTestCommand(
 	TEXT("tls.ReadabilityTest"),
-	TEXT("tls.ReadabilityTest [all|scan|colors|prompt|area]: scan = a terminal and a closed door at 5 m and 30 m (in TestLidar on a 40 m lane built outside the room, elsewhere along the longest clear line) show in the interactable colour (drawn points = injected particles of a scan with their sources minus one without, same pose), the points stay with their scan and go on Resume; a terminal behind a wall adds none. colors = every reader of ScanColors follows a change. prompt = residue and terminal prompts, refusal, rebinding Interact in StdCore's settings. area = every terminal and door of a generated area, then the prompts. Options after the mode: wait (area: wait until the area is ready, for -ExecCmds), shots (screenshot with the UI at the colour and prompt moments), quit (exit at the end). On a fresh PIE; keeps the entity dormant."),
+	TEXT("tls.ReadabilityTest [all|scan|colors|prompt|area]: scan = a terminal and a closed door at 5 m and 30 m (in TestLidar on a 40 m lane built outside the room, elsewhere along the longest clear line) show in the interactable channel (the newest scan's capture is read back: at least 90 % of the texels on each mesh carry the channel; untagged, none does; tagging changes no depth and no injected point), the points stay with their scan and go on Resume; a terminal behind a wall adds no channel texel. colors = every reader of ScanColors follows a change, and a changed InteractableScanChannel moves the interactables to that channel. prompt = residue and terminal prompts, refusal, rebinding Interact in StdCore's settings. area = every terminal and door of a generated area, then the prompts. Options after the mode: wait (area: wait until the area is ready, for -ExecCmds), shots (screenshot with the UI at the colour and prompt moments), quit (exit at the end). On a fresh PIE; keeps the entity dormant."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		const FString Mode = Args.Num() > 0 ? Args[0].ToLower() : FString(TEXT("all"));
@@ -1372,68 +1572,92 @@ static FAutoConsoleCommand GTlsReadabilityClearCommand(
 		UE_LOG(LogTheLastShift, Log, TEXT("tls.Readability.Clear: done."));
 	}));
 
-static FAutoConsoleCommandWithWorldAndArgs GTlsReadabilitySourcesCommand(
-	TEXT("tls.Readability.Sources"),
-	TEXT("tls.Readability.Sources 0|1: unregisters (0) or registers again (1) every interactable's point source with the player's scan director, from the next scan on. For A/B timing of the same scene with and without the interactables' points."),
+static FAutoConsoleCommandWithWorldAndArgs GTlsReadabilityTagCommand(
+	TEXT("tls.Readability.Tag"),
+	TEXT("tls.Readability.Tag 0|1: untags (0) or tags again (1) the mesh of every terminal and door in the world for the interactable channel (custom depth on/off), from the next scan on. For A/B checks of the same scene."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		using namespace ReadabilityDebug;
 		const bool bOn = Args.Num() == 0 || FCString::Atoi(*Args[0]) != 0;
-		UScanDirectorComponent* D = Director();
 		int32 Count = 0;
-		for (TObjectIterator<UInteractableScanComponent> It; It && D; ++It)
+		for (AActor* Actor : Actors<AActor>())
 		{
-			if (IsValid(*It) && It->GetWorld() == W() && It->IsRegistered())
+			if (UStaticMeshComponent* Mesh = InteractableMesh(Actor))
 			{
-				D->UnregisterPointSource(TScriptInterface<ILidarPointSource>(*It));
-				if (bOn)
-				{
-					D->RegisterPointSource(TScriptInterface<ILidarPointSource>(*It));
-				}
+				Mesh->SetRenderCustomDepth(bOn);
 				++Count;
 			}
 		}
-		UE_LOG(LogTheLastShift, Log, TEXT("tls.Readability.Sources: %d interactable sources %s."), Count, bOn ? TEXT("registered") : TEXT("unregistered"));
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Readability.Tag: %d interactable meshes %s."), Count, bOn ? TEXT("tagged") : TEXT("untagged"));
 	}));
 
-static FAutoConsoleCommandWithWorldAndArgs GTlsReadabilityGatherCostCommand(
-	TEXT("tls.Readability.GatherCost"),
-	TEXT("tls.Readability.GatherCost [Samples=20]: game-thread time of gathering every interactable's points for the newest alive scan, Samples times; logs median and range in microseconds and the points per gather."),
+static FAutoConsoleCommandWithWorldAndArgs GTlsReadabilityChannelsCommand(
+	TEXT("tls.Readability.Channels"),
+	TEXT("tls.Readability.Channels [Channel]: reads back the newest alive scan's capture and logs, for every terminal and door in the world, the texels whose point lies on its mesh (3 cm tolerance) and how many of them are in Channel (default InteractableScanChannel) or in the default channel; then the texels with depth, in the channel, and in the channel off every mesh."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		using namespace ReadabilityDebug;
-		const int32 Samples = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 200) : 20;
-		const ULidarScanComponent* L = Lidar();
-		const TArray<FLidarScanContext> Scans = L ? L->GetAliveScans() : TArray<FLidarScanContext>();
-		if (Scans.Num() == 0)
+		const int32 Channel = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : UTheLastShiftSettings::GetInteractableScanChannel();
+		FChannelImage Image;
+		if (!ReadNewestChannels(Image))
 		{
-			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Readability.GatherCost: needs an alive scan (stop time first)."));
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Readability.Channels: no alive scan, or the readback failed."));
 			return;
 		}
-		TArray<UInteractableScanComponent*> Sources;
-		for (TObjectIterator<UInteractableScanComponent> It; It; ++It)
+		TArray<UStaticMeshComponent*> Targets;
+		TArray<FString> Labels;
+		for (AActor* Actor : Actors<AActor>())
 		{
-			if (IsValid(*It) && It->GetWorld() == W() && It->GetDirector())
+			if (UStaticMeshComponent* Mesh = InteractableMesh(Actor))
 			{
-				Sources.Add(*It);
+				Targets.Add(Mesh);
+				Labels.Add(FString::Printf(TEXT("%s at %.1f m"), *Actor->GetName(), FVector::Dist(Image.Context.CaptureOrigin, Mesh->Bounds.Origin) / 100.f));
 			}
 		}
-		TArray<double> Micros;
-		TArray<FLidarInjectedPoint> Points;
-		for (int32 I = 0; I < Samples; ++I)
+		const FChannelCounts C = CountChannels(Image, Targets, Labels, Channel);
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Readability.Channels: scan %d, channels %s; %d texels with depth, %d in channel %d (%d off every mesh); on the meshes %d texels, %d in the channel, %d default. %s"),
+			Image.Context.ScanIndex, Image.bHasChannels ? TEXT("read") : TEXT("NOT FOUND"), C.Valid, C.InChannel, Channel, C.InChannelOffTarget,
+			C.OnTarget, C.OnTargetInChannel, C.OnTargetDefault, *C.Detail);
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Readability.Channels: target %s."), *Image.Raw);
+
+		// Texels whose stencil is above the last channel (the default channel): where they are and what they hit.
+		const FLidarScanContext& X = Image.Context;
+		int32 Above = 0, AboveNoDepth = 0;
+		TMap<FString, int32> HitBy;
+		UWorld* World = W();
+		for (int32 Y = 0; Y < Image.Height; ++Y)
 		{
-			Points.Reset();
-			const double Start = FPlatformTime::Seconds();
-			for (UInteractableScanComponent* Source : Sources)
+			for (int32 Xi = 0; Xi < Image.Width; ++Xi)
 			{
-				ILidarPointSource::Execute_GetLidarSourceSettings(Source);
-				ILidarPointSource::Execute_GatherLidarPoints(Source, Scans.Last(), Points);
+				const int32 Index = Y * Image.Width + Xi;
+				if (Image.Channel[Index] <= ULidarScanComponent::NumChannels)
+				{
+					continue;
+				}
+				++Above;
+				const float Depth = Image.Depth[Index];
+				if (Depth <= 1.f || Depth >= X.MaxRange)
+				{
+					++AboveNoDepth;
+					continue;
+				}
+				const double U = ((Xi + 0.5) / Image.Width) * 2.0 - 1.0;
+				const double V = 1.0 - ((Y + 0.5) / Image.Height) * 2.0;
+				const FVector Ray = X.CaptureForward + U * X.TanHalfFOV.X * X.CaptureRight + V * X.TanHalfFOV.Y * X.CaptureUp;
+				FHitResult Hit;
+				FCollisionQueryParams Params(SCENE_QUERY_STAT(TlsChannelsAbove), true, Pawn());
+				const bool bHit = World && World->LineTraceSingleByChannel(Hit, X.CaptureOrigin, X.CaptureOrigin + Ray * (Depth + 20.f), ECC_Visibility, Params);
+				HitBy.FindOrAdd(bHit && Hit.GetComponent() ? FString::Printf(TEXT("%s.%s (stencil %d)"), *GetNameSafe(Hit.GetActor()), *Hit.GetComponent()->GetName(),
+					Hit.GetComponent()->CustomDepthStencilValue) : FString(TEXT("no collision hit")))++;
 			}
-			Micros.Add((FPlatformTime::Seconds() - Start) * 1.e6);
 		}
-		Micros.Sort();
-		UE_LOG(LogTheLastShift, Log, TEXT("tls.Readability.GatherCost: %d interactables, %d points per gather; %d samples: median %.1f us, range %.1f-%.1f us."),
-			Sources.Num(), Points.Num(), Samples, Micros[Micros.Num() / 2], Micros[0], Micros.Last());
+		FString Hits;
+		for (const TPair<FString, int32>& Pair : HitBy)
+		{
+			Hits += FString::Printf(TEXT("%s%s: %d"), Hits.IsEmpty() ? TEXT("") : TEXT(", "), *Pair.Key, Pair.Value);
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Readability.Channels: %d texels with a stencil above channel %d: %d with no depth sample (sky or beyond MaxRange)%s%s."),
+			Above, ULidarScanComponent::NumChannels, AboveNoDepth, Hits.IsEmpty() ? TEXT("") : TEXT("; the rest hit "), *Hits);
 	}));
 
 #endif // !UE_BUILD_SHIPPING

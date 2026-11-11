@@ -3,11 +3,13 @@
 #include "Scan/ScanDirectorComponent.h"
 
 #include "Engine/World.h"
+#include "Entity/Entity.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PawnMovementComponent.h"
 #include "LidarScanComponent.h"
+#include "Residue/Residue.h"
 #include "Run/TheLastShiftSettings.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
@@ -25,6 +27,11 @@ namespace ScanDirector
 	static float Cooldown(float Value) { return FMath::Clamp(Value, 0.5f, 15.f); }
 	static float Beat(float Value) { return FMath::Clamp(Value, 0.5f, 15.f); }
 	static float FadeOut(float Value) { return FMath::Clamp(Value, 0.f, 2.f); }
+
+	/** Point source priorities (higher is served first when the lidar's injected-point cap is reached). */
+	static constexpr int32 EntityPriority = 2;
+	static constexpr int32 ResiduePriority = 1;
+	static constexpr int32 OtherPriority = 0;
 }
 
 FOnScanDirectorLifecycle UScanDirectorComponent::OnDirectorBeganPlay;
@@ -46,6 +53,8 @@ void UScanDirectorComponent::BeginPlay()
 	}
 	LidarScan->OnScanCompleted.AddDynamic(this, &UScanDirectorComponent::HandleLidarScanCompleted);
 	ApplyScanColor();
+	// Channels were just switched on: idle scan slots get their channel targets now, not at their first scan.
+	LidarScan->ApplyLiveSettings();
 
 	TimeState = GetWorld() ? GetWorld()->GetSubsystem<UTimeStateSubsystem>() : nullptr;
 	if (!TimeState)
@@ -77,15 +86,43 @@ void UScanDirectorComponent::RegisterPointSource(TScriptInterface<ILidarPointSou
 {
 	if (ULidarScanComponent* Lidar = ResolveLidarScan())
 	{
-		Lidar->RegisterPointSource(Source);
-		UE_LOG(LogTheLastShift, Log, TEXT("ScanDirector: point source %s registered (%d sources)."),
-			*GetNameSafe(Source.GetObject()), Lidar->GetPointSourceCount());
+		const int32 Priority = GetPointSourcePriority(Source.GetObject());
+		Lidar->RegisterPointSource(Source, Priority);
+		UE_LOG(LogTheLastShift, Log, TEXT("ScanDirector: point source %s registered at priority %d (%d sources)."),
+			*GetNameSafe(Source.GetObject()), Priority, Lidar->GetPointSourceCount());
 	}
 	else
 	{
 		UE_LOG(LogTheLastShift, Warning, TEXT("ScanDirector: cannot register %s, owner has no LidarScanComponent."), *GetNameSafe(Source.GetObject()));
 	}
 }
+
+int32 UScanDirectorComponent::GetPointSourcePriority(const UObject* Source)
+{
+	if (Cast<AEntity>(Source))
+	{
+		return ScanDirector::EntityPriority;
+	}
+	if (Cast<AResidue>(Source))
+	{
+		return ScanDirector::ResiduePriority;
+	}
+	return ScanDirector::OtherPriority;
+}
+
+#if !UE_BUILD_SHIPPING
+bool UScanDirectorComponent::bChannelsOffForTest = false;
+
+void UScanDirectorComponent::RegisterPointSourceAtPriorityForTest(TScriptInterface<ILidarPointSource> Source, int32 Priority)
+{
+	if (ULidarScanComponent* Lidar = ResolveLidarScan())
+	{
+		Lidar->RegisterPointSource(Source, Priority);
+		UE_LOG(LogTheLastShift, Log, TEXT("ScanDirector: test point source %s registered at priority %d (%d sources)."),
+			*GetNameSafe(Source.GetObject()), Priority, Lidar->GetPointSourceCount());
+	}
+}
+#endif
 
 void UScanDirectorComponent::UnregisterPointSource(TScriptInterface<ILidarPointSource> Source)
 {
@@ -370,19 +407,15 @@ void UScanDirectorComponent::ApplyScanColor()
 {
 	if (LidarScan)
 	{
-		LidarScan->PointColor = UTheLastShiftSettings::GetScanColors().Scan;
+		const FScanColors& Colors = UTheLastShiftSettings::GetScanColors();
+		LidarScan->PointColor = Colors.Scan;
+#if !UE_BUILD_SHIPPING
+		LidarScan->bUseChannels = !bChannelsOffForTest;
+#else
+		LidarScan->bUseChannels = true;
+#endif
+		LidarScan->SetChannel(UTheLastShiftSettings::GetInteractableScanChannel(), Colors.Interactable, 1.f);
 	}
-}
-
-float UScanDirectorComponent::GetCaptureSampleSpacing(const FLidarScanContext& Context, float PlanarDepth) const
-{
-	if (!LidarScan)
-	{
-		return 0.f;
-	}
-	const int32 Resolution = FMath::Clamp(LidarScan->CaptureResolution, 64, 1024);
-	const float Depth = FMath::Max3(PlanarDepth, LidarScan->NearThinningDistance, 1.f);
-	return 2.f * Depth * static_cast<float>(Context.TanHalfFOV.X) / static_cast<float>(Resolution);
 }
 
 void UScanDirectorComponent::IssueScan(double ScanTime, bool bAutomatic)

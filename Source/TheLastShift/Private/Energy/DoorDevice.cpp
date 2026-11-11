@@ -5,9 +5,9 @@
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Energy/EnergySubsystem.h"
-#include "Energy/InteractableScanComponent.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Pawn.h"
+#include "Run/TheLastShiftSettings.h"
 #include "UObject/ConstructorHelpers.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(DoorDevice)
@@ -46,9 +46,6 @@ ADoorDevice::ADoorDevice()
 	Doorway->SetGenerateOverlapEvents(true);
 	Doorway->SetCanEverAffectNavigation(false);
 
-	InteractableScan = CreateDefaultSubobject<UInteractableScanComponent>(TEXT("InteractableScan"));
-	InteractableScan->AddTarget(Panel);
-
 	FitPanelToBlocker();
 }
 
@@ -70,6 +67,9 @@ void ADoorDevice::FitPanelToBlocker()
 void ADoorDevice::BeginPlay()
 {
 	Doorway->OnComponentEndOverlap.AddUniqueDynamic(this, &ADoorDevice::HandleDoorwayEndOverlap);
+	// Shown in scans through the lidar channel of InteractableScanChannel (one owner: the project settings).
+	Panel->SetRenderCustomDepth(true);
+	Panel->SetCustomDepthStencilValue(UTheLastShiftSettings::GetInteractableScanChannel());
 	bOpen = true; // so SetOpen(false) below applies the closed state
 	SetOpen(false);
 	Super::BeginPlay();
