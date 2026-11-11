@@ -150,6 +150,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "UI")
 	TSoftClassPtr<UStdMainMenuWidget> MainMenuWidgetClass;
 
+	/** Title shown by the main menu's Text_Title. Empty: the Widget Blueprint keeps the text set in its designer. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "UI")
+	FText MainMenuTitle;
+
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "UI")
 	TSoftClassPtr<UStdPauseMenuWidget> PauseMenuWidgetClass;
 

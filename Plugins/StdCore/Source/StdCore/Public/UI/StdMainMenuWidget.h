@@ -33,6 +33,10 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Std Core|UI", meta = (BindWidget))
 	TObjectPtr<UButton> Button_Quit;
 
+	/** Optional: filled with UStdProjectSettings::MainMenuTitle when that setting is not empty. */
+	UPROPERTY(BlueprintReadOnly, Category = "Std Core|UI", meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> Text_Title;
+
 	/** Optional: filled with Project Settings > Description > Project Version. */
 	UPROPERTY(BlueprintReadOnly, Category = "Std Core|UI", meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> Text_Version;

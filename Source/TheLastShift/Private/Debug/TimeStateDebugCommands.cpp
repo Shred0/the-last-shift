@@ -246,6 +246,7 @@ namespace TimeStateDebug
 			UE_LOG(LogTheLastShift, Log, TEXT("%s   terminal %s: cost=%d targets=%d at %s"), Prefix, *It->GetName(), It->Cost, It->Targets.Num(),
 				*It->GetActorLocation().ToString());
 		}
+		LogInputReport(World, Prefix);
 	}
 
 	/** Stop/Resume cycle test driven by simulated presses of the time stop key. */
@@ -347,7 +348,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsKeyCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsReportCommand(
 	TEXT("tls.Report"),
-	TEXT("Logs time state, alive scans, scan timer state, flashlight, Niagara component counts, entities, energy, residues, powered devices and terminals."),
+	TEXT("Logs time state, alive scans, scan timer state, flashlight, Niagara component counts, entities, energy, residues, powered devices, terminals and the input state (see tls.InputReport)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		if (UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld))

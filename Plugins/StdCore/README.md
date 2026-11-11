@@ -128,6 +128,7 @@ Optional widgets (`BindWidgetOptional`), used when present:
 | Asset | Widget | Purpose |
 |---|---|---|
 | `WBP_Settings` | `Text_MasterVolumeValue`, `Text_MusicVolumeValue`, `Text_SfxVolumeValue`: Text Block | The volume as a percentage, next to its slider. |
+| `WBP_MainMenu` | `Text_Title`: Text Block | Filled with *Std Core > Main Menu Title* when that setting is not empty. |
 | `WBP_MainMenu` | `Text_Version`: Text Block | Filled with *Project Settings > Description > Project Version*. |
 
 Names the theme recognizes (see [Restyle the menus](#restyle-the-menus)): `Border_Background` (full-screen dim layer), `Border_Panel` (rounded panel), `Text_Title`, `Text_Heading*`, `Text_Version`, and `Button_Tab*` for tab buttons.

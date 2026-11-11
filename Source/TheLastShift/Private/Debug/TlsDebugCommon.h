@@ -44,6 +44,50 @@ namespace TimeStateDebug
 
 	FReport BuildReport(UWorld* World);
 
+	/** Input state of the first local player (implemented in InputDebugCommands.cpp). */
+	struct FInputReport
+	{
+		bool bHasController = false;
+		FString ControllerClass;
+		FString InputMode;
+		bool bViewportIgnoresInput = false;
+		FString MouseCaptureMode;
+		bool bViewportFocused = false;
+		bool bMouseCaptured = false;
+		bool bCursorShown = false;
+		/** The pawn's mapping context and StdCore's configured ones: "Name(priority)" when applied to the local player, else "Name(not applied)". */
+		TArray<FString> MappingContexts;
+		/** The pawn's own mapping context (its InputMapping property) is among them. */
+		bool bPawnContextApplied = false;
+		/** "Action=Key+Key" for every input action property of the pawn, as Enhanced Input resolves them now. */
+		TArray<FString> PawnActionKeys;
+		/** Number of the pawn's input actions with no key mapped. */
+		int32 UnmappedPawnActions = 0;
+		FString PawnName;
+		bool bPawnInputEnabled = false;
+		bool bPawnCanMove = false;
+		bool bHasArea = false;
+		bool bAreaReady = false;
+		bool bHeldByArea = false;
+		bool bTransitioning = false;
+		bool bPausedByMenu = false;
+		/** The widget holding keyboard focus in the topmost StdCore screen (main or pause menu), or empty. */
+		FString MenuFocus;
+
+		/** Game input: viewport focus and capture, cursor hidden, the pawn's context applied, possessed and released. */
+		bool IsGameReady() const;
+		/** A menu: UI-only input, cursor shown, a menu widget focused for keyboard and gamepad. */
+		bool IsMenuReady() const;
+	};
+
+	FInputReport BuildInputReport(UWorld* World);
+
+	/** One line of input state with a verdict: "game" (IsGameReady), "menu" (IsMenuReady) or "none". */
+	void LogInputReport(UWorld* World, const TCHAR* Prefix);
+
+	/** Clicks the StdCore main menu's Play button, as a real click would. False when no main menu is shown. */
+	bool ClickMainMenuPlay(UWorld* World);
+
 	/** One line of time/scan state, then one line per entity in the world. */
 	void LogReport(UWorld* World, const TCHAR* Prefix);
 }

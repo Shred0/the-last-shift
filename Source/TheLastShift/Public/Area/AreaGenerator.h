@@ -356,6 +356,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Area")
 	EAreaGenerationState GetGenerationState() const { return State; }
 
+	/** True while the player is held (no input, no movement) until the area is ready. */
+	UFUNCTION(BlueprintPure, Category = "Area")
+	bool IsHoldingPlayer() const { return HeldPawn.IsValid(); }
+
 	/** Hash of the generated layout (plan, gameplay actors, start and entity poses); 0 before the first ready. */
 	UFUNCTION(BlueprintPure, Category = "Area")
 	int64 GetLayoutHash() const { return LayoutHash; }

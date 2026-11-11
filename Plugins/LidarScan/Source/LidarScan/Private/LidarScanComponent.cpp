@@ -89,6 +89,9 @@
  * reset (Activate(true)) to clear particles: a Niagara reset restarts the emitters but keeps live particles. Every
  * per-scan value (Capture*, TanHalfFov, ScanRealAge, the Injected arrays) therefore always describes the only scan
  * in the instance. Neither emitter needs anything for this: removal is the same rule for both.
+ * All MaxAliveScans slots are created at BeginPlay and each is activated once with PointCount = InjectedPointCount = 0
+ * for a short warm-up, then released: the instance and its texture binding exist before the first scan uses the slot.
+ * The system must therefore spawn nothing when both counts are 0.
  *
  * Injected points (not produced by the depth capture) write LidarSurfacePosition and Position, and LidarNormal = 0:
  * they get the toward-viewer offset capped by ViewOffsetMaxCm and an angle term of 1. MinSampleDepth and the near
@@ -191,7 +194,67 @@ ULidarScanComponent::ULidarScanComponent()
 void ULidarScanComponent::BeginPlay()
 {
 	Super::BeginPlay();
-	EnsureInitialized();
+	if (EnsureInitialized())
+	{
+		PrepareSlots();
+	}
+}
+
+namespace LidarScanWarmUp
+{
+	/** Real seconds a new slot stays activated with nothing to spawn before it is released. */
+	static constexpr double Seconds = 0.25;
+}
+
+void ULidarScanComponent::PrepareSlots()
+{
+	// A point system instance created in the frame of its scan binds the depth texture too late for its one-shot spawn
+	// burst when frames are short (seen in packaged builds at several hundred frames per second): the burst samples an
+	// unbound texture and every captured point dies, while injected points (which do not need the texture to spawn)
+	// still show. Activating each slot once with nothing to spawn creates its instance and binds its texture ahead of
+	// time; later activations reuse that instance, which is already bound.
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetRealTimeSeconds() : 0.0;
+	bool bWarming = false;
+	while (Slots.Num() < FMath::Clamp(MaxAliveScans, 1, MaxAliveScansLimit))
+	{
+		const int32 Index = CreateSlot();
+		if (!Slots.IsValidIndex(Index))
+		{
+			break;
+		}
+		FLidarScanSlot& Slot = Slots[Index];
+		Slot.Points->SetVariableInt(LidarScanParams::PointCount, 0);
+		Slot.Points->SetVariableInt(LidarScanParams::InjectedPointCount, 0);
+		Slot.Points->Activate(true);
+		Slot.WarmUntilRealTime = Now + LidarScanWarmUp::Seconds;
+		bWarming = true;
+	}
+	if (bWarming)
+	{
+		SetComponentTickEnabled(true);
+	}
+}
+
+int32 ULidarScanComponent::CreateSlot()
+{
+	AActor* Owner = GetOwner();
+	if (!Owner || !LoadedPointSystem)
+	{
+		return INDEX_NONE;
+	}
+
+	UNiagaraComponent* Points = NewObject<UNiagaraComponent>(Owner, NAME_None, RF_Transient);
+	Points->SetAutoActivate(false);
+	Points->SetAutoDestroy(false);
+	Points->SetAsset(LoadedPointSystem);
+	Points->RegisterComponent();
+
+	const int32 Index = Slots.AddDefaulted();
+	Slots[Index].Points = Points;
+	bool bCreated = false;
+	EnsureDepthTarget(Slots[Index], bCreated);
+	return Index;
 }
 
 void ULidarScanComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -295,6 +358,8 @@ void ULidarScanComponent::Scan()
 	}
 
 	TrimSlots();
+	// Normally a no-op: the slots were prepared at BeginPlay. Tops the pool up after MaxAliveScans was raised.
+	PrepareSlots();
 
 	const int32 SlotIndex = AcquireSlot();
 	if (!Slots.IsValidIndex(SlotIndex))
@@ -303,6 +368,8 @@ void ULidarScanComponent::Scan()
 	}
 
 	FLidarScanSlot& Slot = Slots[SlotIndex];
+	// A warming slot is already activated with nothing to spawn: the activation below re-runs it for this scan.
+	Slot.WarmUntilRealTime = -1.0;
 	if (Slot.IsActive())
 	{
 		// Reusing the slot of a live scan: that scan is evicted. Re-activating with a reset alone would keep its
@@ -691,6 +758,8 @@ void ULidarScanComponent::ClearScans(float FadeOutSeconds)
 	{
 		if (!Slot.IsActive())
 		{
+			// A warming slot still needs the tick that releases it.
+			bAnyActive |= Slot.IsWarming();
 			continue;
 		}
 
@@ -722,6 +791,18 @@ void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 	bool bAnyActive = false;
 	for (FLidarScanSlot& Slot : Slots)
 	{
+		if (Slot.IsWarming())
+		{
+			if (Now >= Slot.WarmUntilRealTime)
+			{
+				ReleaseSlot(Slot);
+			}
+			else
+			{
+				bAnyActive = true;
+			}
+			continue;
+		}
 		if (!Slot.IsFadingOut())
 		{
 			// Transient injected points are timed from their own scan, points that last until the next scan from the
@@ -786,6 +867,7 @@ void ULidarScanComponent::ReleaseSlot(FLidarScanSlot& Slot)
 	Slot.SupersededRealTime = -1.0;
 	Slot.FadeOutDuration = 0.f;
 	Slot.FadeOutElapsed = 0.f;
+	Slot.WarmUntilRealTime = -1.0;
 }
 
 void ULidarScanComponent::ApplyLiveSettings()
@@ -818,24 +900,10 @@ int32 ULidarScanComponent::AcquireSlot()
 		}
 	}
 
-	// 2. A new slot while under the cap.
+	// 2. A new slot while under the cap (only when PrepareSlots could not create it).
 	if (Slots.Num() < FMath::Clamp(MaxAliveScans, 1, MaxAliveScansLimit))
 	{
-		AActor* Owner = GetOwner();
-		if (!Owner || !LoadedPointSystem)
-		{
-			return INDEX_NONE;
-		}
-
-		UNiagaraComponent* Points = NewObject<UNiagaraComponent>(Owner, NAME_None, RF_Transient);
-		Points->SetAutoActivate(false);
-		Points->SetAutoDestroy(false);
-		Points->SetAsset(LoadedPointSystem);
-		Points->RegisterComponent();
-
-		FLidarScanSlot& Slot = Slots.AddDefaulted_GetRef();
-		Slot.Points = Points;
-		return Slots.Num() - 1;
+		return CreateSlot();
 	}
 
 	// 3. Reuse the slot of the oldest scan (Scan() evicts it).
@@ -861,6 +929,7 @@ void ULidarScanComponent::DestroySlot(FLidarScanSlot& Slot)
 	Slot.ScanIndex = INDEX_NONE;
 	Slot.FadeOutDuration = 0.f;
 	Slot.FadeOutElapsed = 0.f;
+	Slot.WarmUntilRealTime = -1.0;
 }
 
 void ULidarScanComponent::TrimSlots()

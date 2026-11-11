@@ -30,6 +30,12 @@ void UStdMainMenuWidget::NativeOnInitialized()
 		Button_Quit->OnClicked.AddUniqueDynamic(this, &ThisClass::HandleQuitClicked);
 	}
 
+	const FText& Title = UStdProjectSettings::Get()->MainMenuTitle;
+	if (Text_Title && !Title.IsEmpty())
+	{
+		Text_Title->SetText(Title);
+	}
+
 	const FString& Version = GetDefault<UGeneralProjectSettings>()->ProjectVersion;
 	if (Text_Version && !Version.IsEmpty())
 	{

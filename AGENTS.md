@@ -114,6 +114,10 @@ Generic, engine-level scanning effect. The per-particle attribute contract is th
 
 Pre-existing, generic, and it grows with this project. Use it for everything it already covers — main menu, settings, pause menu, key rebinding, level transitions — instead of reimplementing in `Source/TheLastShift`. When the game needs a UI element or utility that is generic (a radial progress ring, a fade, a key prompt), it is added to StdCore, not to the game, with no game terms in it; the game only wraps or configures it. Do not add game logic to StdCore. Any StdCore change must be explicitly requested in a brief. Read its public headers before building UI or input.
 
+The game's main menu is the game's own: its map (`Content/TheLastShift/Maps/MainMenu`), its title and its look live in the Game zone and are built on StdCore's menu widgets. StdCore's own maps are never the game's startup or menu map, and StdCore assets are never duplicated into the Game zone.
+
+Every gameplay map's game mode uses StdCore's `StdPlayerController`: it restores game input when a level starts. StdCore's pause menu is available in every level.
+
 **Naming:** "pause" in StdCore means the menu pause. The time-stop mechanic is never called "pause" in code or assets: use `TimeState` / `ETimeState::Stopped` / `Stop` / `Resume` (`UTimeStateSubsystem`, `OnTimeStateChanged`, ...). "Pause" stays in design docs and player-facing text only.
 
 ## Game systems (Source/TheLastShift)
@@ -147,6 +151,8 @@ C++ for systems; Blueprints only for per-level scripting (wall placement, residu
 *   **Text first.** Project settings go in `Config/*.ini` as text, not through the editor's Project Settings UI, so they are diffable. Narrative CSV in `/Narrative/` stays the source of truth: never edit a narrative DataTable in the editor; edit the CSV, then reimport through the MCP.
 *   **Order of work when a brief has both C++ and editor parts:** C++ → full build (editor closed, see below) → open the editor → editor work through the MCP → PIE check. You may close and reopen the editor yourself for a full build, after saving all assets through the MCP and saying so in the report; if closing or reopening fails, stop and ask the developer. Never change a header while the editor is open.
 *   **Simulated input:** key presses sent through the MCP's UI tools do not reach the PIE viewport. Use the `tls.*` console commands in `Source/TheLastShift/Debug/` (`tls.Key`, `tls.Report`, `tls.CycleTest`, `tls.ScanTest`, `tls.EntityTest`, ...) and add to them when a brief needs a new automated check.
+*   **Entering a level:** a test driven only by console commands does not prove that input works. A brief that changes how a level is entered (menu, travel, restart) also checks the input section of `tls.Report` on that path, and the developer checks real keys in a package.
+*   **Package checks:** a package check reads the package log for errors and for assets that failed to load, not only for the lines the test expects.
 *   Build (`UE_ROOT` = the UE 5.8 install, e.g. `C:\Program Files\Epic Games\UE_5.8`): `"<UE_ROOT>\Engine\Build\BatchFiles\Build.bat" TheLastShiftEditor Win64 Development -Project="<REPO>\TheLastShift.uproject" -WaitMutex`
 *   After header changes, new `UCLASS`/`USTRUCT`/`UPROPERTY`/`UFUNCTION`, or `.Build.cs` changes: close the editor and do a full build. Don't rely on Live Coding for reflection changes. `.cpp`-only changes may go through Live Coding while the editor is open.
 *   UE coding standard: type prefixes (`A`, `U`, `F`, `I`, `E`), `TObjectPtr` for UObject members, `UPROPERTY` on every UObject reference, no raw `new`/`delete` for UObjects. Keep `.Build.cs` dependencies minimal.

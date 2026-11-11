@@ -53,7 +53,7 @@ A few principles explain most of the code:
 
 1. *Project Settings > Std Core > Gameplay Map* = the first map of the game. The main menu's Play opens it.
 2. In each gameplay map, *World Settings > GameMode Override* = `StdGameMode`, or the game's subclass of it (see 2.2). This gives pause, the pause menu and input tags.
-3. Keep `L_MainMenu` as *Game Default Map*. To use a custom main menu map, set its GameMode Override to `StdMenuGameMode` and point *Main Menu Map* to it.
+3. Keep `L_MainMenu` as *Game Default Map*. To use a custom main menu map, set its GameMode Override to `StdMenuGameMode`, point *Main Menu Map* and *Game Default Map* to it, and set *Main Menu Title*.
 
 ### 2.2 Use the game's own pawn and controller
 
@@ -143,7 +143,7 @@ The Settings screen already does all of this; call these only for custom UI (for
 | Change | Where |
 |---|---|
 | Colors, fonts, corners, button sounds | `DA_UITheme`, or a copy in `/Game` set in *Std Core > Theme*. |
-| Game title | `Text_Title` in `WBP_MainMenu`. |
+| Game title | *Std Core > Main Menu Title* (shown in `WBP_MainMenu`'s `Text_Title`), or the text of `Text_Title` in `WBP_MainMenu`. |
 | Credits | `Text_Credits` in `WBP_Credits`, or *Credits Text* in its Class Defaults. |
 | Labels ("Play", "Window mode"...) | The texts in each Widget Blueprint; window mode and quality names in `WBP_Settings`' Class Defaults. |
 | Version on the main menu | *Project Settings > Description > Project Version*. |

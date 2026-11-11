@@ -45,7 +45,11 @@ struct FLidarScanSlot
 	float FadeOutDuration = 0.f;
 	float FadeOutElapsed = 0.f;
 
+	/** Real time until which an idle slot stays activated with nothing to spawn (warm-up); negative when not warming. */
+	double WarmUntilRealTime = -1.0;
+
 	bool IsActive() const { return ScanIndex != INDEX_NONE; }
+	bool IsWarming() const { return !IsActive() && WarmUntilRealTime >= 0.0; }
 	bool IsFadingOut() const { return IsActive() && FadeOutDuration > 0.f; }
 
 	/** Multiplier applied to the point alpha by an ongoing fade-out, 1 when not fading. */
@@ -346,6 +350,10 @@ protected:
 
 private:
 	bool EnsureInitialized();
+	/** Creates and warms up slots until MaxAliveScans exist, so no scan uses a point system instance created that frame. */
+	void PrepareSlots();
+	/** Adds a slot with its point system component and depth target; INDEX_NONE on failure. */
+	int32 CreateSlot();
 	int32 AcquireSlot();
 	void DestroySlot(FLidarScanSlot& Slot);
 	void TrimSlots();

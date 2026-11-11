@@ -16,6 +16,7 @@
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
 #include "Flow/StdFlowSubsystem.h"
+#include "Framework/StdPlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
@@ -290,8 +291,36 @@ namespace RunDebug
 		int32 ExpectedAct = 0;
 		int32 Arrivals = 0;
 		int32 Failures = 0;
+		/** In every area, once settled: open the pause menu, check menu input, close it, check game input. */
+		bool bPauseCheck = true;
+		/** 0 = not started, 1 = pause menu open (waiting to check), 2 = closed (waiting to check), 3 = done. */
+		int32 PausePhase = 0;
+		double PhaseReal = 0.0;
+		/** Arrivals in the main menu that press Play again instead of ending the test. */
+		int32 ReplaysLeft = 0;
 	};
 	static FChain GChain;
+
+	/** Logs the input state and checks it against what the place needs (game input in an area, menu input elsewhere). */
+	static void CheckInput(UWorld* World, bool bExpectGame, const FString& What)
+	{
+		const FString Name = TEXT("tls.RunChainTest");
+		TimeStateDebug::LogInputReport(World, *Name);
+		const TimeStateDebug::FInputReport R = TimeStateDebug::BuildInputReport(World);
+		Report(Name, bExpectGame ? R.IsGameReady() : R.IsMenuReady(), FString::Printf(TEXT("%s: %s input"), *What, bExpectGame ? TEXT("game") : TEXT("menu")), GChain.Failures);
+	}
+
+	/** Presses Play the way the player does (the menu's button), or through StdCore when no menu widget is shown. */
+	static bool PressPlay(UWorld* World)
+	{
+		if (TimeStateDebug::ClickMainMenuPlay(World))
+		{
+			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: clicked the main menu's Play."));
+			return true;
+		}
+		UStdFlowSubsystem* F = Flow(World);
+		return F && F->StartGameplay();
+	}
 
 	static void FinishChain(const TCHAR* Why)
 	{
@@ -317,6 +346,7 @@ namespace RunDebug
 			const FString Menu = UStdProjectSettings::Get()->MainMenuMap.ToSoftObjectPath().GetLongPackageName();
 			Report(Name, GChain.ExpectedAct == 0 && Act == 0 && Map == Menu,
 				FString::Printf(TEXT("arrival %d: %s, act %d (expected the main menu %s)"), GChain.Arrivals, *Map, Act, *Menu), GChain.Failures);
+			CheckInput(World, false, FString::Printf(TEXT("arrival %d (%s)"), GChain.Arrivals, *Map));
 			return;
 		}
 		const AEntity* Entity = nullptr;
@@ -326,6 +356,7 @@ namespace RunDebug
 			GChain.Arrivals, *Map, Act, GChain.ExpectedAct, Gen->GetSeed(), Gen->LastSeedsTried, static_cast<uint64>(Gen->GetLayoutHash()), Gen->GetRouteLength() / 100.f,
 			Gen->GetPCGInstanceCount(), Gen->GetTimeToReadySeconds(), Gen->bLastValidationPassed ? TEXT("passed") : TEXT("FAILED"), *GetNameSafe(Entity),
 			Entity ? LexToString(Entity->ContactResponse) : TEXT("-")), GChain.Failures);
+		CheckInput(World, true, FString::Printf(TEXT("arrival %d (%s)"), GChain.Arrivals, *Map));
 	}
 
 	static bool TickChain(float)
@@ -351,7 +382,7 @@ namespace RunDebug
 			}
 			GChain.bPendingStart = false;
 			GChain.StartReal = Now;
-			if (!F || !F->StartGameplay())
+			if (!PressPlay(World))
 			{
 				++GChain.Failures;
 				FinishChain(TEXT("StartGameplay refused"));
@@ -372,8 +403,19 @@ namespace RunDebug
 			GChain.bArrived = true;
 			GChain.ArrivedReal = Now;
 			ReportArrival(World);
+			GChain.PausePhase = 0;
 			if (!Gen)
 			{
+				if (GChain.ReplaysLeft > 0)
+				{
+					// Back in the menu: Play again, as the player would after the last area.
+					--GChain.ReplaysLeft;
+					GChain.bArrived = false;
+					GChain.bPendingStart = true;
+					GChain.ExpectedAct = UTheLastShiftSettings::Get()->GetActOfMap(UStdProjectSettings::Get()->GameplayMap.ToSoftObjectPath().GetLongPackageName());
+					UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: in the main menu, Play again (expecting act %d)."), GChain.ExpectedAct);
+					return true;
+				}
 				FinishChain(nullptr);
 				return false;
 			}
@@ -383,7 +425,41 @@ namespace RunDebug
 		{
 			return true;
 		}
-		// Arrived and settled: travel on, or stop.
+		// Arrived and settled: open and close the pause menu, checking the input each way.
+		if (GChain.bPauseCheck && GChain.PausePhase < 3)
+		{
+			AStdPlayerController* GamePC = Cast<AStdPlayerController>(World->GetFirstPlayerController());
+			const FString Name = TEXT("tls.RunChainTest");
+			if (!GamePC)
+			{
+				Report(Name, false, FString::Printf(TEXT("pause menu: the player controller is %s, not a StdPlayerController (no pause menu)"),
+					*GetNameSafe(World->GetFirstPlayerController())), GChain.Failures);
+				GChain.PausePhase = 3;
+			}
+			else if (GChain.PausePhase == 0)
+			{
+				Report(Name, GamePC->PauseGame(), TEXT("pause menu: opened"), GChain.Failures);
+				GChain.PausePhase = 1;
+				GChain.PhaseReal = Now;
+			}
+			else if (Now - GChain.PhaseReal >= 0.5)
+			{
+				if (GChain.PausePhase == 1)
+				{
+					CheckInput(World, false, TEXT("pause menu open"));
+					Report(Name, GamePC->ResumeGame(), TEXT("pause menu: closed"), GChain.Failures);
+					GChain.PausePhase = 2;
+					GChain.PhaseReal = Now;
+				}
+				else
+				{
+					CheckInput(World, true, TEXT("pause menu closed"));
+					GChain.PausePhase = 3;
+				}
+			}
+			return true;
+		}
+		// Travel on, or stop.
 		GChain.bArrived = false;
 		if (GChain.TravelsLeft <= 0)
 		{
@@ -470,7 +546,7 @@ namespace RunDebug
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 	TEXT("tls.RunChainTest"),
-	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0]: FromMenu=1 first presses the main menu's Play (StdCore StartGameplay) once no transition is running. On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, then calls tls.Travel.Next until Travels are done; a travel after the last area must reach the main menu. Quit=1 exits the game at the end (packaged builds)."),
+	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0] [PauseCheck=1] [Replays=0]: FromMenu=1 first clicks the main menu's Play once no transition is running. On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, and checks the input state (game input in an area, menu input in the menu); with PauseCheck=1 it then opens and closes the pause menu, checking the input each way; then calls tls.Travel.Next until Travels are done; a travel after the last area must reach the main menu, where Replays>0 clicks Play again that many times. Quit=1 exits the game at the end (packaged builds)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
@@ -484,6 +560,8 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 		RunDebug::GChain.TravelsLeft = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 0, 8) : 4;
 		const bool bFromMenu = Args.Num() > 1 && FCString::Atoi(*Args[1]) != 0;
 		RunDebug::GChain.bQuit = Args.Num() > 2 && FCString::Atoi(*Args[2]) != 0;
+		RunDebug::GChain.bPauseCheck = Args.Num() <= 3 || FCString::Atoi(*Args[3]) != 0;
+		RunDebug::GChain.ReplaysLeft = Args.Num() > 4 ? FMath::Clamp(FCString::Atoi(*Args[4]), 0, 4) : 0;
 		RunDebug::GChain.StartReal = FPlatformTime::Seconds();
 		const FString From = UWorld::RemovePIEPrefix(World->GetOutermost()->GetName());
 		if (bFromMenu)
@@ -491,7 +569,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 			RunDebug::GChain.LastWorld = World;
 			RunDebug::GChain.bPendingStart = true;
 			RunDebug::GChain.ExpectedAct = UTheLastShiftSettings::Get()->GetActOfMap(UStdProjectSettings::Get()->GameplayMap.ToSoftObjectPath().GetLongPackageName());
-			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: from %s, Play (StartGameplay) once the menu's transition is over, then %d travels."), *From, RunDebug::GChain.TravelsLeft);
+			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: from %s, Play (the menu's button) once the menu's transition is over, then %d travels."), *From, RunDebug::GChain.TravelsLeft);
 		}
 		else
 		{

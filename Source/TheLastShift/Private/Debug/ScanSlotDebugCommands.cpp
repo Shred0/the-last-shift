@@ -183,7 +183,225 @@ namespace ScanSlotDebug
 		GSlotTest.NextTime = Now + GSlotTest.Interval;
 		return true;
 	}
+
+	// --- tls.LidarCycleTest: Stop/Resume cycles, captured points of every scan ---
+
+	struct FCycleTest
+	{
+		int32 Cycles = 8;
+		int32 ScansPerStop = 3;
+		float Interval = 0.6f;
+		bool bQuit = false;
+		int32 Cycle = 0;
+		/** 0 = waiting for the area, 1 = stopping, 2 = in a Stop, 3 = resumed, settling. */
+		int32 Phase = 0;
+		double NextTime = 0.0;
+		double StartReal = 0.0;
+		int32 StopScanBase = 0;
+		/** Scan count when the slots were last sampled, and what the slots held then. */
+		int32 SampledScanCount = 0;
+		TArray<FLidarScanSlotStats> SlotsBefore;
+		/** Scans waiting for their particle counts: scan index, path taken, real time of the scan. */
+		struct FPending { int32 ScanIndex; FString Path; double Time; };
+		TArray<FPending> Pending;
+		int32 Scans = 0;
+		int32 Empty = 0;
+		TMap<FString, FIntPoint> ByPath;
+		bool bRunning = false;
+	};
+	static FCycleTest GCycle;
+
+	/** How the lidar will place its next scan, from the slots as they are now. */
+	static FString PredictPath(const TArray<FLidarScanSlotStats>& Slots, int32 Cap)
+	{
+		for (const FLidarScanSlotStats& S : Slots)
+		{
+			if (S.ScanIndex == INDEX_NONE)
+			{
+				return TEXT("idle slot");
+			}
+		}
+		return Slots.Num() < Cap ? TEXT("new slot") : TEXT("eviction");
+	}
+
+	static void FinishCycleTest(const TCHAR* Why)
+	{
+		FString Paths;
+		for (const TPair<FString, FIntPoint>& Pair : GCycle.ByPath)
+		{
+			Paths += FString::Printf(TEXT("%s%s %d/%d empty"), Paths.IsEmpty() ? TEXT("") : TEXT(", "), *Pair.Key, Pair.Value.Y, Pair.Value.X);
+		}
+		UE_LOG(LogTheLastShift, Display, TEXT("LidarCycleTest: ===== %s (%d scans, %d with no captured points; %s)%s%s ====="),
+			GCycle.Empty == 0 && !Why ? TEXT("PASS") : TEXT("FAIL"), GCycle.Scans, GCycle.Empty, *Paths, Why ? TEXT(" - ") : TEXT(""), Why ? Why : TEXT(""));
+		GCycle.bRunning = false;
+		if (GCycle.bQuit)
+		{
+			FPlatformMisc::RequestExit(false, TEXT("tls.LidarCycleTest"));
+		}
+	}
+
+	static bool TickCycleTest(float)
+	{
+		UWorld* World = TimeStateDebug::ResolveGameWorld(nullptr);
+		UTimeStateSubsystem* TimeState = World && !World->bIsTearingDown ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+		ULidarScanComponent* Lidar = FindPlayerLidar(World);
+		const double Now = FPlatformTime::Seconds();
+		if (Now - GCycle.StartReal > 600.0)
+		{
+			FinishCycleTest(TEXT("timed out"));
+			return false;
+		}
+		if (GCycle.Phase == 0)
+		{
+			if (!TimeState || !Lidar || !AAreaGenerator::IsAreaReady(World) || World->GetFirstPlayerController() == nullptr)
+			{
+				return true;
+			}
+			UE_LOG(LogTheLastShift, Display, TEXT("LidarCycleTest: area ready in %s, MaxAliveScans %d, CaptureResolution %d."),
+				*UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), Lidar->MaxAliveScans, Lidar->CaptureResolution);
+			GCycle.Phase = 1;
+			GCycle.NextTime = Now + 1.0;
+			return true;
+		}
+		if (!TimeState || !Lidar)
+		{
+			FinishCycleTest(TEXT("world or lidar gone"));
+			return false;
+		}
+
+		// Every scan, however it was fired: remember the path it took from the slots sampled the tick before.
+		const int32 Count = Lidar->GetScanCount();
+		if (Count != GCycle.SampledScanCount)
+		{
+			const FString Path = PredictPath(GCycle.SlotsBefore, FMath::Clamp(Lidar->MaxAliveScans, 1, 16));
+			for (int32 Index = GCycle.SampledScanCount; Index < Count; ++Index)
+			{
+				GCycle.Pending.Add({ Index, Path, Now });
+			}
+		}
+		GCycle.SampledScanCount = Count;
+		GCycle.SlotsBefore = Lidar->GetScanSlotStats();
+
+		// Particle counts are read back from the GPU with a frame or two of latency: read them Interval later.
+		for (int32 P = GCycle.Pending.Num() - 1; P >= 0; --P)
+		{
+			const FCycleTest::FPending& Item = GCycle.Pending[P];
+			if (Now - Item.Time < GCycle.Interval * 0.75)
+			{
+				continue;
+			}
+			int32 Captured = -1;
+			int32 Injected = -1;
+			int32 SlotIndex = INDEX_NONE;
+			for (int32 S = 0; S < GCycle.SlotsBefore.Num(); ++S)
+			{
+				if (GCycle.SlotsBefore[S].ScanIndex == Item.ScanIndex)
+				{
+					SlotIndex = S;
+					Captured = GCycle.SlotsBefore[S].CapturedParticles;
+					Injected = GCycle.SlotsBefore[S].InjectedParticles;
+				}
+			}
+			// The newest scan's depth capture, read back: tells an empty capture from points that were not spawned.
+			FString DepthInfo = TEXT("depth not read (not the newest scan)");
+			{
+				TArray<float> Depth;
+				int32 Width = 0;
+				int32 Height = 0;
+				FLidarScanContext Context;
+				if (Lidar->ReadNewestScanDepth(Depth, Width, Height, Context) && Context.ScanIndex == Item.ScanIndex)
+				{
+					int32 Valid = 0;
+					for (const float D : Depth)
+					{
+						Valid += (D > 1.f && D < Context.MaxRange) ? 1 : 0;
+					}
+					DepthInfo = FString::Printf(TEXT("depth texels in range %d of %d"), Valid, Depth.Num());
+				}
+			}
+			const bool bEmpty = Captured <= 0;
+			++GCycle.Scans;
+			GCycle.Empty += bEmpty ? 1 : 0;
+			FIntPoint& Tally = GCycle.ByPath.FindOrAdd(Item.Path);
+			Tally.X += 1;
+			Tally.Y += bEmpty ? 1 : 0;
+			UE_LOG(LogTheLastShift, Display, TEXT("LidarCycleTest: %s - cycle %d, scan %d, %s, slot %d: captured %d, injected %d, %s"),
+				bEmpty ? TEXT("EMPTY") : TEXT("ok"), GCycle.Cycle, Item.ScanIndex, *Item.Path, SlotIndex, Captured, Injected, *DepthInfo);
+			GCycle.Pending.RemoveAt(P);
+		}
+
+		if (Now < GCycle.NextTime)
+		{
+			return true;
+		}
+		switch (GCycle.Phase)
+		{
+		case 1:
+			if (GCycle.Cycle >= GCycle.Cycles)
+			{
+				if (GCycle.Pending.Num() == 0)
+				{
+					FinishCycleTest(nullptr);
+					return false;
+				}
+				return true;
+			}
+			++GCycle.Cycle;
+			GCycle.StopScanBase = Count;
+			TimeState->Stop();
+			GCycle.Phase = 2;
+			// The director fires the automatic first scan about 1 s into the Stop.
+			GCycle.NextTime = Now + 1.0 + GCycle.Interval;
+			return true;
+		case 2:
+			KeepEntityDormant(World, TimeState);
+			if (!TimeState->IsStopped())
+			{
+				UE_LOG(LogTheLastShift, Warning, TEXT("LidarCycleTest: cycle %d, the Stop ended early."), GCycle.Cycle);
+				GCycle.Phase = 3;
+				GCycle.NextTime = Now + 1.5;
+				return true;
+			}
+			if (Count - GCycle.StopScanBase < GCycle.ScansPerStop)
+			{
+				Lidar->Scan();
+				GCycle.NextTime = Now + GCycle.Interval;
+				return true;
+			}
+			TimeState->Resume();
+			GCycle.Phase = 3;
+			// Long enough for the ClearScans fade-out to release every slot.
+			GCycle.NextTime = Now + 1.5;
+			return true;
+		default:
+			GCycle.Phase = 1;
+			return true;
+		}
+	}
 }
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsLidarCycleTestCommand(
+	TEXT("tls.LidarCycleTest"),
+	TEXT("tls.LidarCycleTest [Cycles=8] [ScansPerStop=3] [Interval=0.6] [Quit=0]: waits for the area to be ready, then runs Cycles Stop/Resume cycles; in each Stop, after the automatic first scan, fires scans directly on the lidar every Interval s until the Stop has ScansPerStop scans, then resumes and waits 1.5 s. Interval after every scan logs the captured and injected particles of the slot holding it and the slot path it took (new slot, idle slot, eviction); a scan with no captured points is EMPTY. Ends with PASS when no scan was empty. Keeps the entity dormant. Quit=1 exits at the end (packaged -ExecCmds runs)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		using namespace ScanSlotDebug;
+		if (GCycle.bRunning)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.LidarCycleTest: already running."));
+			return;
+		}
+		GCycle = FCycleTest();
+		GCycle.Cycles = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 100) : 8;
+		GCycle.ScansPerStop = Args.Num() > 1 ? FMath::Clamp(FCString::Atoi(*Args[1]), 1, 40) : 3;
+		GCycle.Interval = Args.Num() > 2 ? FMath::Clamp(FCString::Atof(*Args[2]), 0.2f, 10.f) : 0.6f;
+		GCycle.bQuit = Args.Num() > 3 && FCString::Atoi(*Args[3]) != 0;
+		GCycle.StartReal = FPlatformTime::Seconds();
+		GCycle.bRunning = true;
+		UE_LOG(LogTheLastShift, Display, TEXT("LidarCycleTest started: %d cycles, %d scans per Stop, interval %.2f s; waiting for the area."),
+			GCycle.Cycles, GCycle.ScansPerStop, GCycle.Interval);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&ScanSlotDebug::TickCycleTest));
+	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsScanSlotTestCommand(
 	TEXT("tls.ScanSlotTest"),
