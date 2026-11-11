@@ -300,8 +300,12 @@ bool ULidarScanComponent::EnsureInitialized()
 		LoadedPointSystem = PointSystem.LoadSynchronous();
 		if (!LoadedPointSystem)
 		{
-			UE_LOG(LogLidarScan, Warning, TEXT("%s: PointSystem '%s' could not be loaded, scans disabled."),
-				*GetPathName(), *PointSystem.ToString());
+			if (!bReportedMissingPointSystem)
+			{
+				bReportedMissingPointSystem = true;
+				UE_LOG(LogLidarScan, Error, TEXT("%s: PointSystem '%s' could not be loaded, scans disabled."),
+					*GetPathName(), *PointSystem.ToString());
+			}
 			return false;
 		}
 	}

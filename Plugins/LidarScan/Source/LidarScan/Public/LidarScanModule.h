@@ -12,4 +12,8 @@ class FLidarScanModule : public IModuleInterface
 public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
+
+private:
+	/** Editor only: the cook hook that adds the component's assets to every cook. */
+	FDelegateHandle ModifyCookHandle;
 };

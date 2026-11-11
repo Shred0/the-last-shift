@@ -335,7 +335,11 @@ public:
 
 	// --- Assets ---
 
-	/** GPU point system. Must expose the user parameters listed in LidarScanComponent.cpp. */
+	/**
+	 * GPU point system. Must expose the user parameters listed in LidarScanComponent.cpp.
+	 * Every soft asset reference of this class's defaults is added to the cook by the module (LidarScanModule.cpp),
+	 * so an asset the component loads at runtime must be held in a soft object property like this one.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Lidar|Assets")
 	TSoftObjectPtr<UNiagaraSystem> PointSystem;
 
@@ -380,6 +384,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UNiagaraSystem> LoadedPointSystem;
+
+	/** Set once the missing PointSystem has been reported, so the error is logged once per component. */
+	bool bReportedMissingPointSystem = false;
 
 	int32 ScanCount = 0;
 
