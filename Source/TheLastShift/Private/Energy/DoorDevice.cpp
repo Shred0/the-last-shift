@@ -5,6 +5,7 @@
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Energy/EnergySubsystem.h"
+#include "Energy/InteractableScanComponent.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Pawn.h"
 #include "UObject/ConstructorHelpers.h"
@@ -44,6 +45,9 @@ ADoorDevice::ADoorDevice()
 	Doorway->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
 	Doorway->SetGenerateOverlapEvents(true);
 	Doorway->SetCanEverAffectNavigation(false);
+
+	InteractableScan = CreateDefaultSubobject<UInteractableScanComponent>(TEXT("InteractableScan"));
+	InteractableScan->AddTarget(Panel);
 
 	FitPanelToBlocker();
 }

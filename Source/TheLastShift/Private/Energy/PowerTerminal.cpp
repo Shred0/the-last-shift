@@ -4,6 +4,7 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Energy/EnergySubsystem.h"
+#include "Energy/InteractableScanComponent.h"
 #include "Energy/PoweredDevice.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -35,6 +36,26 @@ APowerTerminal::APowerTerminal()
 	{
 		Mesh->SetStaticMesh(CubeMesh.Object);
 	}
+
+	InteractableScan = CreateDefaultSubobject<UInteractableScanComponent>(TEXT("InteractableScan"));
+	InteractableScan->AddTarget(Mesh);
+}
+
+bool APowerTerminal::HasUnpoweredTarget() const
+{
+	for (const APoweredDevice* Device : Targets)
+	{
+		if (Device && !Device->IsPowered())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+int32 APowerTerminal::GetCost() const
+{
+	return TerminalTuning::Cost(Cost);
 }
 
 bool APowerTerminal::IsInRange(const APawn* InstigatorPawn) const

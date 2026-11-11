@@ -13,6 +13,7 @@ class UInputMappingContext;
 class AResidue;
 class ULidarScanComponent;
 class UResidueCollectCueWidget;
+class UInteractPromptWidget;
 class UScanCueWidget;
 class UScanDirectorComponent;
 class USpotLightComponent;
@@ -22,7 +23,8 @@ struct FInputActionValue;
  * Test harness pawn for the LidarScan spike (TestLidar map only).
  * First-person movement, toggleable flashlight, time stop toggle, scan requests through the scan director, the
  * scan-ready cue, and Interact: held near an Available residue while Stopped it collects (with the collect cue),
- * pressed near a power terminal it activates it. Input assets and the cue widget class are assigned in BP_TestPawn.
+ * pressed near a power terminal it activates it; the Interact prompt shows its key where it applies. Input assets and
+ * the cue widget class are assigned in BP_TestPawn.
  */
 UCLASS(Abstract)
 class THELASTSHIFT_API ATestLidarCharacter : public ACharacter
@@ -67,6 +69,13 @@ protected:
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
 	TObjectPtr<UResidueCollectCueWidget> CollectCue;
+
+	/** Interact prompt (the key and what it does) created for the local player. None = no prompt. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Test|UI")
+	TSubclassOf<UInteractPromptWidget> InteractPromptClass;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
+	TObjectPtr<UInteractPromptWidget> InteractPrompt;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Test|Input")
 	TObjectPtr<UInputMappingContext> InputMapping;

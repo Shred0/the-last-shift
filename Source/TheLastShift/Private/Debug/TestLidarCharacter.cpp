@@ -19,6 +19,7 @@
 #include "Scan/ScanCueWidget.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "TheLastShift.h"
+#include "UI/InteractPromptWidget.h"
 #include "Time/TimeStateSubsystem.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(TestLidarCharacter)
@@ -50,6 +51,7 @@ ATestLidarCharacter::ATestLidarCharacter()
 	ScanDirector = CreateDefaultSubobject<UScanDirectorComponent>(TEXT("ScanDirector"));
 
 	CollectCueClass = UResidueCollectCueWidget::StaticClass();
+	InteractPromptClass = UInteractPromptWidget::StaticClass();
 }
 
 void ATestLidarCharacter::BeginPlay()
@@ -79,6 +81,11 @@ void ATestLidarCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		CollectCue->SetResidue(nullptr);
 		CollectCue->RemoveFromParent();
 		CollectCue = nullptr;
+	}
+	if (InteractPrompt)
+	{
+		InteractPrompt->RemoveFromParent();
+		InteractPrompt = nullptr;
 	}
 	Super::EndPlay(EndPlayReason);
 }
@@ -111,6 +118,16 @@ void ATestLidarCharacter::CreateScanCue()
 		if (CollectCue)
 		{
 			CollectCue->AddToViewport(0);
+		}
+	}
+
+	if (!InteractPrompt && InteractPromptClass)
+	{
+		InteractPrompt = CreateWidget<UInteractPromptWidget>(PC, InteractPromptClass);
+		if (InteractPrompt)
+		{
+			InteractPrompt->SetInteractAction(InteractAction);
+			InteractPrompt->AddToViewport(0);
 		}
 	}
 }

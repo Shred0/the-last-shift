@@ -10,6 +10,7 @@
 #include "GameFramework/PlayerController.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
+#include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "Time/TimeStateSubsystem.h"
 
@@ -896,7 +897,7 @@ void AEntity::GatherLidarPoints_Implementation(const FLidarScanContext& Context,
 FLidarSourceSettings AEntity::GetLidarSourceSettings_Implementation() const
 {
 	FLidarSourceSettings Settings;
-	Settings.Color = EntityColor;
+	Settings.Color = UTheLastShiftSettings::GetScanColors().Entity;
 	Settings.IntensityMultiplier = IntensityMultiplier;
 	// Shown by the latest scan only: full until the next scan starts, then gone, so there is one snapshot at most.
 	Settings.FadeMode = ELidarFadeMode::UntilNextScan;

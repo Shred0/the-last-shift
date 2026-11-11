@@ -48,9 +48,9 @@ void UResidueCollectCueWidget::ApplyStyle()
 	Ring->SetTrackColor(TrackColor);
 	Ring->SetClockwise(true);
 	Ring->SetStartAngle(0.f);
-	if (const AResidue* Current = Residue.Get())
+	if (Residue.IsValid())
 	{
-		Ring->SetFillColor(Current->ResidueColor);
+		Ring->SetFillColor(AResidue::GetResidueColor());
 		Ring->SetUseReadyColor(false);
 	}
 

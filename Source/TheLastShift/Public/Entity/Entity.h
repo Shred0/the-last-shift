@@ -272,9 +272,7 @@ public:
 
 	// --- Render ---
 
-	/** Colour of every entity point. Not the scan colour, not the scan cue colour. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Render")
-	FLinearColor EntityColor = FLinearColor(1.f, 0.16f, 0.05f, 1.f);
+	// Colour of every entity point: ScanColors.Entity of the project settings (UTheLastShiftSettings), its one owner.
 
 	/** Brightness of entity points relative to captured points. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Render", meta = (ClampMin = "0.0", ClampMax = "16.0"))

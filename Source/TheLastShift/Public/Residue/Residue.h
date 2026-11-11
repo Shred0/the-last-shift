@@ -92,10 +92,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Residue|Render")
 	int32 ClusterSeed = 7;
 
-	/** Colour of the residue's points and of its collect cue. Not the scan, scan cue or entity colour. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Residue|Render")
-	FLinearColor ResidueColor = FLinearColor(0.75f, 0.25f, 1.f, 1.f);
-
 	/** Brightness of residue points relative to captured points. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Residue|Render", meta = (ClampMin = "0.0", ClampMax = "16.0"))
 	float IntensityMultiplier = 1.5f;
@@ -128,6 +124,10 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Residue")
 	bool IsInCollectRange(const APawn* Pawn) const;
+
+	/** Colour of the residue's points and of its collect cue: ScanColors.Residue of the project settings (its one owner). */
+	UFUNCTION(BlueprintPure, Category = "Residue")
+	static FLinearColor GetResidueColor();
 
 	/** Points returned by the last GatherLidarPoints (before the lidar's occlusion). */
 	UFUNCTION(BlueprintPure, Category = "Residue")

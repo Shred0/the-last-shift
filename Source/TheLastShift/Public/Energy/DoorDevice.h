@@ -8,6 +8,7 @@
 
 class UBoxComponent;
 class UStaticMeshComponent;
+class UInteractableScanComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDoorOpenChanged, bool, bOpen);
 
@@ -18,6 +19,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDoorOpenChanged, bool, bOpen);
  *
  * The door never affects navigation: the navmesh runs through it whether open or closed (the entity walks through
  * closed doors). Blocker's box extent is the door's size; the Panel is scaled from it, so it is set in one place.
+ * While closed, the Panel shows in scans in the interactable colour (InteractableScan); an open door shows nothing.
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API ADoorDevice : public APoweredDevice
@@ -59,6 +61,10 @@ protected:
 	/** Visual panel, shown while closed; scaled to Blocker's extent (a 100 cm cube mesh). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door")
 	TObjectPtr<UStaticMeshComponent> Panel;
+
+	/** Shows the Panel in scans in the interactable colour (nothing while the panel is hidden, i.e. open). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door")
+	TObjectPtr<UInteractableScanComponent> InteractableScan;
 
 	/** A pawn inside this volume keeps an unpowered door open. Set its extent wider than Blocker along the passage. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door")

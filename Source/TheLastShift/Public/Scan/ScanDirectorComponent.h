@@ -132,6 +132,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
 	ULidarScanComponent* GetLidarScan() const { return LidarScan; }
 
+	/**
+	 * World distance between neighbouring capture samples on a surface at PlanarDepth, seen head-on, for the scan
+	 * described by Context: 2 * Depth * TanHalfFOV.X / capture resolution, with Depth raised to the lidar's near
+	 * thinning distance (closer samples are thinned to that density). For point sources that want to match the density
+	 * of captured points. 0 when the owner has no lidar.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Scan|State", meta = (Units = "cm"))
+	float GetCaptureSampleSpacing(const FLidarScanContext& Context, float PlanarDepth) const;
+
 	/** Owner transform recorded at the last Stop (identity before the first Stop). */
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
 	FTransform GetStopAnchor() const { return StopAnchor; }
@@ -193,6 +202,9 @@ private:
 	void HandleFirstScanTimer();
 	void HandleReadyTimer();
 	void HandleBeatTimer();
+
+	/** Pushes the scan colour (ScanColors.Scan of the project settings, its one owner) to the lidar. */
+	void ApplyScanColor();
 
 	/** Issues the scan and restarts the cooldown from ScanTime. */
 	void IssueScan(double ScanTime, bool bAutomatic);

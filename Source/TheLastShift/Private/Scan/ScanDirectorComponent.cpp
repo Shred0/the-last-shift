@@ -8,6 +8,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PawnMovementComponent.h"
 #include "LidarScanComponent.h"
+#include "Run/TheLastShiftSettings.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
 #include "TimerManager.h"
@@ -44,6 +45,7 @@ void UScanDirectorComponent::BeginPlay()
 		return;
 	}
 	LidarScan->OnScanCompleted.AddDynamic(this, &UScanDirectorComponent::HandleLidarScanCompleted);
+	ApplyScanColor();
 
 	TimeState = GetWorld() ? GetWorld()->GetSubsystem<UTimeStateSubsystem>() : nullptr;
 	if (!TimeState)
@@ -364,6 +366,25 @@ void UScanDirectorComponent::HandleBeatTimer()
 	OnBeat.Broadcast(BeatCount);
 }
 
+void UScanDirectorComponent::ApplyScanColor()
+{
+	if (LidarScan)
+	{
+		LidarScan->PointColor = UTheLastShiftSettings::GetScanColors().Scan;
+	}
+}
+
+float UScanDirectorComponent::GetCaptureSampleSpacing(const FLidarScanContext& Context, float PlanarDepth) const
+{
+	if (!LidarScan)
+	{
+		return 0.f;
+	}
+	const int32 Resolution = FMath::Clamp(LidarScan->CaptureResolution, 64, 1024);
+	const float Depth = FMath::Max3(PlanarDepth, LidarScan->NearThinningDistance, 1.f);
+	return 2.f * Depth * static_cast<float>(Context.TanHalfFOV.X) / static_cast<float>(Resolution);
+}
+
 void UScanDirectorComponent::IssueScan(double ScanTime, bool bAutomatic)
 {
 	if (!LidarScan)
@@ -379,6 +400,7 @@ void UScanDirectorComponent::IssueScan(double ScanTime, bool bAutomatic)
 
 	SetTimerAt(ReadyTimer, &UScanDirectorComponent::HandleReadyTimer, LastScanTime + CurrentCooldown);
 
+	ApplyScanColor();
 	UE_LOG(LogTheLastShift, Log, TEXT("ScanDirector: %s scan %d issued (cooldown %.2f s, ready at %.3f s into stop)."),
 		bAutomatic ? TEXT("automatic") : TEXT("requested"), LidarScan->GetScanCount(), CurrentCooldown,
 		GetStopElapsed(LastScanTime + CurrentCooldown));

@@ -7,6 +7,7 @@
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "Time/TimeStateSubsystem.h"
 #include "TimerManager.h"
@@ -339,10 +340,15 @@ void AResidue::GatherLidarPoints_Implementation(const FLidarScanContext& Context
 	LastGatheredPoints = Cluster.Num();
 }
 
+FLinearColor AResidue::GetResidueColor()
+{
+	return UTheLastShiftSettings::GetScanColors().Residue;
+}
+
 FLidarSourceSettings AResidue::GetLidarSourceSettings_Implementation() const
 {
 	FLidarSourceSettings Settings;
-	Settings.Color = ResidueColor;
+	Settings.Color = GetResidueColor();
 	Settings.IntensityMultiplier = FMath::Clamp(IntensityMultiplier, 0.f, 16.f);
 	Settings.FadeMode = ELidarFadeMode::ScanFade;
 	Settings.bOccludeByCapture = true;

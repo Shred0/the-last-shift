@@ -361,9 +361,13 @@ FKey UStdInputSubsystem::GetKeyForTag(FGameplayTag Tag, bool bPreferGamepad) con
 		StdInput::WarnMissingTag(Tag, nullptr);
 		return EKeys::Invalid;
 	}
+	return GetKeyForAction(Action, bPreferGamepad);
+}
 
+FKey UStdInputSubsystem::GetKeyForAction(const UInputAction* Action, bool bPreferGamepad) const
+{
 	const UEnhancedInputLocalPlayerSubsystem* EnhancedInput = GetEnhancedInput();
-	if (!EnhancedInput)
+	if (!Action || !EnhancedInput)
 	{
 		return EKeys::Invalid;
 	}

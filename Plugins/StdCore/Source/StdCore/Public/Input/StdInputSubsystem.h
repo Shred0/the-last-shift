@@ -9,6 +9,7 @@
 #include "StdInputSubsystem.generated.h"
 
 class UEnhancedInputLocalPlayerSubsystem;
+class UInputAction;
 
 /** One remappable keyboard/mouse entry, as shown in the Controls tab. */
 USTRUCT(BlueprintType)
@@ -97,6 +98,14 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Std Core|Input")
 	FKey GetKeyForTag(FGameplayTag Tag, bool bPreferGamepad = false) const;
+
+	/**
+	 * The key currently bound to Action for this player, following remapping. Keyboard/mouse keys are preferred unless
+	 * bPreferGamepad; a key of the other kind is returned when the action has none of the preferred kind. Invalid when
+	 * the action is null or has no key.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Std Core|Input")
+	FKey GetKeyForAction(const UInputAction* Action, bool bPreferGamepad = false) const;
 
 	/** GetKeyForTag as display text ("E", "Space Bar"); "Unbound" when there is no key. */
 	UFUNCTION(BlueprintCallable, Category = "Std Core|Input")

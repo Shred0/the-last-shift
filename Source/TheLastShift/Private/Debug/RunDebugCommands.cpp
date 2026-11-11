@@ -2,7 +2,7 @@
 
 // Debug console commands for the run across maps: tls.TravelTest (state across a travel, the player held until the
 // next area is ready, black-screen timings), tls.ExitTest (the exit volume in Normal and in Stopped time),
-// tls.RunChainTest (the whole run, map after map, to the main menu) and tls.Settings.Reload (recipes and seeds re-read
+// tls.RunChainTest (the whole run, map after map, to the main menu) and tls.Settings.Reload (recipes, seeds, jump tuning and scan colours re-read
 // from Config/DefaultGame.ini while tuning). They drive a core ticker that survives the map change. Compiled out of Shipping.
 
 #include "Area/AreaExit.h"
@@ -552,6 +552,11 @@ namespace RunDebug
 		Section->MultiFind(TEXT("GrazeJumpFraction"), Values, true);
 		const bool bGraze = Values.Num() > 0;
 		const float Graze = bGraze ? FCString::Atof(*Values.Last()) : 0.f;
+		Values.Reset();
+		Section->MultiFind(TEXT("ScanColors"), Values, true);
+		FScanColors Colors;
+		const bool bColors = Values.Num() > 0
+			&& FScanColors::StaticStruct()->ImportText(*Values.Last(), &Colors, nullptr, PPF_None, GLog, TEXT("FScanColors")) != nullptr;
 
 		UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
 		Settings->AreaRecipes = Recipes;
@@ -569,6 +574,10 @@ namespace RunDebug
 		{
 			Settings->GrazeJumpFraction = Graze;
 		}
+		if (bColors)
+		{
+			Settings->ScanColors = Colors;
+		}
 		FString Summary;
 		for (int32 I = 0; I < Recipes.Num(); ++I)
 		{
@@ -580,6 +589,9 @@ namespace RunDebug
 		}
 		Summary += FString::Printf(TEXT("; test jump %.0f s, battery %.4f; graze fraction %.3f"), Settings->TestActTuning.JumpHomeSeconds,
 			Settings->TestActTuning.JumpBatteryDrop, Settings->GrazeJumpFraction);
+		const FScanColors& C = Settings->ScanColors;
+		Summary += FString::Printf(TEXT("; scan colours %s: scan %s, ready cue %s, residue %s, entity %s, interactable %s"), bColors ? TEXT("reloaded") : TEXT("kept"),
+			*C.Scan.ToString(), *C.ReadyCue.ToString(), *C.Residue.ToString(), *C.Entity.ToString(), *C.Interactable.ToString());
 		UE_LOG(LogTheLastShift, Display, TEXT("tls.Settings.Reload: %s; test recipe %s (from %s, in memory only)."), *Summary, bTest ? TEXT("reloaded") : TEXT("kept"), *Path);
 	}
 }
@@ -622,7 +634,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 
 static FAutoConsoleCommand GTlsSettingsReloadCommand(
 	TEXT("tls.Settings.Reload"),
-	TEXT("tls.Settings.Reload: re-reads AreaRecipes, AreaSeeds, TestRecipe, ActTuning, TestActTuning and GrazeJumpFraction from Config/DefaultGame.ini into the settings in memory (tuning without an editor restart); the next generation and the next jump use them."),
+	TEXT("tls.Settings.Reload: re-reads AreaRecipes, AreaSeeds, TestRecipe, ActTuning, TestActTuning, GrazeJumpFraction and ScanColors from Config/DefaultGame.ini into the settings in memory (tuning without an editor restart); the next generation, the next jump and the next scan use them."),
 	FConsoleCommandDelegate::CreateStatic(&RunDebug::ReloadSettings));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsTravelTestCommand(

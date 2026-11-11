@@ -3,6 +3,7 @@
 #include "Scan/ScanCueWidget.h"
 
 #include "Components/CanvasPanelSlot.h"
+#include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "UI/StdRadialProgress.h"
 
@@ -55,7 +56,7 @@ void UScanCueWidget::ApplyRingStyle()
 	Ring->SetFillColor(FillColor);
 	Ring->SetTrackColor(TrackColor);
 	Ring->SetUseReadyColor(true);
-	Ring->SetReadyColor(ReadyColor);
+	Ring->SetReadyColor(UTheLastShiftSettings::GetScanColors().ReadyCue);
 	Ring->SetClockwise(true);
 	Ring->SetStartAngle(0.f);
 	Ring->SetVisibility(ESlateVisibility::HitTestInvisible);
@@ -94,6 +95,12 @@ void UScanCueWidget::Refresh()
 	if (!bShow)
 	{
 		return;
+	}
+
+	const FLinearColor& Ready = UTheLastShiftSettings::GetScanColors().ReadyCue;
+	if (!Ring->ReadyColor.Equals(Ready, 0.f))
+	{
+		Ring->SetReadyColor(Ready);
 	}
 
 	// Before the first scan of a stop the fraction is 0: an empty ring until the automatic scan starts the cooldown.

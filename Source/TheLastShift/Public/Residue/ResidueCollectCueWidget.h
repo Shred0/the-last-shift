@@ -11,7 +11,7 @@ class UStdRadialProgress;
 
 /**
  * Hold-to-collect feedback: a ring at the centre of the screen, filled by the residue's OnCollectProgress, in that
- * residue's ResidueColor (read from the residue, never copied). Hidden unless a hold is in progress. No text.
+ * residue colour (AResidue::GetResidueColor, read when a hold starts, never copied). Hidden unless a hold is in progress. No text.
  *
  * A second instance of the StdCore radial ring that the scan cue uses; the widget tree (a canvas and the ring) is built
  * in C++, so the class is used as is, without a widget Blueprint. Created by whoever owns the HUD.

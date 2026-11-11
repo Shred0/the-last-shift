@@ -8,6 +8,7 @@
 
 class APawn;
 class APoweredDevice;
+class UInteractableScanComponent;
 class UStaticMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTerminalActivated, int32, Cost);
@@ -16,7 +17,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnTerminalInsufficientEnergy, in
 /**
  * Where energy is spent: Interact within InteractRadius, in Normal time, spends Cost banked energy and powers every
  * device in Targets (which can be far away). With too little energy, or while time is Stopped (terminals work only in
- * Normal time), nothing changes and OnInsufficientEnergy fires.
+ * Normal time), nothing changes and OnInsufficientEnergy fires. Shows in scans in the interactable colour (InteractableScan).
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API APowerTerminal : public AActor
@@ -49,6 +50,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	bool IsInRange(const APawn* InstigatorPawn) const;
 
+	/** True when at least one device in Targets is not powered: activating would switch something on. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	bool HasUnpoweredTarget() const;
+
+	/** Cost, clamped as TryActivate spends it. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	int32 GetCost() const;
+
 	/** The terminal nearest to Pawn within its InteractRadius, or null. */
 	static APowerTerminal* FindNearestInRange(const APawn* Pawn);
 
@@ -61,4 +70,8 @@ public:
 protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")
 	TObjectPtr<UStaticMeshComponent> Mesh;
+
+	/** Shows the Mesh in scans in the interactable colour. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")
+	TObjectPtr<UInteractableScanComponent> InteractableScan;
 };

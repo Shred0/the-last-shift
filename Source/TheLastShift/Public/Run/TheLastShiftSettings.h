@@ -25,8 +25,39 @@ struct THELASTSHIFT_API FActTuning
 };
 
 /**
+ * Every colour a scan can show, in one place. A scan's own points, the scan-ready cue, residues, the entity and the
+ * interactables (terminals, doors) read their colour from here when they draw; nothing copies it. The values live in
+ * Config/DefaultGame.ini; the C++ defaults are only a neutral fallback for a missing ini entry.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FScanColors
+{
+	GENERATED_BODY()
+
+	/** Captured points of a scan (the lidar's own colour). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Colors")
+	FLinearColor Scan = FLinearColor::White;
+
+	/** The scan-ready ring once a scan can be requested. Never the scan colour. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Colors")
+	FLinearColor ReadyCue = FLinearColor::White;
+
+	/** Residue points and the residue's collect ring. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Colors")
+	FLinearColor Residue = FLinearColor::White;
+
+	/** Every point of the entity (figure and trail). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Colors")
+	FLinearColor Entity = FLinearColor::White;
+
+	/** Surfaces of what the player can use (terminals, closed doors). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Colors")
+	FLinearColor Interactable = FLinearColor::White;
+};
+
+/**
  * Project settings of the game (Project Settings > Game > The Last Shift), stored as text in Config/DefaultGame.ini.
- * Sole owner of the run's map order, of every area's recipe and seed and of the per-act jump tuning: the area
+ * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning and of the scan colours: the area
  * generator, the run subsystem and the home state subsystem read them from here and copy nothing.
  */
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "The Last Shift"))
@@ -70,6 +101,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Home", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float GrazeJumpFraction = 0.25f;
 
+	/** Every colour a scan can show: the one owner of those colours (see FScanColors). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability")
+	FScanColors ScanColors;
+
 	/** The travel screen stays black at least this long, even when the next area is ready sooner. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float TravelHoldSeconds = 4.f;
@@ -92,6 +127,9 @@ public:
 
 	/** GrazeJumpFraction, clamped to [0, 1]. */
 	float GetGrazeJumpFraction() const { return FMath::Clamp(GrazeJumpFraction, 0.f, 1.f); }
+
+	/** ScanColors of the project settings. */
+	static const FScanColors& GetScanColors() { return Get()->ScanColors; }
 
 	/** The map a run starts in: the first entry of AreaMaps (null when the list is empty). */
 	TSoftObjectPtr<UWorld> GetFirstAreaMap() const { return AreaMaps.Num() > 0 ? AreaMaps[0] : TSoftObjectPtr<UWorld>(); }

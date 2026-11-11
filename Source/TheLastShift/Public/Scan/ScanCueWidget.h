@@ -10,8 +10,8 @@ class UScanDirectorComponent;
 class UStdRadialProgress;
 
 /**
- * Minimal "scan ready" cue: a thin ring, bottom-centre, that fills over the scan cooldown and turns ReadyColor when a
- * scan can be requested. Hidden in Normal time. No text, no bars, no sound. Never the scan colour.
+ * Minimal "scan ready" cue: a thin ring, bottom-centre, that fills over the scan cooldown and turns the ready colour
+ * (ScanColors.ReadyCue of the project settings, its one owner, read every frame) when a scan can be requested. Hidden in Normal time. No text, no bars, no sound. Never the scan colour.
  *
  * Reads the director's pures every frame: the ring is full and recoloured in the same frame IsScanReady() turns true,
  * never before (the fill stops just short of full until then). Created by whoever owns the HUD (the test character for
@@ -49,10 +49,6 @@ public:
 	/** Unfilled part of the ring. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scan Cue")
 	FLinearColor TrackColor = FLinearColor(1.f, 1.f, 1.f, 0.08f);
-
-	/** The whole ring once a scan is ready. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scan Cue")
-	FLinearColor ReadyColor = FLinearColor(1.f, 1.f, 1.f, 0.9f);
 
 	/** Pushes the tunables above to the ring (called on construct; call after changing them at runtime). */
 	UFUNCTION(BlueprintCallable, Category = "Scan Cue")

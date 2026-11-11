@@ -1,4 +1,5 @@
-// Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress.
+// Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress,
+// the key prompt without a player.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -7,6 +8,9 @@
 
 #include "Settings/StdSettingsSubsystem.h"
 #include "Settings/StdUserSettings.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/TextBlock.h"
+#include "UI/StdKeyPromptWidget.h"
 #include "UI/StdRadialProgress.h"
 #include "UI/StdUITheme.h"
 #include "UObject/Package.h"
@@ -93,6 +97,41 @@ bool FStdRadialProgressTest::RunTest(const FString& Parameters)
 	const TSharedRef<SWidget> Slate = Ring->TakeWidget();
 	Slate->SlatePrepass(1.f);
 	TestEqual(TEXT("Slate desired size is the outer diameter"), static_cast<float>(Slate->GetDesiredSize().X), Ring->GetOuterDiameter());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdKeyPromptTest, "StdCore.UI.KeyPrompt", StdUnitTests::Flags)
+
+bool FStdKeyPromptTest::RunTest(const FString& Parameters)
+{
+	UStdKeyPromptWidget* Prompt = NewObject<UStdKeyPromptWidget>(GetTransientPackage());
+	TestTrue(TEXT("Builds its own tree"), Prompt->Initialize());
+	TestNotNull(TEXT("Has a root widget"), Prompt->WidgetTree ? Prompt->WidgetTree->RootWidget.Get() : nullptr);
+
+	UTextBlock* Key = Prompt->WidgetTree ? Cast<UTextBlock>(Prompt->WidgetTree->FindWidget(TEXT("Text_Key"))) : nullptr;
+	UTextBlock* Label = Prompt->WidgetTree ? Cast<UTextBlock>(Prompt->WidgetTree->FindWidget(TEXT("Text_Label"))) : nullptr;
+	TestNotNull(TEXT("Has Text_Key"), Key);
+	TestNotNull(TEXT("Has Text_Label"), Label);
+
+	Prompt->RefreshKey();
+	TestFalse(TEXT("No action, no player: no key"), Prompt->GetDisplayedKey().IsValid());
+	TestEqual(TEXT("No key reads Unbound"), Prompt->GetKeyText().ToString(), FString(TEXT("Unbound")));
+	if (Key)
+	{
+		TestEqual(TEXT("The cap shows the key text"), Key->GetText().ToString(), Prompt->GetKeyText().ToString());
+	}
+
+	Prompt->SetLabel(FText::FromString(TEXT("Open")));
+	if (Label)
+	{
+		TestEqual(TEXT("The label is shown"), Label->GetText().ToString(), FString(TEXT("Open")));
+		TestTrue(TEXT("A label is visible"), Label->GetVisibility() != ESlateVisibility::Collapsed);
+	}
+	Prompt->SetLabel(FText::GetEmpty());
+	if (Label)
+	{
+		TestEqual(TEXT("An empty label is collapsed"), Label->GetVisibility(), ESlateVisibility::Collapsed);
+	}
 	return true;
 }
 
