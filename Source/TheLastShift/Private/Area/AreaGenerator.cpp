@@ -1147,7 +1147,7 @@ namespace AreaGen
 		 * straight wall: solid behind it over its whole width and a little beyond, so it never stands in front of a
 		 * niche, a side passage or a doorway (where it would block the opening on the navmesh); facing the centreline.
 		 */
-		bool FindSideSpot(float S, float MinS, FVector2D& OutPos, FVector2D& OutFacing)
+		bool FindSideSpot(float S, float MinS, FVector2D& OutPos, FVector2D& OutFacing, float MaxWallDistance = 1000.f)
 		{
 			const int32 FirstSide = Rng.FRand() < 0.5f ? 1 : -1;
 			for (float At = S; At >= MinS; At -= 100.f)
@@ -1160,7 +1160,7 @@ namespace AreaGen
 					const FVector2D Out = Lv * Side;
 					// Distance from the centreline to the wall on this side.
 					float Wall = -1.f;
-					for (float D = 0.f; D <= 1000.f; D += Cell * 0.5f)
+					for (float D = 0.f; D <= MaxWallDistance; D += Cell * 0.5f)
 					{
 						if (!Plan.IsFloor(FIntPoint(FMath::FloorToInt((P.X + Out.X * D) / Cell), FMath::FloorToInt((P.Y + Out.Y * D) / Cell))))
 						{
@@ -1251,13 +1251,16 @@ namespace AreaGen
 
 		bool PlaceLightGroups()
 		{
+			// Rooms first, the one nearest the exit first (the last room of a route is where a lit room matters most),
+			// then corridors in route order.
 			TArray<int32> Order;
-			for (const EAreaSegmentType Preferred : { EAreaSegmentType::Room, EAreaSegmentType::Corridor })
+			for (int32 Index = Plan.Segs.Num() - 1; Index >= 0; --Index)
 			{
-				for (int32 Index = 0; Index < Plan.Segs.Num(); ++Index)
-				{
-					if (Plan.Segs[Index].Type == Preferred) { Order.Add(Index); }
-				}
+				if (Plan.Segs[Index].Type == EAreaSegmentType::Room) { Order.Add(Index); }
+			}
+			for (int32 Index = 0; Index < Plan.Segs.Num(); ++Index)
+			{
+				if (Plan.Segs[Index].Type == EAreaSegmentType::Corridor) { Order.Add(Index); }
 			}
 			for (int32 Group = 0; Group < R.LightGroupCount; ++Group)
 			{
@@ -1270,7 +1273,10 @@ namespace AreaGen
 				FLightPlacement Lights;
 				Lights.Segment = Order[Group];
 				const float Start = S.RouteStart + 300.f;
-				if (!FindSideSpot(Start, FMath::Max(50.f, S.RouteStart - 500.f), Lights.Terminal, Lights.TerminalFacing))
+				// A wide room may have no wall within 10 m of the route near its entry: then look for one up to 30 m away
+				// (the terminal still stands TerminalSideOffset from the centreline).
+				if (!FindSideSpot(Start, FMath::Max(50.f, S.RouteStart - 500.f), Lights.Terminal, Lights.TerminalFacing)
+					&& !FindSideSpot(Start, FMath::Max(50.f, S.RouteStart - 500.f), Lights.Terminal, Lights.TerminalFacing, 3000.f))
 				{
 					Error = FString::Printf(TEXT("light group %d: no spot for its terminal"), Group);
 					return false;

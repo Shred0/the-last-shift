@@ -5,7 +5,11 @@
 // Development builds only.
 
 #include "Components/SpotLightComponent.h"
+#include "Containers/Ticker.h"
 #include "Area/AreaGenerator.h"
+#include "Area/AreaInfo.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Debug/EntityTestListener.h"
 #include "Debug/LidarTestSource.h"
 #include "Debug/TlsDebugCommon.h"
@@ -1771,6 +1775,179 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLidarVerifyOcclusionCommand(
 			Lidar->bVerifyInjectedOcclusion = Args.Num() > 0 ? FCString::Atoi(*Args[0]) != 0 : !Lidar->bVerifyInjectedOcclusion;
 			UE_LOG(LogTheLastShift, Log, TEXT("tls.Lidar.VerifyOcclusion: %d"), Lidar->bVerifyInjectedOcclusion ? 1 : 0);
 		}
+	}));
+
+namespace RenderSetupDebug
+{
+	// tls.RenderSetup: a fixed scene for scene-render timing (ProfileGPU by hand while it holds).
+	struct FState
+	{
+		bool bActive = false;
+		int32 Phase = 0;
+		int32 Scans = 3;
+		int32 Fired = 0;
+		int32 SpawnTries = 0;
+		double PhaseReal = 0.0;
+		float SavedSpeed = -1.f;
+		TWeakObjectPtr<UWorld> World;
+		TWeakObjectPtr<AEntity> Entity;
+	};
+	static FState G;
+
+	static void End(const TCHAR* Why)
+	{
+		if (AEntity* Entity = G.Entity.Get(); Entity && G.SavedSpeed >= 0.f)
+		{
+			Entity->Speed = G.SavedSpeed;
+		}
+		G.SavedSpeed = -1.f;
+		G.bActive = false;
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.RenderSetup: ended (%s)."), Why);
+	}
+
+	static void Face(UWorld* World, const FVector& FigureBase)
+	{
+		if (APlayerController* PC = World->GetFirstPlayerController())
+		{
+			FVector Eye;
+			FRotator View;
+			PC->GetPlayerViewPoint(Eye, View);
+			PC->SetControlRotation((FigureBase + FVector(0.f, 0.f, 100.f) - Eye).Rotation());
+		}
+	}
+
+	static bool Tick(float)
+	{
+		if (!G.bActive)
+		{
+			return false;
+		}
+		UWorld* World = G.World.Get();
+		AEntity* Entity = G.Entity.Get();
+		UTimeStateSubsystem* Time = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+		UScanDirectorComponent* Director = World ? TimeStateDebug::FindPlayerDirector(World) : nullptr;
+		ULidarScanComponent* Lidar = Director ? Director->GetLidarScan() : nullptr;
+		const double Now = FPlatformTime::Seconds();
+		if (!World || !Entity || !Time || !Lidar || !Time->IsStopped())
+		{
+			End(TEXT("world, entity or lidar gone, or time resumed"));
+			return false;
+		}
+		switch (G.Phase)
+		{
+		case 0:
+			// Let the director's automatic first scan go by, then wake the entity (it appears at once while Stopped).
+			if (Now - G.PhaseReal < 1.6)
+			{
+				return true;
+			}
+			Entity->Awaken();
+			G.Phase = 1;
+			return true;
+		case 1:
+			if (!Entity->IsManifested() || !EntityDebug::IsVisibleFromCamera(World, Entity->GetFigureLocation()))
+			{
+				if (++G.SpawnTries > 30)
+				{
+					End(TEXT("FAIL: no spawn in line of sight in 30 tries"));
+					return false;
+				}
+				Entity->SpawnNow(1000.f + (G.SpawnTries % 5) * 500.f);
+				return true;
+			}
+			G.SavedSpeed = Entity->Speed;
+			Entity->Speed = 0.f;
+			Face(World, Entity->GetFigureLocation());
+			Lidar->ClearScans(0.f);
+			G.Phase = 2;
+			G.PhaseReal = Now;
+			return true;
+		case 2:
+			if (Now - G.PhaseReal < 0.3)
+			{
+				return true;
+			}
+			Lidar->Scan();
+			G.PhaseReal = Now;
+			G.Phase = ++G.Fired >= G.Scans ? 3 : 2;
+			return true;
+		case 3:
+		{
+			if (Now - G.PhaseReal < 1.0)
+			{
+				return true;
+			}
+			const APlayerController* PC = World->GetFirstPlayerController();
+			FVector Eye;
+			FRotator View;
+			PC->GetPlayerViewPoint(Eye, View);
+			const AAreaGenerator* Gen = AAreaGenerator::Find(World);
+			UE_LOG(LogTheLastShift, Log, TEXT("tls.RenderSetup: READY in %s: %d alive scans, entity frozen at %.1f m from the eye (in line of sight %d, in view %d, %d figure + %d trail points in the last scan), PCG instances %d; holding until tls.Resume."),
+				*UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), Lidar->GetAliveScanCount(), FVector::Dist(Eye, Entity->GetFigureLocation()) / 100.f,
+				EntityDebug::IsVisibleFromCamera(World, Entity->GetFigureLocation()) ? 1 : 0, EntityDebug::IsInView(World, Entity->GetFigureLocation()) ? 1 : 0,
+				Entity->GetLastGatheredFigurePoints(), Entity->GetLastGatheredTrailPoints(), Gen ? Gen->GetPCGInstanceCount() : 0);
+			G.Phase = 4;
+			return true;
+		}
+		default:
+			return true;
+		}
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsRenderSetupCommand(
+	TEXT("tls.RenderSetup"),
+	TEXT("tls.RenderSetup [Scans=3]: (PIE, Normal time) a fixed scene for scene-render timing: in a generated area the pawn goes to the middle of the largest open segment (elsewhere it stays), time stops, the entity wakes and is respawned until it is in line of sight, frozen and faced; the scans are cleared and Scans scans fired. Logs READY and holds; take ProfileGPU samples, then tls.Resume (restores the entity's speed)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
+		AEntity* Entity = World ? EntityDebug::FindEntity(World) : nullptr;
+		UTimeStateSubsystem* Time = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+		APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		ACharacter* Character = PC ? Cast<ACharacter>(PC->GetPawn()) : nullptr;
+		if (!Entity || !Time || !Character || Time->IsStopped() || RenderSetupDebug::G.bActive)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.RenderSetup: needs PIE in Normal time with an entity and a player character, and no setup running."));
+			return;
+		}
+		FString Where = TEXT("where the pawn stands");
+		if (const AAreaInfo* Info = AAreaInfo::Find(World))
+		{
+			int32 Best = -1;
+			double BestArea = 0.0;
+			for (int32 Index = 0; Index < Info->Segments.Num(); ++Index)
+			{
+				const FAreaSegmentRecord& S = Info->Segments[Index];
+				const FVector Size = S.Bounds.GetSize();
+				if (!S.bClosed && Size.X * Size.Y > BestArea)
+				{
+					BestArea = Size.X * Size.Y;
+					Best = Index;
+				}
+			}
+			if (Best >= 0)
+			{
+				const FAreaSegmentRecord& S = Info->Segments[Best];
+				const float Distance = 0.5f * (S.RouteStart + S.RouteEnd);
+				int32 Segment = -1;
+				const FVector P = Info->GetRoutePointAtDistance(Distance, Segment);
+				const FVector Dir = Info->GetRouteDirectionAtDistance(Distance);
+				Character->SetActorLocation(P + FVector(0.f, 0.f, Character->GetDefaultHalfHeight() + 2.f), false, nullptr, ETeleportType::TeleportPhysics);
+				Character->GetCharacterMovement()->StopMovementImmediately();
+				PC->SetControlRotation(FRotator(0.f, Dir.Rotation().Yaw, 0.f));
+				Where = FString::Printf(TEXT("segment %d %s (%.0f x %.0f m), %.1f m along the route"), Best, LexToString(S.Type), S.Bounds.GetSize().X / 100.f,
+					S.Bounds.GetSize().Y / 100.f, Distance / 100.f);
+			}
+		}
+		RenderSetupDebug::G = RenderSetupDebug::FState();
+		RenderSetupDebug::G.bActive = true;
+		RenderSetupDebug::G.Scans = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 16) : 3;
+		RenderSetupDebug::G.World = World;
+		RenderSetupDebug::G.Entity = Entity;
+		RenderSetupDebug::G.PhaseReal = FPlatformTime::Seconds();
+		Time->Stop();
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.RenderSetup: %s; stopped, %d scans to fire."), *Where, RenderSetupDebug::G.Scans);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&RenderSetupDebug::Tick));
 	}));
 
 #endif // !UE_BUILD_SHIPPING

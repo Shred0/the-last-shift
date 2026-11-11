@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 // Debug console commands for the run across maps: tls.TravelTest (state across a travel, the player held until the
-// next area is ready, black-screen timings) and tls.ExitTest (the exit volume in Normal and in Stopped time).
-// They drive a core ticker that survives the map change. Compiled out of Shipping.
+// next area is ready, black-screen timings), tls.ExitTest (the exit volume in Normal and in Stopped time),
+// tls.RunChainTest (the whole run, map after map, to the main menu) and tls.Settings.Reload (recipes and seeds re-read
+// from Config/DefaultGame.ini while tuning). They drive a core ticker that survives the map change. Compiled out of Shipping.
 
 #include "Area/AreaExit.h"
 #include "Area/AreaGenerator.h"
@@ -19,8 +20,12 @@
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "InputCoreTypes.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
+#include "Settings/StdProjectSettings.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
 
@@ -267,7 +272,240 @@ namespace RunDebug
 		}
 		return true;
 	}
+
+	// --- tls.RunChainTest ---
+
+	struct FChain
+	{
+		bool bActive = false;
+		int32 TravelsLeft = 0;
+		bool bQuit = false;
+		/** FromMenu: Play is pressed once the menu's own transition is over (StdCore refuses it during one). */
+		bool bPendingStart = false;
+		TWeakObjectPtr<UWorld> LastWorld;
+		double StartReal = 0.0;
+		double ArrivedReal = 0.0;
+		bool bArrived = false;
+		/** Act the next arrival must have; 0 = the main menu, -1 = any (the map the test starts in). */
+		int32 ExpectedAct = 0;
+		int32 Arrivals = 0;
+		int32 Failures = 0;
+	};
+	static FChain GChain;
+
+	static void FinishChain(const TCHAR* Why)
+	{
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: ===== %s (%d arrivals, %d failures%s%s) ====="), GChain.Failures == 0 ? TEXT("PASS") : TEXT("FAIL"),
+			GChain.Arrivals, GChain.Failures, Why ? TEXT(", ") : TEXT(""), Why ? Why : TEXT(""));
+		GChain.bActive = false;
+		if (GChain.bQuit)
+		{
+			FPlatformMisc::RequestExit(false, TEXT("tls.RunChainTest"));
+		}
+	}
+
+	static void ReportArrival(UWorld* World)
+	{
+		const FString Name = TEXT("tls.RunChainTest");
+		const FString Map = UWorld::RemovePIEPrefix(World->GetOutermost()->GetName());
+		const URunSubsystem* Run = URunSubsystem::Get(World);
+		const int32 Act = Run ? Run->GetActIndex() : -1;
+		const AAreaGenerator* Gen = AAreaGenerator::Find(World);
+		++GChain.Arrivals;
+		if (!Gen)
+		{
+			const FString Menu = UStdProjectSettings::Get()->MainMenuMap.ToSoftObjectPath().GetLongPackageName();
+			Report(Name, GChain.ExpectedAct == 0 && Act == 0 && Map == Menu,
+				FString::Printf(TEXT("arrival %d: %s, act %d (expected the main menu %s)"), GChain.Arrivals, *Map, Act, *Menu), GChain.Failures);
+			return;
+		}
+		const AEntity* Entity = nullptr;
+		for (TActorIterator<AEntity> It(World); It; ++It) { Entity = *It; break; }
+		const bool bOk = Gen->IsReady() && Gen->bLastValidationPassed && (GChain.ExpectedAct < 0 || Act == GChain.ExpectedAct);
+		Report(Name, bOk, FString::Printf(TEXT("arrival %d: %s, act %d (expected %d), seed %d (%d tried), hash %016llx, route %.1f m, PCG instances %d, time to ready %.2f s, validation %s, entity %s ContactResponse %s"),
+			GChain.Arrivals, *Map, Act, GChain.ExpectedAct, Gen->GetSeed(), Gen->LastSeedsTried, static_cast<uint64>(Gen->GetLayoutHash()), Gen->GetRouteLength() / 100.f,
+			Gen->GetPCGInstanceCount(), Gen->GetTimeToReadySeconds(), Gen->bLastValidationPassed ? TEXT("passed") : TEXT("FAILED"), *GetNameSafe(Entity),
+			Entity ? LexToString(Entity->ContactResponse) : TEXT("-")), GChain.Failures);
+	}
+
+	static bool TickChain(float)
+	{
+		UWorld* World = GameWorld();
+		const double Now = FPlatformTime::Seconds();
+		if (Now - GChain.StartReal > 120.0)
+		{
+			++GChain.Failures;
+			FinishChain(TEXT("no arrival within 120 s"));
+			return false;
+		}
+		if (!World)
+		{
+			return true;
+		}
+		if (GChain.bPendingStart)
+		{
+			UStdFlowSubsystem* F = Flow(World);
+			if (F && F->IsTransitioning())
+			{
+				return true;
+			}
+			GChain.bPendingStart = false;
+			GChain.StartReal = Now;
+			if (!F || !F->StartGameplay())
+			{
+				++GChain.Failures;
+				FinishChain(TEXT("StartGameplay refused"));
+				return false;
+			}
+			return true;
+		}
+		if (World != GChain.LastWorld.Get())
+		{
+			// A new world: wait until its area is ready (or failed) and the transition is over.
+			const UStdFlowSubsystem* F = Flow(World);
+			const AAreaGenerator* Gen = AAreaGenerator::Find(World);
+			if ((Gen && !Gen->IsReady() && Gen->GetGenerationState() != EAreaGenerationState::Failed) || (F && F->IsTransitioning()))
+			{
+				return true;
+			}
+			GChain.LastWorld = World;
+			GChain.bArrived = true;
+			GChain.ArrivedReal = Now;
+			ReportArrival(World);
+			if (!Gen)
+			{
+				FinishChain(nullptr);
+				return false;
+			}
+			return true;
+		}
+		if (!GChain.bArrived || Now - GChain.ArrivedReal < 1.0)
+		{
+			return true;
+		}
+		// Arrived and settled: travel on, or stop.
+		GChain.bArrived = false;
+		if (GChain.TravelsLeft <= 0)
+		{
+			FinishChain(nullptr);
+			return false;
+		}
+		URunSubsystem* Run = URunSubsystem::Get(World);
+		const int32 Act = Run ? Run->GetActIndex() : -1;
+		GChain.ExpectedAct = Act >= UTheLastShiftSettings::Get()->AreaMaps.Num() ? 0 : Act + 1;
+		--GChain.TravelsLeft;
+		GChain.StartReal = Now;
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: tls.Travel.Next from act %d (expecting %s)."), Act,
+			GChain.ExpectedAct > 0 ? *FString::Printf(TEXT("act %d"), GChain.ExpectedAct) : TEXT("the main menu"));
+		if (!Run || !Run->TravelToNextArea())
+		{
+			++GChain.Failures;
+			FinishChain(TEXT("travel refused"));
+			return false;
+		}
+		return true;
+	}
+
+	// --- tls.Settings.Reload ---
+
+	static bool ParseRecipe(const FString& Value, FAreaRecipe& Out)
+	{
+		return FAreaRecipe::StaticStruct()->ImportText(*Value, &Out, nullptr, PPF_None, GLog, TEXT("FAreaRecipe")) != nullptr;
+	}
+
+	static void ReloadSettings()
+	{
+		const FString Path = FPaths::ProjectConfigDir() / TEXT("DefaultGame.ini");
+		FString Text;
+		if (!FFileHelper::LoadFileToString(Text, *Path))
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Settings.Reload: cannot read %s."), *Path);
+			return;
+		}
+		FConfigFile File;
+		File.CombineFromBuffer(Text, Path);
+		const FConfigSection* Section = File.FindSection(TEXT("/Script/TheLastShift.TheLastShiftSettings"));
+		if (!Section)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Settings.Reload: no [/Script/TheLastShift.TheLastShiftSettings] section in %s."), *Path);
+			return;
+		}
+		TArray<FString> Values;
+		Section->MultiFind(TEXT("AreaRecipes"), Values, true);
+		TArray<FAreaRecipe> Recipes;
+		for (const FString& Value : Values)
+		{
+			FAreaRecipe Recipe;
+			if (!ParseRecipe(Value, Recipe))
+			{
+				UE_LOG(LogTheLastShift, Warning, TEXT("tls.Settings.Reload: AreaRecipes entry %d does not parse; nothing changed."), Recipes.Num());
+				return;
+			}
+			Recipes.Add(Recipe);
+		}
+		Values.Reset();
+		Section->MultiFind(TEXT("AreaSeeds"), Values, true);
+		TArray<int32> Seeds;
+		for (const FString& Value : Values) { Seeds.Add(FCString::Atoi(*Value)); }
+		Values.Reset();
+		Section->MultiFind(TEXT("TestRecipe"), Values, true);
+		FAreaRecipe Test;
+		const bool bTest = Values.Num() > 0 && ParseRecipe(Values.Last(), Test);
+
+		UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+		Settings->AreaRecipes = Recipes;
+		Settings->AreaSeeds = Seeds;
+		if (bTest)
+		{
+			Settings->TestRecipe = Test;
+		}
+		FString Summary;
+		for (int32 I = 0; I < Recipes.Num(); ++I)
+		{
+			Summary += FString::Printf(TEXT("%sact %d: %d segments, seed %d"), I > 0 ? TEXT("; ") : TEXT(""), I + 1, Recipes[I].Segments.Num(), Seeds.IsValidIndex(I) ? Seeds[I] : -1);
+		}
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.Settings.Reload: %s; test recipe %s (from %s, in memory only)."), *Summary, bTest ? TEXT("reloaded") : TEXT("kept"), *Path);
+	}
 }
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
+	TEXT("tls.RunChainTest"),
+	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0]: FromMenu=1 first presses the main menu's Play (StdCore StartGameplay) once no transition is running. On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, then calls tls.Travel.Next until Travels are done; a travel after the last area must reach the main menu. Quit=1 exits the game at the end (packaged builds)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
+		if (!World || RunDebug::GChain.bActive)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.RunChainTest: needs a game world, or the test is already running."));
+			return;
+		}
+		RunDebug::GChain = RunDebug::FChain();
+		RunDebug::GChain.bActive = true;
+		RunDebug::GChain.TravelsLeft = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 0, 8) : 4;
+		const bool bFromMenu = Args.Num() > 1 && FCString::Atoi(*Args[1]) != 0;
+		RunDebug::GChain.bQuit = Args.Num() > 2 && FCString::Atoi(*Args[2]) != 0;
+		RunDebug::GChain.StartReal = FPlatformTime::Seconds();
+		const FString From = UWorld::RemovePIEPrefix(World->GetOutermost()->GetName());
+		if (bFromMenu)
+		{
+			RunDebug::GChain.LastWorld = World;
+			RunDebug::GChain.bPendingStart = true;
+			RunDebug::GChain.ExpectedAct = UTheLastShiftSettings::Get()->GetActOfMap(UStdProjectSettings::Get()->GameplayMap.ToSoftObjectPath().GetLongPackageName());
+			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: from %s, Play (StartGameplay) once the menu's transition is over, then %d travels."), *From, RunDebug::GChain.TravelsLeft);
+		}
+		else
+		{
+			// The current map is the first arrival.
+			RunDebug::GChain.ExpectedAct = -1;
+			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: from %s, %d travels."), *From, RunDebug::GChain.TravelsLeft);
+		}
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&RunDebug::TickChain));
+	}));
+
+static FAutoConsoleCommand GTlsSettingsReloadCommand(
+	TEXT("tls.Settings.Reload"),
+	TEXT("tls.Settings.Reload: re-reads AreaRecipes, AreaSeeds and TestRecipe from Config/DefaultGame.ini into the settings in memory (recipe tuning without an editor restart); the next generation uses them."),
+	FConsoleCommandDelegate::CreateStatic(&RunDebug::ReloadSettings));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsTravelTestCommand(
 	TEXT("tls.TravelTest"),
