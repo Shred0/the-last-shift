@@ -12,6 +12,7 @@
 #include "Engine/World.h"
 #include "Flow/StdFlowSubsystem.h"
 #include "Framework/StdPlayerController.h"
+#include "Misc/PackageName.h"
 #include "Input/StdInputSubsystem.h"
 #include "Settings/StdProjectSettings.h"
 #include "StdGameplayTags.h"
@@ -47,7 +48,13 @@ namespace StdPlayTests
 		return PlayerController ? ULocalPlayer::GetSubsystem<UStdInputSubsystem>(PlayerController->GetLocalPlayer()) : nullptr;
 	}
 
-	bool IsOnMap(const TCHAR* MapName)
+	/** Short name of a map setting ("L_MainMenu" for /StdCore/Maps/L_MainMenu.L_MainMenu), as World->GetMapName() ends. */
+	FString GetMapShortName(const TSoftObjectPtr<UWorld>& Map)
+	{
+		return FPackageName::GetShortName(Map.ToSoftObjectPath().GetLongPackageName());
+	}
+
+	bool IsOnMap(const FString& MapName)
 	{
 		const UWorld* World = GetPlayWorld();
 		const UStdFlowSubsystem* Flow = GetFlow();
@@ -87,11 +94,11 @@ namespace StdPlayTests
 		}));
 	}
 
-	void StartPlayOnMap(FAutomationTestBase* Test, const TSoftObjectPtr<UWorld>& Map, const TCHAR* MapName)
+	void StartPlayOnMap(FAutomationTestBase* Test, const TSoftObjectPtr<UWorld>& Map, const FString& MapName)
 	{
 		FAutomationEditorCommonUtils::LoadMap(Map.ToSoftObjectPath().GetLongPackageName());
 		ADD_LATENT_AUTOMATION_COMMAND(FStartPIECommand(false));
-		WaitUntil(Test, FString::Printf(TEXT("%s to start and fade in"), MapName), 20.0, [MapName]() { return IsOnMap(MapName); });
+		WaitUntil(Test, FString::Printf(TEXT("%s to start and fade in"), *MapName), 20.0, [MapName]() { return IsOnMap(MapName); });
 	}
 }
 
@@ -105,7 +112,9 @@ bool FStdFlowPlayTest::RunTest(const FString& Parameters)
 	// Logged on purpose by the refused travel below.
 	AddExpectedError(TEXT("does not exist; nothing happens"), EAutomationExpectedErrorFlags::Contains, 1);
 
-	StartPlayOnMap(this, Settings->MainMenuMap, TEXT("L_MainMenu"));
+	// The project's own main menu map, whatever it is called.
+	const FString MainMenuName = GetMapShortName(Settings->MainMenuMap);
+	StartPlayOnMap(this, Settings->MainMenuMap, MainMenuName);
 
 	Step([this]()
 	{
@@ -123,7 +132,9 @@ bool FStdFlowPlayTest::RunTest(const FString& Parameters)
 			TestFalse(TEXT("A second request during the transition is ignored"), Flow->StartGameplay());
 		}
 	});
-	WaitUntil(this, TEXT("L_TestGameplay to load and fade in"), 20.0, []() { return IsOnMap(TEXT("L_TestGameplay")); });
+	// The project's own gameplay map, whatever it is called.
+	const FString GameplayName = GetMapShortName(Settings->GameplayMap);
+	WaitUntil(this, GameplayName + TEXT(" to load and fade in"), 20.0, [GameplayName]() { return IsOnMap(GameplayName); });
 
 	Step([this]()
 	{
@@ -143,7 +154,7 @@ bool FStdFlowPlayTest::RunTest(const FString& Parameters)
 		UStdFlowSubsystem* Flow = GetFlow();
 		TestTrue(TEXT("Return To Main Menu starts a travel"), Flow && Flow->ReturnToMainMenu());
 	});
-	WaitUntil(this, TEXT("L_MainMenu to load again"), 20.0, []() { return IsOnMap(TEXT("L_MainMenu")); });
+	WaitUntil(this, MainMenuName + TEXT(" to load again"), 20.0, [MainMenuName]() { return IsOnMap(MainMenuName); });
 
 	ADD_LATENT_AUTOMATION_COMMAND(FEndPlayMapCommand());
 	return true;
@@ -157,7 +168,8 @@ bool FStdInputRemapTest::RunTest(const FString& Parameters)
 	static const FName Jump(TEXT("Jump"));
 	const EPlayerMappableKeySlot Slot = EPlayerMappableKeySlot::First;
 
-	StartPlayOnMap(this, UStdProjectSettings::Get()->GameplayMap, TEXT("L_TestGameplay"));
+	const TSoftObjectPtr<UWorld>& GameplayMap = UStdProjectSettings::Get()->GameplayMap;
+	StartPlayOnMap(this, GameplayMap, GetMapShortName(GameplayMap));
 
 	Step([this, Slot]()
 	{
