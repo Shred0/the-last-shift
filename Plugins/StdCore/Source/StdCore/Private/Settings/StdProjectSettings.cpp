@@ -55,6 +55,12 @@ UObject* StdSettings::LoadSettingAsset(const FSoftObjectPath& Path, const FStrin
 		return nullptr;
 	}
 
+	// Already in memory: native classes (/Script/...) always are, and they have no package file to check.
+	if (UObject* Loaded = Path.ResolveObject())
+	{
+		return Loaded;
+	}
+
 	// Checked first so a missing asset costs one warning of ours instead of an engine load error every call.
 	if (!FPackageName::DoesPackageExist(Path.GetLongPackageName()))
 	{

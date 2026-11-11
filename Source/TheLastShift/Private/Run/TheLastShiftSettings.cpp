@@ -36,3 +36,15 @@ int32 UTheLastShiftSettings::GetSeed(int32 Act) const
 	}
 	return AreaSeeds.IsValidIndex(Act - 1) ? AreaSeeds[Act - 1] : -1;
 }
+
+bool UTheLastShiftSettings::GetActTuning(int32 Act, FActTuning& OutTuning) const
+{
+	const FActTuning* Tuning = Act <= 0 ? &TestActTuning : (ActTuning.IsValidIndex(Act - 1) ? &ActTuning[Act - 1] : nullptr);
+	if (!Tuning)
+	{
+		return false;
+	}
+	OutTuning.JumpHomeSeconds = FMath::Clamp(Tuning->JumpHomeSeconds, 0.0, 1.0e12);
+	OutTuning.JumpBatteryDrop = FMath::Clamp(Tuning->JumpBatteryDrop, 0.0, 1.0);
+	return true;
+}

@@ -5,6 +5,7 @@
 
 #include "Area/AreaGenerator.h"
 #include "Run/RunSubsystem.h"
+#include "Time/HomeStateSubsystem.h"
 #include "Components/SpotLightComponent.h"
 #include "Debug/ScanTestListener.h"
 #include "Debug/TlsDebugCommon.h"
@@ -218,6 +219,22 @@ namespace TimeStateDebug
 		{
 			UE_LOG(LogTheLastShift, Log, TEXT("%s   energy: banked=%d session=%d total=%d boundDirector=%d"),
 				Prefix, Energy->GetBankedEnergy(), Energy->GetSessionEnergy(), Energy->GetTotalEnergy(), Energy->HasBoundDirector() ? 1 : 0);
+		}
+		if (const UHomeStateSubsystem* Home = UHomeStateSubsystem::Get(World))
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("%s   home: battery=%.4f homeSeconds=%.0f (%.3f years) jumps=%d lost=%d boundDirector=%d"),
+				Prefix, Home->GetBatteryFraction(), Home->GetHomeSecondsElapsed(), Home->GetHomeSecondsElapsed() / 31557600.0, Home->GetJumpCount(),
+				Home->IsRunLost() ? 1 : 0, Home->HasBoundDirector() ? 1 : 0);
+		}
+		if (const URunSubsystem* Run = URunSubsystem::Get(World))
+		{
+			FString List;
+			for (const FAreaSnapshot& Snapshot : Run->GetSnapshots())
+			{
+				List += FString::Printf(TEXT(" [act %d: battery %.4f, home %.0f s, banked %d]"), Snapshot.ActIndex, Snapshot.BatteryFraction, Snapshot.HomeSecondsElapsed, Snapshot.BankedEnergy);
+			}
+			UE_LOG(LogTheLastShift, Log, TEXT("%s   run: snapshots=%d%s savedRun=%d saveWrites=%d lossScreen=%d"), Prefix, Run->GetSnapshots().Num(), *List,
+				Run->HasSavedRun() ? 1 : 0, Run->GetSaveWrites(), Run->GetLossScreen() ? 1 : 0);
 		}
 		for (TActorIterator<AResidue> It(World); It; ++It)
 		{

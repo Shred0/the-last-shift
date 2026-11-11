@@ -315,11 +315,10 @@ namespace RunDebug
 	{
 		if (TimeStateDebug::ClickMainMenuPlay(World))
 		{
-			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: clicked the main menu's Play."));
+			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: clicked the main menu's New game."));
 			return true;
 		}
-		UStdFlowSubsystem* F = Flow(World);
-		return F && F->StartGameplay();
+		return false;
 	}
 
 	static void FinishChain(const TCHAR* Why)
@@ -385,7 +384,7 @@ namespace RunDebug
 			if (!PressPlay(World))
 			{
 				++GChain.Failures;
-				FinishChain(TEXT("StartGameplay refused"));
+				FinishChain(TEXT("no main menu with a New game button"));
 				return false;
 			}
 			return true;
@@ -412,8 +411,8 @@ namespace RunDebug
 					--GChain.ReplaysLeft;
 					GChain.bArrived = false;
 					GChain.bPendingStart = true;
-					GChain.ExpectedAct = UTheLastShiftSettings::Get()->GetActOfMap(UStdProjectSettings::Get()->GameplayMap.ToSoftObjectPath().GetLongPackageName());
-					UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: in the main menu, Play again (expecting act %d)."), GChain.ExpectedAct);
+					GChain.ExpectedAct = 1;
+					UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: in the main menu, New game again (expecting act %d)."), GChain.ExpectedAct);
 					return true;
 				}
 				FinishChain(nullptr);
@@ -528,6 +527,32 @@ namespace RunDebug
 		FAreaRecipe Test;
 		const bool bTest = Values.Num() > 0 && ParseRecipe(Values.Last(), Test);
 
+		auto ParseTuning = [](const FString& Value, FActTuning& Out)
+		{
+			return FActTuning::StaticStruct()->ImportText(*Value, &Out, nullptr, PPF_None, GLog, TEXT("FActTuning")) != nullptr;
+		};
+		Values.Reset();
+		Section->MultiFind(TEXT("ActTuning"), Values, true);
+		TArray<FActTuning> Tunings;
+		for (const FString& Value : Values)
+		{
+			FActTuning Tuning;
+			if (!ParseTuning(Value, Tuning))
+			{
+				UE_LOG(LogTheLastShift, Warning, TEXT("tls.Settings.Reload: ActTuning entry %d does not parse; nothing changed."), Tunings.Num());
+				return;
+			}
+			Tunings.Add(Tuning);
+		}
+		Values.Reset();
+		Section->MultiFind(TEXT("TestActTuning"), Values, true);
+		FActTuning TestTuning;
+		const bool bTestTuning = Values.Num() > 0 && ParseTuning(Values.Last(), TestTuning);
+		Values.Reset();
+		Section->MultiFind(TEXT("GrazeJumpFraction"), Values, true);
+		const bool bGraze = Values.Num() > 0;
+		const float Graze = bGraze ? FCString::Atof(*Values.Last()) : 0.f;
+
 		UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
 		Settings->AreaRecipes = Recipes;
 		Settings->AreaSeeds = Seeds;
@@ -535,18 +560,33 @@ namespace RunDebug
 		{
 			Settings->TestRecipe = Test;
 		}
+		Settings->ActTuning = Tunings;
+		if (bTestTuning)
+		{
+			Settings->TestActTuning = TestTuning;
+		}
+		if (bGraze)
+		{
+			Settings->GrazeJumpFraction = Graze;
+		}
 		FString Summary;
 		for (int32 I = 0; I < Recipes.Num(); ++I)
 		{
 			Summary += FString::Printf(TEXT("%sact %d: %d segments, seed %d"), I > 0 ? TEXT("; ") : TEXT(""), I + 1, Recipes[I].Segments.Num(), Seeds.IsValidIndex(I) ? Seeds[I] : -1);
 		}
+		for (int32 I = 0; I < Tunings.Num(); ++I)
+		{
+			Summary += FString::Printf(TEXT("; act %d jump %.0f s, battery %.4f"), I + 1, Tunings[I].JumpHomeSeconds, Tunings[I].JumpBatteryDrop);
+		}
+		Summary += FString::Printf(TEXT("; test jump %.0f s, battery %.4f; graze fraction %.3f"), Settings->TestActTuning.JumpHomeSeconds,
+			Settings->TestActTuning.JumpBatteryDrop, Settings->GrazeJumpFraction);
 		UE_LOG(LogTheLastShift, Display, TEXT("tls.Settings.Reload: %s; test recipe %s (from %s, in memory only)."), *Summary, bTest ? TEXT("reloaded") : TEXT("kept"), *Path);
 	}
 }
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 	TEXT("tls.RunChainTest"),
-	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0] [PauseCheck=1] [Replays=0]: FromMenu=1 first clicks the main menu's Play once no transition is running. On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, and checks the input state (game input in an area, menu input in the menu); with PauseCheck=1 it then opens and closes the pause menu, checking the input each way; then calls tls.Travel.Next until Travels are done; a travel after the last area must reach the main menu, where Replays>0 clicks Play again that many times. Quit=1 exits the game at the end (packaged builds)."),
+	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0] [PauseCheck=1] [Replays=0]: FromMenu=1 first clicks the main menu's New game once no transition is running (this clears the saved run). On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, and checks the input state (game input in an area, menu input in the menu); with PauseCheck=1 it then opens and closes the pause menu, checking the input each way; then calls tls.Travel.Next until Travels are done; a travel after the last area must reach the main menu, where Replays>0 clicks New game again that many times. Quit=1 exits the game at the end (packaged builds)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
@@ -568,8 +608,8 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 		{
 			RunDebug::GChain.LastWorld = World;
 			RunDebug::GChain.bPendingStart = true;
-			RunDebug::GChain.ExpectedAct = UTheLastShiftSettings::Get()->GetActOfMap(UStdProjectSettings::Get()->GameplayMap.ToSoftObjectPath().GetLongPackageName());
-			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: from %s, Play (the menu's button) once the menu's transition is over, then %d travels."), *From, RunDebug::GChain.TravelsLeft);
+			RunDebug::GChain.ExpectedAct = 1;
+			UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: from %s, New game (the menu's button) once the menu's transition is over, then %d travels."), *From, RunDebug::GChain.TravelsLeft);
 		}
 		else
 		{
@@ -582,7 +622,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 
 static FAutoConsoleCommand GTlsSettingsReloadCommand(
 	TEXT("tls.Settings.Reload"),
-	TEXT("tls.Settings.Reload: re-reads AreaRecipes, AreaSeeds and TestRecipe from Config/DefaultGame.ini into the settings in memory (recipe tuning without an editor restart); the next generation uses them."),
+	TEXT("tls.Settings.Reload: re-reads AreaRecipes, AreaSeeds, TestRecipe, ActTuning, TestActTuning and GrazeJumpFraction from Config/DefaultGame.ini into the settings in memory (tuning without an editor restart); the next generation and the next jump use them."),
 	FConsoleCommandDelegate::CreateStatic(&RunDebug::ReloadSettings));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsTravelTestCommand(

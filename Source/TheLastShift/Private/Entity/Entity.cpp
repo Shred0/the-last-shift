@@ -156,6 +156,8 @@ void AEntity::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, E
 
 	if (NewState == ETimeState::Stopped)
 	{
+		bExitPending = true;
+		bLastExitGraze = false;
 		if (State == EEntityState::Awake)
 		{
 			Manifest(GetSpawnDistanceForNextStop(), TEXT("stop"));
@@ -163,11 +165,32 @@ void AEntity::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, E
 		return;
 	}
 
-	if (OldState == ETimeState::Stopped && bManifested)
+	if (OldState == ETimeState::Stopped)
 	{
-		RecordExit(Reason);
+		RecordStopExit(Reason);
 	}
 	Unmanifest();
+}
+
+void AEntity::RecordStopExit(EStopExitReason Reason)
+{
+	if (!bExitPending)
+	{
+		return;
+	}
+	bExitPending = false;
+	bLastExitGraze = false;
+	if (!bManifested)
+	{
+		return;
+	}
+	RecordExit(Reason);
+	const float Radius = FMath::Clamp(GrazeRadius, 0.f, 5000.f);
+	bLastExitGraze = Reason == EStopExitReason::Resumed && Radius > 0.f && LastExitPathDistance >= 0.f && LastExitPathDistance <= Radius;
+	if (bLastExitGraze)
+	{
+		UE_LOG(LogEntity, Log, TEXT("%s: graze: resumed with the figure at path distance %.1f cm (GrazeRadius %.1f cm)."), *GetName(), LastExitPathDistance, Radius);
+	}
 }
 
 void AEntity::HandleBeat(int32 BeatIndex)

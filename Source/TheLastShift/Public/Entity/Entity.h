@@ -23,7 +23,7 @@ enum class EEntityState : uint8
 	Awake
 };
 
-/** What contact with the figure does to the Stop (per act later, from DT_ActTuning). */
+/** What contact with the figure does to the Stop (set on each area map's entity). */
 UENUM(BlueprintType)
 enum class EEntityContactResponse : uint8
 {
@@ -219,6 +219,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Contact")
 	EEntityContactResponse ContactResponse = EEntityContactResponse::Rewind;
 
+	/**
+	 * A voluntary Resume with the figure manifested and its path distance at the exit (GetLastExitPathDistance, the
+	 * distance the exit already records) within this radius is a graze: the home jumps by a fraction of the act's jump.
+	 * 0 = off.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Contact", meta = (ClampMin = "0.0", ClampMax = "5000.0", Units = "cm"))
+	float GrazeRadius = 400.f;
+
 	// --- Trail ---
 
 	/** Length of path ahead of the figure covered by the trail. */
@@ -318,6 +326,20 @@ public:
 	/** Path distance recorded at the last exit from a Stop while manifested; -1 before the first. */
 	UFUNCTION(BlueprintPure, Category = "Entity", meta = (Units = "cm"))
 	float GetLastExitPathDistance() const { return LastExitPathDistance; }
+
+	/**
+	 * Records the exit of the current Stop now, if it has not been recorded yet (once per Stop). The entity records it
+	 * itself when the time state changes; a listener of the scan director's OnStopExited calls this first so that it
+	 * reads this Stop's exit whatever the order of the time-state listeners. No-op when nothing is pending.
+	 */
+	void RecordStopExit(EStopExitReason Reason);
+
+	/**
+	 * True when the last Stop ended with a voluntary Resume while the figure was manifested and its recorded exit path
+	 * distance was within GrazeRadius (GrazeRadius > 0). False after any other exit, and while dormant.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	bool WasLastExitGraze() const { return bLastExitGraze; }
 
 	UFUNCTION(BlueprintPure, Category = "Entity")
 	FEntitySpawnReport GetLastSpawnReport() const { return LastSpawnReport; }
@@ -435,6 +457,10 @@ private:
 	float NextSpawnDistance = -1.f;
 	float ProximityAtExit = 0.f;
 	float LastExitPathDistance = -1.f;
+
+	/** A Stop began and its exit has not been recorded yet. */
+	bool bExitPending = false;
+	bool bLastExitGraze = false;
 
 	FEntitySpawnReport LastSpawnReport;
 

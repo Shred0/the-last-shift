@@ -28,8 +28,14 @@
 #include "InputMappingContext.h"
 #include "Settings/StdProjectSettings.h"
 #include "TheLastShift.h"
+#include "Components/TextBlock.h"
+#include "Run/RunActListWidget.h"
+#include "Run/RunSubsystem.h"
+#include "UI/StdChoiceListWidget.h"
 #include "UI/StdMainMenuWidget.h"
 #include "UI/StdPauseMenuWidget.h"
+#include "Containers/Ticker.h"
+#include "Framework/Application/SlateApplication.h"
 #include "UnrealClient.h"
 #include "UObject/UnrealType.h"
 
@@ -54,7 +60,12 @@ namespace TimeStateDebug
 	static UStdScreenWidget* FindTopScreen(APlayerController* PC)
 	{
 		UStdScreenWidget* Root = nullptr;
-		if (const AStdMenuPlayerController* MenuPC = Cast<AStdMenuPlayerController>(PC))
+		const URunSubsystem* Run = URunSubsystem::Get(PC);
+		if (URunActListWidget* Loss = Run ? Run->GetLossScreen() : nullptr; Loss && Loss->IsInViewport() && Loss->GetOwningPlayer() == PC)
+		{
+			Root = Loss;
+		}
+		else if (const AStdMenuPlayerController* MenuPC = Cast<AStdMenuPlayerController>(PC))
 		{
 			Root = MenuPC->GetMainMenu();
 		}
@@ -193,21 +204,155 @@ namespace TimeStateDebug
 			Prefix, *FString::Join(R.MappingContexts, TEXT(", ")), R.bPawnContextApplied ? 1 : 0, *FString::Join(R.PawnActionKeys, TEXT(", ")));
 	}
 
-	bool ClickMainMenuPlay(UWorld* World)
+	bool ClickMainMenuButton(UWorld* World, FName Name)
 	{
 		const AStdMenuPlayerController* MenuPC = Cast<AStdMenuPlayerController>(World ? World->GetFirstPlayerController() : nullptr);
 		UStdMainMenuWidget* Menu = MenuPC ? MenuPC->GetMainMenu() : nullptr;
-		// Button_Play is a protected BindWidget: read it by name, then click it as the player would.
-		const FObjectProperty* Property = Menu ? FindFProperty<FObjectProperty>(Menu->GetClass(), TEXT("Button_Play")) : nullptr;
-		UButton* Play = Property ? Cast<UButton>(Property->GetObjectPropertyValue_InContainer(Menu)) : nullptr;
-		if (!Play)
+		// The buttons are protected members: find them by name in the tree, then click as the player would.
+		UButton* Button = Menu && Menu->WidgetTree ? Cast<UButton>(Menu->WidgetTree->FindWidget(Name)) : nullptr;
+		if (!Button || Button->GetVisibility() == ESlateVisibility::Collapsed || !Button->GetIsEnabled() || !Menu->IsVisible())
 		{
 			return false;
 		}
-		Play->OnClicked.Broadcast();
+		Button->OnClicked.Broadcast();
+		return true;
+	}
+
+	bool ClickMainMenuPlay(UWorld* World)
+	{
+		return ClickMainMenuButton(World, TEXT("Button_NewGame")) || ClickMainMenuButton(World, TEXT("Button_Play"));
+	}
+
+	static UStdChoiceListWidget* FindChoiceList(UWorld* World)
+	{
+		return Cast<UStdChoiceListWidget>(FindTopScreen(World ? World->GetFirstPlayerController() : nullptr));
+	}
+
+	bool ClickChoiceEntry(UWorld* World, int32 Index)
+	{
+		UStdChoiceListWidget* List = FindChoiceList(World);
+		UButton* Button = List ? List->GetEntryButton(Index) : nullptr;
+		if (!Button || !Button->GetIsEnabled())
+		{
+			return false;
+		}
+		Button->OnClicked.Broadcast();
+		return true;
+	}
+
+	FString DescribeChoiceList(UWorld* World)
+	{
+		const UStdChoiceListWidget* List = FindChoiceList(World);
+		if (!List)
+		{
+			return FString();
+		}
+		TArray<FString> Labels;
+		for (int32 Index = 0; Index < List->GetEntryCount(); ++Index)
+		{
+			Labels.Add(List->GetEntryLabel(Index).ToString());
+		}
+		if (List->GetEntryButton(INDEX_NONE))
+		{
+			Labels.Add(TEXT("<back>"));
+		}
+		return FString::Join(Labels, TEXT(" | "));
+	}
+
+	FString DescribeMainMenu(UWorld* World)
+	{
+		const AStdMenuPlayerController* MenuPC = Cast<AStdMenuPlayerController>(World ? World->GetFirstPlayerController() : nullptr);
+		UStdMainMenuWidget* Menu = MenuPC ? MenuPC->GetMainMenu() : nullptr;
+		if (!Menu || !Menu->WidgetTree)
+		{
+			return FString();
+		}
+		TArray<FString> Labels;
+		Menu->WidgetTree->ForEachWidget([&Labels](UWidget* Widget)
+		{
+			const UButton* Button = Cast<UButton>(Widget);
+			if (!Button || Button->GetVisibility() == ESlateVisibility::Collapsed)
+			{
+				return;
+			}
+			const UTextBlock* Label = Cast<UTextBlock>(Button->GetContent());
+			Labels.Add(Label ? Label->GetText().ToString() : Button->GetName());
+		});
+		return FString::Join(Labels, TEXT(" | "));
+	}
+}
+
+namespace TimeStateDebug
+{
+	/** The keys tls.UI.Keys still has to send, and the world it acts on. */
+	struct FUIKeys
+	{
+		TArray<FKey> Keys;
+		int32 Next = 0;
+		TWeakObjectPtr<UWorld> World;
+		bool bActive = false;
+	};
+	static FUIKeys GUIKeys;
+
+	static FString FocusName(UWorld* World)
+	{
+		const FInputReport R = BuildInputReport(World);
+		return R.MenuFocus.IsEmpty() ? FString(TEXT("<none>")) : R.MenuFocus;
+	}
+
+	static bool TickUIKeys(float)
+	{
+		UWorld* World = GUIKeys.World.Get();
+		if (!World || !FSlateApplication::IsInitialized() || GUIKeys.Next >= GUIKeys.Keys.Num())
+		{
+			UE_LOG(LogTheLastShift, Display, TEXT("tls.UI.Keys: done, focus %s, top screen %s."), World ? *FocusName(World) : TEXT("-"),
+				World ? *GetNameSafe(FindTopScreen(World->GetFirstPlayerController())) : TEXT("-"));
+			GUIKeys.bActive = false;
+			return false;
+		}
+		const FKey Key = GUIKeys.Keys[GUIKeys.Next++];
+		const FString Before = FocusName(World);
+		// A real key through Slate: navigation, Accept and Back go where a keyboard or a gamepad would send them.
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const FKeyEvent Down(Key, FModifierKeysState(), 0, false, 0, 0);
+		const bool bHandled = Slate.ProcessKeyDownEvent(Down);
+		const FKeyEvent Up(Key, FModifierKeysState(), 0, false, 0, 0);
+		Slate.ProcessKeyUpEvent(Up);
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.UI.Keys: %s (handled %d): focus %s -> %s, top screen %s."), *Key.ToString(), bHandled ? 1 : 0, *Before,
+			*FocusName(World), *GetNameSafe(FindTopScreen(World->GetFirstPlayerController())));
 		return true;
 	}
 }
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsUIKeysCommand(
+	TEXT("tls.UI.Keys"),
+	TEXT("tls.UI.Keys Key [Key ...]: focuses the default widget of the topmost menu screen (the console box holds the focus while a command is typed), then sends each key through Slate, one per tick, as a keyboard or gamepad would (Down, Up, Enter, Escape, Gamepad_DPad_Down, Gamepad_FaceButton_Bottom, Gamepad_FaceButton_Right, ...), logging the focused widget after each."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		using namespace TimeStateDebug;
+		UWorld* World = ResolveGameWorld(InWorld);
+		APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		UStdScreenWidget* Screen = FindTopScreen(PC);
+		if (!Screen || GUIKeys.bActive || Args.Num() == 0)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.UI.Keys: needs keys and a menu screen on screen (main menu, Select act, pause menu or loss screen)."));
+			return;
+		}
+		GUIKeys = FUIKeys();
+		for (const FString& Arg : Args)
+		{
+			const FKey Key(*Arg);
+			if (Key.IsValid())
+			{
+				GUIKeys.Keys.Add(Key);
+			}
+		}
+		GUIKeys.World = World;
+		GUIKeys.bActive = true;
+		Screen->FocusDefaultWidget();
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.UI.Keys: %d keys on %s, start focus %s."), GUIKeys.Keys.Num(), *Screen->GetName(), *FocusName(World));
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&TickUIKeys), 0.15f);
+	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsInputReportCommand(
 	TEXT("tls.InputReport"),
@@ -222,11 +367,11 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsInputReportCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsMenuPlayCommand(
 	TEXT("tls.MenuPlay"),
-	TEXT("tls.MenuPlay: clicks the main menu's Play button (the same handler as a real click)."),
+	TEXT("tls.MenuPlay: clicks the main menu's New game button (the same handler as a real click)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
-		UE_LOG(LogTheLastShift, Display, TEXT("tls.MenuPlay: %s."), TimeStateDebug::ClickMainMenuPlay(World) ? TEXT("Play clicked") : TEXT("no main menu with a Play button"));
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.MenuPlay: %s."), TimeStateDebug::ClickMainMenuPlay(World) ? TEXT("New game clicked") : TEXT("no main menu with a New game button"));
 	}));
 
 #endif // !UE_BUILD_SHIPPING

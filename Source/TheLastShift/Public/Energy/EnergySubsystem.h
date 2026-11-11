@@ -66,6 +66,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Energy")
 	void AddBankedEnergy(int32 Amount);
 
+	/** Sets the banked energy (clamped to >= 0) and drops any session energy: a run snapshot being restored. */
+	UFUNCTION(BlueprintCallable, Category = "Energy")
+	void RestoreBankedEnergy(int32 Banked);
+
 	/** True while bound to a scan director's OnStopExited. */
 	UFUNCTION(BlueprintPure, Category = "Energy")
 	bool HasBoundDirector() const { return BoundDirector.IsValid(); }

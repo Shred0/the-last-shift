@@ -160,6 +160,14 @@ void UEnergySubsystem::AddBankedEnergy(int32 Amount)
 	BroadcastChanged();
 }
 
+void UEnergySubsystem::RestoreBankedEnergy(int32 Banked)
+{
+	BankedEnergy = FMath::Max(Banked, 0);
+	SessionEnergy = 0;
+	UE_LOG(LogEnergy, Log, TEXT("Energy: restored, banked %d, session 0."), BankedEnergy);
+	BroadcastChanged();
+}
+
 void UEnergySubsystem::BroadcastChanged()
 {
 	OnEnergyChanged.Broadcast(BankedEnergy, SessionEnergy);

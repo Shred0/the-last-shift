@@ -85,8 +85,20 @@ namespace TimeStateDebug
 	/** One line of input state with a verdict: "game" (IsGameReady), "menu" (IsMenuReady) or "none". */
 	void LogInputReport(UWorld* World, const TCHAR* Prefix);
 
-	/** Clicks the StdCore main menu's Play button, as a real click would. False when no main menu is shown. */
+	/** Clicks the main menu's New game (the game's menu has no Play), as a real click would. False when no main menu is shown. */
 	bool ClickMainMenuPlay(UWorld* World);
+
+	/** Clicks the main menu button named Name (Button_Continue, Button_SelectAct, Button_NewGame, ...). False when absent or hidden. */
+	bool ClickMainMenuButton(UWorld* World, FName Name);
+
+	/** Clicks entry Index (INDEX_NONE = back) of the topmost choice list (the loss screen, or Select act over the main menu). */
+	bool ClickChoiceEntry(UWorld* World, int32 Index);
+
+	/** Labels of the topmost choice list's entries ("" when none is shown). */
+	FString DescribeChoiceList(UWorld* World);
+
+	/** Labels of the visible main menu buttons, in order ("" when no main menu is shown). */
+	FString DescribeMainMenu(UWorld* World);
 
 	/** One line of time/scan state, then one line per entity in the world. */
 	void LogReport(UWorld* World, const TCHAR* Prefix);

@@ -25,6 +25,7 @@ public class TheLastShift : ModuleRules
 			"NavigationSystem",
 			"PCG",
 			"StdCore",
+			"Slate",
 			"SlateCore"
 		});
 
