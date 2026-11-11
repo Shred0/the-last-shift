@@ -651,6 +651,10 @@ bool AEntity::Manifest(float TargetDistance, const TCHAR* Why)
 	Report.bHiddenFromScans = Best->bHidden;
 	Report.bInForwardHemisphere = Best->bForward;
 	Report.DistanceFromPreviousSpawn = bHasPreviousSpawn ? static_cast<float>(FVector::Dist(Best->Location, PreviousSpawnLocation)) : -1.f;
+	for (const FCandidate& Candidate : Candidates)
+	{
+		Report.NoLineOfSightCandidates += Candidate.bNoLineOfSight ? 1 : 0;
+	}
 	LastSpawnReport = Report;
 	bHasPreviousSpawn = true;
 	PreviousSpawnLocation = Best->Location;
@@ -871,9 +875,8 @@ FLidarSourceSettings AEntity::GetLidarSourceSettings_Implementation() const
 	FLidarSourceSettings Settings;
 	Settings.Color = EntityColor;
 	Settings.IntensityMultiplier = IntensityMultiplier;
-	// Scans remember still things, not moving ones: timed from the scan that showed them, never extended.
-	Settings.FadeMode = ELidarFadeMode::Transient;
-	Settings.HoldSeconds = FMath::Clamp(PointHoldSeconds, 0.f, 30.f);
+	// Shown by the latest scan only: full until the next scan starts, then gone, so there is one snapshot at most.
+	Settings.FadeMode = ELidarFadeMode::UntilNextScan;
 	Settings.VanishSeconds = FMath::Clamp(PointVanishSeconds, 0.f, 30.f);
 	Settings.bOccludeByCapture = true;
 	Settings.OcclusionTolerance = OcclusionTolerance;

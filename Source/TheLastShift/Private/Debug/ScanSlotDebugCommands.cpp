@@ -4,6 +4,7 @@
 // alive scans and the particle count of every slot's emitters after each one, so the ghost cap and the cost of a
 // long Stop can be checked without a keyboard. Development builds only.
 
+#include "Area/AreaGenerator.h"
 #include "Containers/Ticker.h"
 #include "Debug/TlsDebugCommon.h"
 #include "Engine/World.h"
@@ -289,6 +290,173 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLidarMaxAliveScansCommand(
 			Lidar->MaxAliveScans = FCString::Atoi(*Args[0]);
 		}
 		UE_LOG(LogTheLastShift, Log, TEXT("tls.Lidar.MaxAliveScans: %d"), Lidar->MaxAliveScans);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsLidarRangeCommand(
+	TEXT("tls.Lidar.Range"),
+	TEXT("tls.Lidar.Range [Cm]: sets the player lidar's MaxRange (applied at its next scan); without an argument, logs it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		ULidarScanComponent* Lidar = ScanSlotDebug::FindPlayerLidar(TimeStateDebug::ResolveGameWorld(InWorld));
+		if (!Lidar)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Lidar.Range: no player lidar."));
+			return;
+		}
+		if (Args.Num() > 0)
+		{
+			Lidar->MaxRange = FMath::Clamp(FCString::Atof(*Args[0]), 100.f, 30000.f);
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Lidar.Range: MaxRange %.0f cm"), Lidar->MaxRange);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsLidarResolutionCommand(
+	TEXT("tls.Lidar.Resolution"),
+	TEXT("tls.Lidar.Resolution [N]: sets the player lidar's CaptureResolution, the points-per-scan budget N x N (applied at its next scan); without an argument, logs it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		ULidarScanComponent* Lidar = ScanSlotDebug::FindPlayerLidar(TimeStateDebug::ResolveGameWorld(InWorld));
+		if (!Lidar)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Lidar.Resolution: no player lidar."));
+			return;
+		}
+		if (Args.Num() > 0)
+		{
+			Lidar->CaptureResolution = FMath::Clamp(FCString::Atoi(*Args[0]), 64, 1024);
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Lidar.Resolution: CaptureResolution %d (%d points per scan before thinning)"),
+			Lidar->CaptureResolution, Lidar->CaptureResolution * Lidar->CaptureResolution);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsLidarDepthCheckCommand(
+	TEXT("tls.Lidar.DepthCheck"),
+	TEXT("tls.Lidar.DepthCheck [Samples=10] [MinCm=20000]: reads back the newest scan's depth capture and, for Samples texels whose point lies farther than MinCm from the capture origin (spread evenly over the image), compares the point the contract places at that texel centre (without SurfaceBias) with a ray cast along the same ray against the area generator's plan boxes (exactly the boxes PCG builds, backdrop included; the backdrop has no collision) and, for reference, a physics line trace. Logs every sample, then the median and the worst distance."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
+		ULidarScanComponent* Lidar = ScanSlotDebug::FindPlayerLidar(World);
+		if (!Lidar)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Lidar.DepthCheck: no player lidar."));
+			return;
+		}
+		const int32 Samples = Args.Num() > 0 ? FMath::Clamp(FCString::Atoi(*Args[0]), 1, 100) : 10;
+		const double MinCm = Args.Num() > 1 ? FMath::Clamp(FCString::Atof(*Args[1]), 0.f, 30000.f) : 20000.0;
+
+		TArray<float> Depth;
+		int32 Width = 0;
+		int32 Height = 0;
+		FLidarScanContext Context;
+		if (!Lidar->ReadNewestScanDepth(Depth, Width, Height, Context))
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Lidar.DepthCheck: no alive scan, or the depth readback failed."));
+			return;
+		}
+
+		// Texel centre ray of the contract: u' = 2 U - 1, v' = 1 - 2 V; the forward component of the ray is exactly 1.
+		auto RayOf = [&](int32 X, int32 Y)
+		{
+			const double U = (X + 0.5) / Width * 2.0 - 1.0;
+			const double V = 1.0 - (Y + 0.5) / Height * 2.0;
+			return Context.CaptureForward + Context.CaptureRight * (U * Context.TanHalfFOV.X) + Context.CaptureUp * (V * Context.TanHalfFOV.Y);
+		};
+		TArray<int32> Far;
+		for (int32 Index = 0; Index < Depth.Num(); ++Index)
+		{
+			const float D = Depth[Index];
+			if (D > 1.f && D < Context.MaxRange && RayOf(Index % Width, Index / Width).Size() * D > MinCm)
+			{
+				Far.Add(Index);
+			}
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Lidar.DepthCheck: scan %d, %dx%d, MaxRange %.0f cm, origin %s: %d of %d texels farther than %.0f cm."),
+			Context.ScanIndex, Width, Height, Context.MaxRange, *Context.CaptureOrigin.ToString(), Far.Num(), Depth.Num(), MinCm);
+		if (Far.Num() == 0)
+		{
+			return;
+		}
+
+		// The geometry as built: every plan box of the area generator (unit cube scaled, no rotation).
+		TArray<FBox> Boxes;
+		if (const AAreaGenerator* Generator = AAreaGenerator::Find(World))
+		{
+			for (const TArray<FTransform>* Plan : { &Generator->PlanFloors, &Generator->PlanWalls, &Generator->PlanCurbs,
+				&Generator->PlanPillars, &Generator->PlanCeilings, &Generator->PlanBackdrop })
+			{
+				for (const FTransform& T : *Plan)
+				{
+					const FVector Half = T.GetScale3D().GetAbs() * 50.0;
+					Boxes.Add(FBox(T.GetLocation() - Half, T.GetLocation() + Half));
+				}
+			}
+		}
+		auto CastBoxes = [&Boxes](const FVector& Start, const FVector& Dir, double& OutT)
+		{
+			OutT = TNumericLimits<double>::Max();
+			for (const FBox& Box : Boxes)
+			{
+				double TMin = 0.0;
+				double TMax = TNumericLimits<double>::Max();
+				bool bHit = true;
+				for (int32 Axis = 0; Axis < 3 && bHit; ++Axis)
+				{
+					const double D = Dir[Axis];
+					const double O = Start[Axis];
+					if (FMath::Abs(D) < 1.e-12)
+					{
+						bHit = O >= Box.Min[Axis] && O <= Box.Max[Axis];
+						continue;
+					}
+					double T1 = (Box.Min[Axis] - O) / D;
+					double T2 = (Box.Max[Axis] - O) / D;
+					if (T1 > T2)
+					{
+						Swap(T1, T2);
+					}
+					TMin = FMath::Max(TMin, T1);
+					TMax = FMath::Min(TMax, T2);
+					bHit = TMin <= TMax;
+				}
+				if (bHit && TMin > 0.0 && TMin < OutT)
+				{
+					OutT = TMin;
+				}
+			}
+			return OutT < TNumericLimits<double>::Max();
+		};
+
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(TlsLidarDepthCheck), true, Lidar->GetOwner());
+		TArray<double> Errors;
+		for (int32 Sample = 0; Sample < Samples; ++Sample)
+		{
+			const int32 Index = Far[FMath::Min(Far.Num() - 1, (Sample * Far.Num() + Far.Num() / 2) / Samples)];
+			const int32 X = Index % Width;
+			const int32 Y = Index / Width;
+			const FVector Ray = RayOf(X, Y);
+			const FVector Point = Context.CaptureOrigin + Ray * Depth[Index];
+			const FVector Dir = Ray.GetSafeNormal();
+			double BoxT = 0.0;
+			const bool bBox = CastBoxes(Context.CaptureOrigin, Dir, BoxT);
+			const double Error = bBox ? FVector::Dist(Point, Context.CaptureOrigin + Dir * BoxT) : -1.0;
+			if (bBox)
+			{
+				Errors.Add(Error);
+			}
+			FHitResult Hit;
+			const bool bTrace = World->LineTraceSingleByChannel(Hit, Context.CaptureOrigin, Context.CaptureOrigin + Dir * (Context.MaxRange * 2.0), ECC_Visibility, Params);
+			UE_LOG(LogTheLastShift, Log, TEXT("tls.Lidar.DepthCheck sample %d: texel (%d, %d), point at %.2f cm along the ray; plan-box cast %s at %.2f cm, distance %.3f cm; physics trace %s at %.1f cm"),
+				Sample, X, Y, (Point - Context.CaptureOrigin).Size(), bBox ? TEXT("hit") : TEXT("missed"), bBox ? BoxT : 0.0, Error,
+				bTrace ? TEXT("hit") : TEXT("missed (no collision)"), bTrace ? Hit.Distance : 0.f);
+		}
+
+		Errors.Sort();
+		if (Errors.Num() > 0)
+		{
+			const double Median = Errors.Num() % 2 ? Errors[Errors.Num() / 2] : 0.5 * (Errors[Errors.Num() / 2 - 1] + Errors[Errors.Num() / 2]);
+			UE_LOG(LogTheLastShift, Log, TEXT("tls.Lidar.DepthCheck: %d of %d rays hit a plan box (%d boxes); point-to-hit distance median %.3f cm, worst %.3f cm (SurfaceBias %.1f cm is not applied to the point)."),
+				Errors.Num(), Samples, Boxes.Num(), Median, Errors.Last(), Lidar->SurfaceBias);
+		}
 	}));
 
 #endif // !UE_BUILD_SHIPPING

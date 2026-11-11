@@ -38,6 +38,9 @@ struct FLidarScanSlot
 	UPROPERTY(Transient)
 	FLidarScanContext Context;
 
+	/** Real time at which a later scan of the same component started; negative while this is the newest scan. */
+	double SupersededRealTime = -1.0;
+
 	/** Fade-out started by ClearScans: total duration (0 = not fading) and time elapsed so far. */
 	float FadeOutDuration = 0.f;
 	float FadeOutElapsed = 0.f;
@@ -124,6 +127,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Lidar|Diagnostics")
 	TArray<FLidarScanSlotStats> GetScanSlotStats() const;
 
+	/**
+	 * Diagnostics: reads back the depth capture of the newest alive scan (a synchronous GPU readback, a few ms).
+	 * OutDepth holds OutWidth x OutHeight planar depths along the capture's forward axis, row by row from the top of
+	 * the image (0 = no sample); OutContext is that scan's capture pose. False when no scan is alive or the readback failed.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Diagnostics")
+	bool ReadNewestScanDepth(TArray<float>& OutDepth, int32& OutWidth, int32& OutHeight, FLidarScanContext& OutContext) const;
+
 	// --- Injected points ---
 
 	/**
@@ -157,12 +168,15 @@ public:
 
 	// --- Capture (applied on the next scan) ---
 
-	/** Width and height of the depth capture; one point per sample. */
+	/**
+	 * Width and height of the depth capture; one point per sample, so a scan has up to CaptureResolution^2 points
+	 * (fewer after MinSampleDepth, MaxRange and the near thinning). This is the points-per-scan budget.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Capture", meta = (ClampMin = "64", ClampMax = "1024", UIMin = "64", UIMax = "1024"))
 	int32 CaptureResolution = 256;
 
 	/** Samples farther than this (and sky) produce no point. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Capture", meta = (ClampMin = "100.0", ClampMax = "20000.0", Units = "cm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Capture", meta = (ClampMin = "100.0", ClampMax = "30000.0", Units = "cm"))
 	float MaxRange = 3000.f;
 
 	/** Horizontal capture FOV. 0 = use the FOV of the camera this component is attached to (90 if none). */
@@ -309,8 +323,11 @@ public:
 	 * (its points disappear in both emitters) and its slot holds the new scan. Lowering it removes the oldest scans at
 	 * the next scan (or at once through ApplyLiveSettings).
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Scans", meta = (ClampMin = "1", ClampMax = "6", UIMin = "1", UIMax = "6"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Scans", meta = (ClampMin = "1", ClampMax = "16", UIMin = "1", UIMax = "16"))
 	int32 MaxAliveScans = 3;
+
+	/** Upper clamp of MaxAliveScans. */
+	static constexpr int32 MaxAliveScansLimit = 16;
 
 	// --- Assets ---
 

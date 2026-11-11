@@ -77,6 +77,10 @@ struct THELASTSHIFT_API FEntitySpawnReport
 	UPROPERTY(BlueprintReadOnly, Category = "Entity")
 	int32 ValidCandidates = 0;
 
+	/** Candidates with no line of sight from the camera, whatever their distance. */
+	UPROPERTY(BlueprintReadOnly, Category = "Entity")
+	int32 NoLineOfSightCandidates = 0;
+
 	/** Valid candidates within SpawnRepeatRadius of the previous spawn. */
 	UPROPERTY(BlueprintReadOnly, Category = "Entity")
 	int32 ValidNearPreviousSpawn = 0;
@@ -137,8 +141,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityContact);
  * moves continuously at Speed along a navigation path to the player, recomputed on every beat; it never moves in
  * Normal time. Within ContactRadius of the player it ends the Stop through the director as ContactResponse says. On a
  * voluntary Resume the next spawn distance becomes clamp(DistanceAtExit - ApproachPerExit, MinSpawnDistance,
- * InitialSpawnDistance); after any contact it is MinSpawnDistance. Its points are transient: full for
- * PointHoldSeconds after the scan that showed them, then gone over PointVanishSeconds.
+ * InitialSpawnDistance); after any contact it is MinSpawnDistance. Its points are shown by the latest scan only: full
+ * until the next scan starts, then gone over PointVanishSeconds, so at most one snapshot of it is ever on screen.
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API AEntity : public AActor, public ILidarPointSource
@@ -268,13 +272,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Render", meta = (ClampMin = "0.0", ClampMax = "16.0"))
 	float IntensityMultiplier = 1.f;
 
-	/** Seconds after the scan that showed them during which entity points stay at full intensity. */
+	/**
+	 * Entity points stay at full intensity until the next scan starts; then they go to zero over this time and are
+	 * removed (lidar fade mode UntilNextScan).
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Render", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
-	float PointHoldSeconds = 0.5f;
-
-	/** Seconds over which entity points go from full intensity to zero once the hold is over. Later scans never extend it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Render", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
-	float PointVanishSeconds = 2.0f;
+	float PointVanishSeconds = 0.3f;
 
 	/** How far behind the captured surface an entity point may be and still be drawn. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Render", meta = (ClampMin = "0.0", ClampMax = "200.0", Units = "cm"))

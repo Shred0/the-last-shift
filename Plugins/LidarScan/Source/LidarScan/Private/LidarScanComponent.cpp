@@ -51,8 +51,9 @@
  * depth is closer to the centre's is kept (a neighbour off the target edge, or with depth <= 1 or >= MaxRange, is
  * never kept). If even the kept neighbour differs from the centre depth by more than 0.25 x the centre depth, the
  * sample sits on a depth discontinuity (a one-texel-wide feature) and its normal is the capture ray. On a plane the
- * per-texel depth step only reaches 0.25 x depth at grazing angles under about 2 degrees, beyond MaxRange at eye
- * height. N = normalize(cross(Tangent X, Tangent Y)), then flipped if needed so that dot(N, CaptureOrigin - S) >= 0,
+ * per-texel depth step only reaches 0.25 x depth at grazing angles under about 2 degrees (at a 256 capture over
+ * about 100 degrees): a floor seen from eye height (1.6 m) farther than about 45 m, so with a long MaxRange the far
+ * floor takes the capture ray as its normal. N =normalize(cross(Tangent X, Tangent Y)), then flipped if needed so that dot(N, CaptureOrigin - S) >= 0,
  * with S = LidarSurfacePosition: the normal points to the side of the surface the capture saw (the fallback capture
  * ray is flipped the same way). The angle term below only uses |dot|; the surface offset uses the sign.
  * A particle with LidarNormal = 0 (injected points, which have no normal) gets an angle term of 1.
@@ -109,11 +110,16 @@
  *   rgb   = InjectedColors[i].rgb * InjectedIntensity * clamp(compensation, DensityBoostMin, DensityBoostMax),
  *   alpha = InjectedColors[i].a * FadeOutAlpha * lerp(1, lerp(1, AlphaFloor, Age / FadeDuration), FadeWeight)
  *           * TransientAlpha,
- *   TransientAlpha = 1                                                        if Hold < 0,
- *   TransientAlpha = saturate(1 - (ScanRealAge - Hold) / max(Vanish, 0.001))  otherwise,
- * so FadeWeight 0 skips the age fade but not the ClearScans fade-out. ELidarFadeMode maps to
- * ScanFade = (FadeWeight 1, Hold -1), None = (0, -1), Transient = (0, HoldSeconds) with Vanish = VanishSeconds.
+ *   TransientAlpha = saturate(1 - (ScanRealAge - Hold) / max(Vanish, 0.001))  if Hold >= 0     (Transient),
+ *   TransientAlpha = saturate(1 - SupersededAge / max(Vanish, 0.001))         if Hold < -1.5   (UntilNextScan),
+ *   TransientAlpha = 1                                                        otherwise (Hold = -1),
+ * and a particle with Hold < -1.5 is killed (DataInstance.Alive = false) once SupersededAge >= max(Vanish, 0.001).
+ * FadeWeight 0 skips the age fade but not the ClearScans fade-out. ELidarFadeMode maps to
+ * ScanFade = (FadeWeight 1, Hold -1), None = (0, -1), Transient = (0, HoldSeconds) with Vanish = VanishSeconds,
+ * UntilNextScan = (0, -2) with Vanish = VanishSeconds.
  * ScanRealAge is the real time since the scan, pushed live, so a transient point is timed from its own scan only.
+ * SupersededAge is the real time since a later scan of the same component started, pushed live; it is -1 while the
+ * instance holds the newest scan (TransientAlpha 1, never killed). Captured points read neither value.
  * InjectedIntensity is PointIntensity and FadeOutAlpha the ClearScans multiplier, both pushed live.
  */
 namespace LidarScanParams
@@ -151,6 +157,7 @@ namespace LidarScanParams
 	static const FName InjectedParams(TEXT("User.InjectedParams"));
 	static const FName InjectedTransient(TEXT("User.InjectedTransient"));
 	static const FName ScanRealAge(TEXT("User.ScanRealAge"));
+	static const FName SupersededAge(TEXT("User.SupersededAge"));
 	static const FName InjectedIntensity(TEXT("User.InjectedIntensity"));
 	static const FName FadeOutAlpha(TEXT("User.FadeOutAlpha"));
 
@@ -313,9 +320,10 @@ void ULidarScanComponent::Scan()
 		return;
 	}
 
+	const float Range = FMath::Clamp(MaxRange, 100.f, 30000.f);
 	const float HorizontalFOV = ResolveHorizontalFOV();
 	DepthCapture->FOVAngle = HorizontalFOV;
-	DepthCapture->MaxViewDistanceOverride = MaxRange;
+	DepthCapture->MaxViewDistanceOverride = Range;
 	DepthCapture->TextureTarget = Target;
 	DepthCapture->CaptureScene();
 
@@ -327,7 +335,7 @@ void ULidarScanComponent::Scan()
 
 	// Points are simulated in world space; the component only anchors the fixed bounds.
 	Points->SetWorldLocationAndRotation(Origin, FRotator::ZeroRotator);
-	Points->SetSystemFixedBounds(FBox(FVector(-MaxRange), FVector(MaxRange)));
+	Points->SetSystemFixedBounds(FBox(FVector(-Range), FVector(Range)));
 
 	Points->SetVariableInt(LidarScanParams::PointCount, Target->SizeX * Target->SizeY);
 	Points->SetVariableInt(LidarScanParams::CaptureWidth, Target->SizeX);
@@ -337,7 +345,7 @@ void ULidarScanComponent::Scan()
 	Points->SetVariableVec3(LidarScanParams::CaptureRight, CaptureTransform.GetUnitAxis(EAxis::Y));
 	Points->SetVariableVec3(LidarScanParams::CaptureUp, CaptureTransform.GetUnitAxis(EAxis::Z));
 	Points->SetVariableVec2(LidarScanParams::TanHalfFov, FVector2D(TanX, TanY));
-	Points->SetVariableFloat(LidarScanParams::MaxRange, MaxRange);
+	Points->SetVariableFloat(LidarScanParams::MaxRange, Range);
 	Points->SetVariableFloat(LidarScanParams::SurfaceBias, SurfaceBias);
 	Points->SetVariableFloat(LidarScanParams::SampleJitter, FMath::Clamp(SampleJitter, 0.f, 1.f));
 	Points->SetVariableFloat(LidarScanParams::NearThinningDistance, FMath::Clamp(NearThinningDistance, 0.f, 1000.f));
@@ -353,10 +361,21 @@ void ULidarScanComponent::Scan()
 	Slot.Context.CaptureRight = CaptureTransform.GetUnitAxis(EAxis::Y);
 	Slot.Context.CaptureUp = CaptureTransform.GetUnitAxis(EAxis::Z);
 	Slot.Context.TanHalfFOV = FVector2D(TanX, TanY);
-	Slot.Context.MaxRange = MaxRange;
+	Slot.Context.MaxRange = Range;
 	Slot.Context.ScanIndex = ScanIndex;
 	Slot.Context.Timestamp = World ? static_cast<float>(World->GetTimeSeconds()) : 0.f;
 	Slot.StartRealTime = World ? World->GetRealTimeSeconds() : 0.0;
+	Slot.SupersededRealTime = -1.0;
+
+	// Every other scan is no longer the newest: points that last until the next scan start vanishing now.
+	for (FLidarScanSlot& Other : Slots)
+	{
+		if (&Other != &Slot && Other.IsActive() && Other.SupersededRealTime < 0.0)
+		{
+			Other.SupersededRealTime = Slot.StartRealTime;
+			PushLiveParameters(Other);
+		}
+	}
 
 	// Sources are gathered right after the capture, so their points describe the same instant as the depth samples.
 	InjectPoints(Slot, Target);
@@ -423,9 +442,11 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 		const float Multiplier = FMath::Clamp(Settings.IntensityMultiplier, 0.f, 16.f);
 		const FVector2D Params(Settings.FadeMode == ELidarFadeMode::ScanFade ? 1.0 : 0.0,
 			Settings.bOccludeByCapture ? FMath::Clamp(Settings.OcclusionTolerance, 0.f, 200.f) : -1.0);
+		// (Hold, Vanish): Hold >= 0 Transient, -2 UntilNextScan, -1 neither (see the contract above).
+		const float Vanish = FMath::Clamp(Settings.VanishSeconds, 0.f, 30.f);
 		const FVector2D Transient = Settings.FadeMode == ELidarFadeMode::Transient
-			? FVector2D(FMath::Clamp(Settings.HoldSeconds, 0.f, 30.f), FMath::Clamp(Settings.VanishSeconds, 0.f, 30.f))
-			: FVector2D(-1.0, 0.0);
+			? FVector2D(FMath::Clamp(Settings.HoldSeconds, 0.f, 30.f), Vanish)
+			: Settings.FadeMode == ELidarFadeMode::UntilNextScan ? FVector2D(-2.0, Vanish) : FVector2D(-1.0, 0.0);
 
 		for (const FLidarInjectedPoint& Point : Gathered)
 		{
@@ -594,6 +615,42 @@ TArray<FLidarScanSlotStats> ULidarScanComponent::GetScanSlotStats() const
 	return Result;
 }
 
+bool ULidarScanComponent::ReadNewestScanDepth(TArray<float>& OutDepth, int32& OutWidth, int32& OutHeight, FLidarScanContext& OutContext) const
+{
+	OutDepth.Reset();
+	OutWidth = 0;
+	OutHeight = 0;
+	const FLidarScanSlot* Newest = nullptr;
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.IsActive() && !Slot.IsFadingOut() && Slot.DepthTarget && (!Newest || Slot.ScanIndex > Newest->ScanIndex))
+		{
+			Newest = &Slot;
+		}
+	}
+	FTextureRenderTargetResource* Resource = Newest ? Newest->DepthTarget->GameThread_GetRenderTargetResource() : nullptr;
+	TArray<FLinearColor> Pixels;
+	if (!Resource || !Resource->ReadLinearColorPixels(Pixels))
+	{
+		return false;
+	}
+	const int32 Width = Newest->DepthTarget->SizeX;
+	const int32 Height = Newest->DepthTarget->SizeY;
+	if (Width <= 0 || Height <= 0 || Pixels.Num() < Width * Height)
+	{
+		return false;
+	}
+	OutDepth.SetNumUninitialized(Width * Height);
+	for (int32 Index = 0; Index < Width * Height; ++Index)
+	{
+		OutDepth[Index] = Pixels[Index].R;
+	}
+	OutWidth = Width;
+	OutHeight = Height;
+	OutContext = Newest->Context;
+	return true;
+}
+
 void ULidarScanComponent::ActivateScanPoints(int32 ScanIndex)
 {
 	for (const FLidarScanSlot& Slot : Slots)
@@ -667,11 +724,13 @@ void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 	{
 		if (!Slot.IsFadingOut())
 		{
-			// Transient injected points are timed from their own scan on real time: the age is the only live value a
-			// steady scan needs every frame.
+			// Transient injected points are timed from their own scan, points that last until the next scan from the
+			// scan that superseded theirs, both on real time: the only live values a steady scan needs every frame.
 			if (Slot.IsActive() && Slot.Points)
 			{
 				Slot.Points->SetVariableFloat(LidarScanParams::ScanRealAge, static_cast<float>(FMath::Max(Now - Slot.StartRealTime, 0.0)));
+				Slot.Points->SetVariableFloat(LidarScanParams::SupersededAge, Slot.SupersededRealTime < 0.0
+					? -1.f : static_cast<float>(FMath::Max(Now - Slot.SupersededRealTime, 0.0)));
 			}
 			bAnyActive |= Slot.IsActive();
 			continue;
@@ -724,6 +783,7 @@ void ULidarScanComponent::ReleaseSlot(FLidarScanSlot& Slot)
 		Slot.Points->DeactivateImmediate();
 	}
 	Slot.ScanIndex = INDEX_NONE;
+	Slot.SupersededRealTime = -1.0;
 	Slot.FadeOutDuration = 0.f;
 	Slot.FadeOutElapsed = 0.f;
 }
@@ -759,7 +819,7 @@ int32 ULidarScanComponent::AcquireSlot()
 	}
 
 	// 2. A new slot while under the cap.
-	if (Slots.Num() < FMath::Clamp(MaxAliveScans, 1, 6))
+	if (Slots.Num() < FMath::Clamp(MaxAliveScans, 1, MaxAliveScansLimit))
 	{
 		AActor* Owner = GetOwner();
 		if (!Owner || !LoadedPointSystem)
@@ -805,7 +865,7 @@ void ULidarScanComponent::DestroySlot(FLidarScanSlot& Slot)
 
 void ULidarScanComponent::TrimSlots()
 {
-	const int32 Cap = FMath::Clamp(MaxAliveScans, 1, 6);
+	const int32 Cap = FMath::Clamp(MaxAliveScans, 1, MaxAliveScansLimit);
 	while (Slots.Num() > Cap)
 	{
 		// Drop idle slots first, then the oldest scan.
@@ -947,4 +1007,6 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 	const UWorld* World = GetWorld();
 	const double Now = World ? World->GetRealTimeSeconds() : Slot.StartRealTime;
 	Points->SetVariableFloat(LidarScanParams::ScanRealAge, static_cast<float>(FMath::Max(Now - Slot.StartRealTime, 0.0)));
+	Points->SetVariableFloat(LidarScanParams::SupersededAge, Slot.SupersededRealTime < 0.0
+		? -1.f : static_cast<float>(FMath::Max(Now - Slot.SupersededRealTime, 0.0)));
 }

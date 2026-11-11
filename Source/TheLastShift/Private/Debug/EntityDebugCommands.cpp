@@ -5,6 +5,7 @@
 // Development builds only.
 
 #include "Components/SpotLightComponent.h"
+#include "Area/AreaGenerator.h"
 #include "Debug/EntityTestListener.h"
 #include "Debug/LidarTestSource.h"
 #include "Debug/TlsDebugCommon.h"
@@ -17,6 +18,7 @@
 #include "HAL/IConsoleManager.h"
 #include "LidarScanComponent.h"
 #include "Math/RandomStream.h"
+#include "Residue/Residue.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
 #include "Scan/ScanDirectorComponent.h"
@@ -589,6 +591,8 @@ namespace EntityDebug
 		int32 TotalCandidates = 0;
 		int32 TotalValid = 0;
 		int32 TotalAttempts = 0;
+		/** Spawns the camera could see although a candidate it could not see existed. */
+		int32 SeenWithHiddenCandidate = 0;
 		TArray<FVector> Locations;
 		/** Every Stop starts from this pose (actor transform and view rotation), recorded at the start. */
 		FTransform StartPose;
@@ -666,8 +670,17 @@ namespace EntityDebug
 		}
 
 		const int32 Runs = GSpawnTest.Runs;
-		const bool bPass = GSpawnTest.NoSpawn == 0 && GSpawnTest.NoLineOfSight == Runs && GSpawnTest.InTolerance == Runs
-			&& Centres.Num() >= 3 && GSpawnTest.Repeats == GSpawnTest.ExcusedRepeats;
+		// Generated areas: the layout decides how many hidden pockets lie at the target distance, so clusters and
+		// fallbacks are reported only; the one rule is never to appear in sight while a hidden candidate existed.
+		// Hand-built maps (TestLidar) keep the full rule set, three distinct clusters included.
+		const bool bGenerated = AAreaGenerator::Find(Entity->GetWorld()) != nullptr;
+		const bool bPass = bGenerated
+			? GSpawnTest.SeenWithHiddenCandidate == 0
+			: GSpawnTest.NoSpawn == 0 && GSpawnTest.NoLineOfSight == Runs && GSpawnTest.InTolerance == Runs
+				&& Centres.Num() >= 3 && GSpawnTest.Repeats == GSpawnTest.ExcusedRepeats;
+		UE_LOG(LogTheLastShift, Log, TEXT("SpawnTest rule set: %s; spawns in sight while a hidden candidate existed: %d"),
+			bGenerated ? TEXT("generated area (pass = never in sight while a hidden candidate existed; clusters and fallbacks reported only)")
+				: TEXT("hand-built map (all rules, at least 3 distinct clusters)"), GSpawnTest.SeenWithHiddenCandidate);
 		UE_LOG(LogTheLastShift, Log,
 			TEXT("SpawnTest summary (%s): %d runs, no appearance %d, no line of sight %d, path distance within %.0f%% %d, hidden from scans %d, forward %d, no valid candidate %d, fallbacks %d, distinct clusters (centres > %.0f cm apart) %d, consecutive within SpawnRepeatRadius %.0f cm: %d (%d with only near candidates), avg %.1f queries / %.1f candidates / %.1f valid per spawn"),
 			bPass ? TEXT("PASS") : TEXT("FAIL"), Runs, GSpawnTest.NoSpawn, GSpawnTest.NoLineOfSight,
@@ -709,6 +722,7 @@ namespace EntityDebug
 			GSpawnTest.TotalCandidates += R.Candidates;
 			GSpawnTest.TotalValid += R.ValidCandidates;
 			GSpawnTest.TotalAttempts += R.Attempts;
+			GSpawnTest.SeenWithHiddenCandidate += (bManifested && !R.bNoLineOfSight && R.NoLineOfSightCandidates > 0) ? 1 : 0;
 
 			float FromPrevious = -1.f;
 			bool bRepeat = false;
@@ -750,28 +764,46 @@ namespace EntityDebug
 	}
 
 	// ------------------------------------------------------------------------------------------------------------
-	// tls.TransientTest: entity points full shortly after their scan, gone a few seconds later, never extended.
+	// tls.LatestScanTest: entity points (lidar fade mode UntilNextScan) stay full while their scan is the newest and
+	// are gone within PointVanishSeconds of the next scan; captured and residue points of the older scan stay.
 
-	struct FTransientTest
+	struct FLatestScanTest
 	{
 		TWeakObjectPtr<UWorld> World;
 		TWeakObjectPtr<UScanDirectorComponent> Director;
 		TWeakObjectPtr<AEntity> Entity;
-		/** Fire a second scan at +SecondScanAt (0 = single scan). */
-		float SecondScanAt = 0.f;
+		TWeakObjectPtr<AResidue> Residue;
+		/** Before scan B the figure is moved where the camera cannot see it (trail off for the whole test). */
+		bool bHiddenAtSecondScan = false;
 		bool bScreenshots = true;
 		float SavedSpeed = 0.f;
-		int32 FirstScanIndex = INDEX_NONE;
-		int32 SecondScanIndex = INDEX_NONE;
-		double FirstScanRealTime = 0.0;
+		float SavedTrailReach = 0.f;
+		FVector SavedResidueLocation = FVector::ZeroVector;
+		/** Every other available residue, moved out of the way for the test so the counts hold the test residue only. */
+		TArray<TPair<TWeakObjectPtr<AResidue>, FVector>> MovedResidues;
+		/** Real time the test's own Stop began (0 = time was already stopped): scan A waits for the automatic first scan. */
+		double StopRealTime = 0.0;
+		int32 ScanA = INDEX_NONE;
+		int32 ScanB = INDEX_NONE;
+		double ScanARealTime = 0.0;
+		double ScanBRealTime = 0.0;
 		double WaitStart = 0.0;
+		/** Residue points gathered for scan A and for scan B, and everything uploaded for each. */
+		int32 ResidueA = 0;
+		int32 ResidueB = 0;
+		int32 UploadedA = 0;
+		int32 UploadedB = 0;
+		/** Scan A's slot counts at the first checkpoint (all of its injected points alive). */
+		int32 InjectedA0 = -1;
+		int32 CapturedA0 = -1;
 		int32 Phase = 0;
+		int32 Failures = 0;
 		FTimerHandle Timer;
 		bool bRunning = false;
 	};
-	static FTransientTest GTransientTest;
+	static FLatestScanTest GLatestScanTest;
 
-	static void TransientTestStep();
+	static void LatestScanTestStep();
 
 	/** The figure's waist is within 30 degrees of the view direction. */
 	static bool IsInView(UWorld* World, const FVector& FigureBase)
@@ -788,131 +820,261 @@ namespace EntityDebug
 		return FVector::DotProduct(ToFigure, Rotation.Vector()) >= FMath::Cos(FMath::DegreesToRadians(30.f));
 	}
 
-	static void TransientSchedule(float Delay)
+	static void LatestScanSchedule(float Delay)
 	{
-		if (UWorld* World = GTransientTest.World.Get())
+		if (UWorld* World = GLatestScanTest.World.Get())
 		{
-			World->GetTimerManager().SetTimer(GTransientTest.Timer, FTimerDelegate::CreateStatic(&TransientTestStep), Delay, false);
+			World->GetTimerManager().SetTimer(GLatestScanTest.Timer, FTimerDelegate::CreateStatic(&LatestScanTestStep), FMath::Max(Delay, 0.01f), false);
 		}
 	}
 
-	/** Expected alpha factor of a transient point TimeSinceScan seconds after its scan (plugin formula). */
-	static float TransientAlpha(float TimeSinceScan, float Hold, float Vanish)
+	/** Captured / injected particles of the slot holding ScanIndex (-1 / -1 when no slot holds it). */
+	static void SlotCounts(const ULidarScanComponent* Lidar, int32 ScanIndex, int32& OutCaptured, int32& OutInjected)
 	{
-		return FMath::Clamp(1.f - (TimeSinceScan - Hold) / FMath::Max(Vanish, 0.001f), 0.f, 1.f);
-	}
-
-	static void TransientCheckpoint(UWorld* World, const TCHAR* Label)
-	{
-		const AEntity* Entity = GTransientTest.Entity.Get();
-		const UScanDirectorComponent* Director = GTransientTest.Director.Get();
-		const ULidarScanComponent* Lidar = Director ? Director->GetLidarScan() : nullptr;
-		const double Now = World->GetRealTimeSeconds();
-		const float Hold = Entity ? FMath::Clamp(Entity->PointHoldSeconds, 0.f, 30.f) : 0.f;
-		const float Vanish = Entity ? FMath::Clamp(Entity->PointVanishSeconds, 0.f, 30.f) : 0.f;
-		const float SinceFirst = static_cast<float>(Now - GTransientTest.FirstScanRealTime);
-		FString Second;
-		if (GTransientTest.SecondScanIndex != INDEX_NONE)
+		OutCaptured = -1;
+		OutInjected = -1;
+		for (const FLidarScanSlotStats& S : Lidar->GetScanSlotStats())
 		{
-			const float SinceSecond = SinceFirst - GTransientTest.SecondScanAt;
-			Second = FString::Printf(TEXT(", scan %d (+%.3f s) entity alpha %.3f"), GTransientTest.SecondScanIndex, SinceSecond, TransientAlpha(SinceSecond, Hold, Vanish));
-		}
-		UE_LOG(LogTheLastShift, Log, TEXT("TransientTest %s: +%.3f s after scan %d, its entity alpha %.3f (hold %.2f s, vanish %.2f s)%s; alive scans %d, figure %s, visible from camera %d"),
-			Label, SinceFirst, GTransientTest.FirstScanIndex, TransientAlpha(SinceFirst, Hold, Vanish), Hold, Vanish, *Second,
-			Lidar ? Lidar->GetAliveScanCount() : -1, Entity ? *Entity->GetFigureLocation().ToString() : TEXT("-"),
-			Entity && IsVisibleFromCamera(World, Entity->GetFigureLocation()) ? 1 : 0);
-		if (GTransientTest.bScreenshots)
-		{
-			if (APlayerController* PC = World->GetFirstPlayerController())
+			if (S.ScanIndex == ScanIndex)
 			{
-				PC->ConsoleCommand(TEXT("HighResShot 1"));
+				OutCaptured = S.CapturedParticles;
+				OutInjected = S.InjectedParticles;
 			}
 		}
 	}
 
-	static void TransientTestEnd(const TCHAR* Why)
+	static void LatestScanCheck(bool bOk, const FString& What)
 	{
-		UWorld* World = GTransientTest.World.Get();
+		GLatestScanTest.Failures += bOk ? 0 : 1;
+		UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest %s: %s"), bOk ? TEXT("PASS") : TEXT("FAIL"), *What);
+	}
+
+	static void LatestScanShot(UWorld* World, const TCHAR* Label)
+	{
+		if (!GLatestScanTest.bScreenshots)
+		{
+			return;
+		}
+		if (APlayerController* PC = World->GetFirstPlayerController())
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest screenshot: %s"), Label);
+			PC->ConsoleCommand(TEXT("HighResShot 1"));
+		}
+	}
+
+	/** Checkpoint while scan A is the newest: every injected point of A still alive, nothing of A removed. */
+	static void LatestScanCheckpointA(UWorld* World, const ULidarScanComponent* Lidar, const TCHAR* Label)
+	{
+		const float Since = static_cast<float>(World->GetRealTimeSeconds() - GLatestScanTest.ScanARealTime);
+		int32 Captured = 0;
+		int32 Injected = 0;
+		SlotCounts(Lidar, GLatestScanTest.ScanA, Captured, Injected);
+		if (GLatestScanTest.InjectedA0 < 0)
+		{
+			GLatestScanTest.InjectedA0 = Injected;
+			GLatestScanTest.CapturedA0 = Captured;
+		}
+		const int32 EntityA = Injected - GLatestScanTest.ResidueA;
+		LatestScanCheck(Injected == GLatestScanTest.InjectedA0 && Captured == GLatestScanTest.CapturedA0 && EntityA > 0,
+			FString::Printf(TEXT("%s +%.2f s, scan %d newest: captured %d, injected %d (residue %d + entity %d, all alive), alive scans %d"),
+				Label, Since, GLatestScanTest.ScanA, Captured, Injected, GLatestScanTest.ResidueA, EntityA, Lidar->GetAliveScanCount()));
+		LatestScanShot(World, Label);
+	}
+
+	static void LatestScanTestEnd(const TCHAR* Why)
+	{
+		UWorld* World = GLatestScanTest.World.Get();
 		if (World)
 		{
-			World->GetTimerManager().ClearTimer(GTransientTest.Timer);
+			World->GetTimerManager().ClearTimer(GLatestScanTest.Timer);
 		}
-		if (AEntity* Entity = GTransientTest.Entity.Get())
+		if (AEntity* Entity = GLatestScanTest.Entity.Get())
 		{
-			Entity->Speed = GTransientTest.SavedSpeed;
+			Entity->Speed = GLatestScanTest.SavedSpeed;
+			Entity->TrailReach = GLatestScanTest.SavedTrailReach;
 		}
+		if (AResidue* Residue = GLatestScanTest.Residue.Get())
+		{
+			Residue->SetActorLocation(GLatestScanTest.SavedResidueLocation);
+		}
+		for (const TPair<TWeakObjectPtr<AResidue>, FVector>& Moved : GLatestScanTest.MovedResidues)
+		{
+			if (AResidue* Other = Moved.Key.Get())
+			{
+				Other->SetActorLocation(Moved.Value);
+			}
+		}
+		GLatestScanTest.MovedResidues.Reset();
 		if (UTimeStateSubsystem* TimeState = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr; TimeState && TimeState->IsStopped())
 		{
 			TimeState->Resume();
 		}
-		GTransientTest.bRunning = false;
-		UE_LOG(LogTheLastShift, Log, TEXT("TransientTest done: %s."), Why);
+		GLatestScanTest.bRunning = false;
+		UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest done: %s, %d failure(s)."), Why, GLatestScanTest.Failures);
 	}
 
-	static void TransientTestStep()
+	static void LatestScanTestStep()
 	{
-		UWorld* World = GTransientTest.World.Get();
-		AEntity* Entity = GTransientTest.Entity.Get();
-		UScanDirectorComponent* Director = GTransientTest.Director.Get();
+		UWorld* World = GLatestScanTest.World.Get();
+		AEntity* Entity = GLatestScanTest.Entity.Get();
+		UScanDirectorComponent* Director = GLatestScanTest.Director.Get();
 		ULidarScanComponent* Lidar = Director ? Director->GetLidarScan() : nullptr;
 		UTimeStateSubsystem* TimeState = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+		AResidue* Residue = GLatestScanTest.Residue.Get();
 		if (!World || !Entity || !Lidar || !TimeState || !TimeState->IsStopped())
 		{
-			TransientTestEnd(TEXT("aborted (world, entity or lidar gone, or time resumed)"));
+			LatestScanTestEnd(TEXT("aborted (world, entity or lidar gone, or time resumed)"));
 			return;
 		}
 
-		const double Since = World->GetRealTimeSeconds() - GTransientTest.FirstScanRealTime;
-		switch (GTransientTest.Phase)
+		const double Now = World->GetRealTimeSeconds();
+		const float VanishSeconds = FMath::Clamp(Entity->PointVanishSeconds, 0.f, 30.f);
+		switch (GLatestScanTest.Phase)
 		{
 		case 0:
-			// Wait until the figure is in view, then freeze it so every scan shows it in the same place.
+			// Wait until the figure is in view, then freeze it so the scans show it in one place. A Stop this test began
+			// first lets the director's automatic first scan go by (about 1 s), so that scan cannot supersede scan A.
+			if (GLatestScanTest.StopRealTime > 0.0 && Now - GLatestScanTest.StopRealTime < 1.6)
+			{
+				LatestScanSchedule(0.05f);
+				return;
+			}
 			if (Entity->IsManifested() && IsVisibleFromCamera(World, Entity->GetFigureLocation()) && IsInView(World, Entity->GetFigureLocation()))
 			{
 				Entity->Speed = 0.f;
+				if (Residue)
+				{
+					// A residue in plain view, 3 m ahead and to the side, so its points (ScanFade) are on screen too.
+					const APlayerController* PC = World->GetFirstPlayerController();
+					FVector Eye;
+					FRotator View;
+					PC->GetPlayerViewPoint(Eye, View);
+					const FVector ToFigure = (Entity->GetFigureLocation() - Eye).GetSafeNormal2D();
+					const FVector Side = FVector(-ToFigure.Y, ToFigure.X, 0.f);
+					Residue->SetActorLocation(Eye + View.Vector() * 300.f + Side * 120.f - FVector(0.f, 0.f, 30.f));
+				}
 				// Bypass the director's cooldown: clear every scan and fire the plugin directly.
 				Lidar->ClearScans(0.f);
-				GTransientTest.FirstScanIndex = Lidar->GetScanCount();
+				GLatestScanTest.ScanA = Lidar->GetScanCount();
 				Lidar->Scan();
-				GTransientTest.FirstScanRealTime = World->GetRealTimeSeconds();
-				UE_LOG(LogTheLastShift, Log, TEXT("TransientTest: figure visible at %s, path distance %.1f cm; scan %d fired (cooldown bypassed), figure frozen."),
-					*Entity->GetFigureLocation().ToString(), Entity->GetPathDistanceToPlayer(), GTransientTest.FirstScanIndex);
-				GTransientTest.Phase = 1;
-				TransientSchedule(0.4f);
+				GLatestScanTest.ScanARealTime = World->GetRealTimeSeconds();
+				GLatestScanTest.ResidueA = Residue ? Residue->GetLastGatheredPoints() : 0;
+				GLatestScanTest.UploadedA = Lidar->GetLastInjectionStats().Uploaded;
+				UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest: figure visible at %s, path distance %.1f cm, frozen; scan A = %d fired (cooldown bypassed): %d injected points uploaded, %d of them residue (figure %d, trail %d gathered)."),
+					*Entity->GetFigureLocation().ToString(), Entity->GetPathDistanceToPlayer(), GLatestScanTest.ScanA,
+					GLatestScanTest.UploadedA, GLatestScanTest.ResidueA, Entity->GetLastGatheredFigurePoints(), Entity->GetLastGatheredTrailPoints());
+				GLatestScanTest.Phase = 1;
+				LatestScanSchedule(0.4f);
 				return;
 			}
-			if (World->GetRealTimeSeconds() - GTransientTest.WaitStart > 30.0)
+			if (Entity->IsManifested() && IsVisibleFromCamera(World, Entity->GetFigureLocation()))
 			{
-				TransientTestEnd(TEXT("figure never came into view within 30 s"));
+				// In line of sight but outside the view (often behind the camera): face it before it reaches the player.
+				if (APlayerController* PC = World->GetFirstPlayerController())
+				{
+					FVector Eye;
+					FRotator View;
+					PC->GetPlayerViewPoint(Eye, View);
+					PC->SetControlRotation((Entity->GetFigureLocation() + FVector(0.f, 0.f, 100.f) - Eye).Rotation());
+				}
+			}
+			if (Now - GLatestScanTest.WaitStart > 30.0)
+			{
+				LatestScanTestEnd(TEXT("figure never came into view within 30 s"));
 				return;
 			}
-			TransientSchedule(0.05f);
+			LatestScanSchedule(0.05f);
 			return;
 		case 1:
-			TransientCheckpoint(World, TEXT("checkpoint A (expect full)"));
-			GTransientTest.Phase = 2;
-			if (GTransientTest.SecondScanAt > 0.f)
-			{
-				TransientSchedule(FMath::Max(GTransientTest.SecondScanAt - static_cast<float>(Since), 0.f));
-				return;
-			}
-			TransientSchedule(FMath::Max(3.0f - static_cast<float>(Since), 0.f));
-			GTransientTest.Phase = 3;
+			LatestScanCheckpointA(World, Lidar, TEXT("checkpoint +0.4 s"));
+			GLatestScanTest.Phase = 2;
+			LatestScanSchedule(3.0f - static_cast<float>(Now - GLatestScanTest.ScanARealTime));
 			return;
 		case 2:
-			GTransientTest.SecondScanIndex = Lidar->GetScanCount();
-			Lidar->Scan();
-			UE_LOG(LogTheLastShift, Log, TEXT("TransientTest: second scan %d fired at +%.3f s (cooldown bypassed)."), GTransientTest.SecondScanIndex, Since);
-			GTransientTest.Phase = 3;
-			TransientSchedule(FMath::Max(3.0f - static_cast<float>(Since), 0.f));
+			LatestScanCheckpointA(World, Lidar, TEXT("checkpoint +3.0 s"));
+			GLatestScanTest.Phase = 3;
+			LatestScanSchedule(4.4f - static_cast<float>(Now - GLatestScanTest.ScanARealTime));
 			return;
 		case 3:
-			TransientCheckpoint(World, TEXT("checkpoint B (expect first scan's entity points gone, captured points still shown)"));
-			GTransientTest.Phase = 4;
-			TransientSchedule(1.0f); // let the screenshot land before resuming
+			LatestScanCheckpointA(World, Lidar, TEXT("checkpoint +4.4 s"));
+			if (GLatestScanTest.bHiddenAtSecondScan)
+			{
+				// A new appearance where the camera cannot see it: scan B must not show the figure.
+				Entity->SpawnNow(Entity->MinSpawnDistance);
+				Entity->Speed = 0.f;
+				UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest: figure moved out of sight to %s (visible from camera %d)."),
+					*Entity->GetFigureLocation().ToString(), IsVisibleFromCamera(World, Entity->GetFigureLocation()) ? 1 : 0);
+			}
+			GLatestScanTest.Phase = 4;
+			LatestScanSchedule(4.5f - static_cast<float>(Now - GLatestScanTest.ScanARealTime));
 			return;
+		case 4:
+			GLatestScanTest.ScanB = Lidar->GetScanCount();
+			Lidar->Scan();
+			GLatestScanTest.ScanBRealTime = World->GetRealTimeSeconds();
+			GLatestScanTest.ResidueB = Residue ? Residue->GetLastGatheredPoints() : 0;
+			GLatestScanTest.UploadedB = Lidar->GetLastInjectionStats().Uploaded;
+			UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest: scan B = %d fired at +%.3f s after A (cooldown bypassed): %d injected points uploaded, %d of them residue; figure visible from camera %d."),
+				GLatestScanTest.ScanB, GLatestScanTest.ScanBRealTime - GLatestScanTest.ScanARealTime, GLatestScanTest.UploadedB,
+				GLatestScanTest.ResidueB, IsVisibleFromCamera(World, Entity->GetFigureLocation()) ? 1 : 0);
+			GLatestScanTest.Phase = 5;
+			LatestScanSchedule(0.1f);
+			return;
+		case 5:
+		case 6:
+		case 7:
+		{
+			// Samples after B: at +0.1 s and +0.2 s (inside the vanish) only logged, at +VanishSeconds + 0.1 s checked.
+			const float SinceB = static_cast<float>(Now - GLatestScanTest.ScanBRealTime);
+			int32 CapturedA = 0, InjectedA = 0, CapturedB = 0, InjectedB = 0;
+			SlotCounts(Lidar, GLatestScanTest.ScanA, CapturedA, InjectedA);
+			SlotCounts(Lidar, GLatestScanTest.ScanB, CapturedB, InjectedB);
+			const FString Line = FString::Printf(TEXT("+%.2f s after B: scan A captured %d (was %d), injected %d (residue %d, was %d); scan B captured %d, injected %d (residue %d, entity %d)"),
+				SinceB, CapturedA, GLatestScanTest.CapturedA0, InjectedA, GLatestScanTest.ResidueA, GLatestScanTest.InjectedA0,
+				CapturedB, InjectedB, GLatestScanTest.ResidueB, InjectedB - GLatestScanTest.ResidueB);
+			if (GLatestScanTest.Phase < 7)
+			{
+				UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest sample %s"), *Line);
+				GLatestScanTest.Phase += 1;
+				LatestScanSchedule(GLatestScanTest.Phase == 6 ? 0.1f : VanishSeconds + 0.1f - SinceB);
+				return;
+			}
+			LatestScanCheck(InjectedA == GLatestScanTest.ResidueA,
+				FString::Printf(TEXT("scan A's entity points gone within VanishSeconds %.2f, its residue points kept: %s"), VanishSeconds, *Line));
+			LatestScanCheck(CapturedA == GLatestScanTest.CapturedA0,
+				FString::Printf(TEXT("scan A's captured points unchanged (%d -> %d)"), GLatestScanTest.CapturedA0, CapturedA));
+			const int32 EntityB = InjectedB - GLatestScanTest.ResidueB;
+			if (GLatestScanTest.bHiddenAtSecondScan)
+			{
+				LatestScanCheck(EntityB == 0, FString::Printf(TEXT("scan B cannot see the figure: no entity points on screen (%d)"), EntityB));
+			}
+			else
+			{
+				LatestScanCheck(EntityB > 0, FString::Printf(TEXT("scan B sees the figure: exactly one snapshot on screen, scan B's %d entity points (scan A's %d gone)"),
+					EntityB, GLatestScanTest.InjectedA0 - GLatestScanTest.ResidueA));
+			}
+			LatestScanCheck(!Residue || (GLatestScanTest.ResidueA > 0 && ILidarPointSource::Execute_GetLidarSourceSettings(Residue).FadeMode == ELidarFadeMode::ScanFade),
+				FString::Printf(TEXT("residue %s in both scans (%d / %d points), fade mode ScanFade"), Residue ? *Residue->GetName() : TEXT("-"),
+					GLatestScanTest.ResidueA, GLatestScanTest.ResidueB));
+			LatestScanShot(World, TEXT("after B"));
+			GLatestScanTest.Phase = 8;
+			LatestScanSchedule(1.5f - SinceB);
+			return;
+		}
+		case 8:
+		{
+			// Report only: superseded entity particles are invisible (alpha 0); if the count still holds them, they die
+			// when the slot is reused or cleared.
+			int32 CapturedA = 0, InjectedA = 0;
+			SlotCounts(Lidar, GLatestScanTest.ScanA, CapturedA, InjectedA);
+			UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest +%.2f s after B: scan A injected %d (residue %d, so %d entity particles still counted), captured %d"),
+				Now - GLatestScanTest.ScanBRealTime, InjectedA, GLatestScanTest.ResidueA, InjectedA - GLatestScanTest.ResidueA, CapturedA);
+			GLatestScanTest.Phase = 9;
+			LatestScanSchedule(0.5f);
+			return;
+		}
 		default:
-			TransientTestEnd(TEXT("complete"));
+			LatestScanTestEnd(TEXT("complete"));
 			return;
 		}
 	}
@@ -1213,7 +1375,7 @@ namespace EntityDebug
 		bool bAny = IsLive(GEntityTest.bRunning, GEntityTest.World);
 		bAny |= IsLive(GSpawnTest.bRunning, GSpawnTest.World);
 		bAny |= IsLive(GEscalation.bRunning, GEscalation.World);
-		bAny |= IsLive(GTransientTest.bRunning, GTransientTest.World);
+		bAny |= IsLive(GLatestScanTest.bRunning, GLatestScanTest.World);
 		bAny |= IsLive(GMoveTest.bRunning, GMoveTest.World);
 		return bAny;
 	}
@@ -1459,7 +1621,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsEntityDrawCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLidarTestSourceCommand(
 	TEXT("tls.LidarTestSource"),
-	TEXT("tls.LidarTestSource [On=1] [FadeMode=1] [Occlude=1] [X Y Z] [Size=100] [Hold=0.5] [Vanish=2]: registers (or with 0 removes) a 500-point cube as a lidar point source, at X Y Z or 4 m in front of the camera. FadeMode 0 = ScanFade, 1 = None, 2 = Transient."),
+	TEXT("tls.LidarTestSource [On=1] [FadeMode=1] [Occlude=1] [X Y Z] [Size=100] [Hold=0.5] [Vanish=2]: registers (or with 0 removes) a 500-point cube as a lidar point source, at X Y Z or 4 m in front of the camera. FadeMode 0 = ScanFade, 1 = None, 2 = Transient, 3 = UntilNextScan."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		using namespace EntityDebug;
@@ -1489,7 +1651,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLidarTestSourceCommand(
 
 		UTlsLidarTestSource* Source = NewObject<UTlsLidarTestSource>();
 		Source->Settings.Color = FLinearColor(0.35f, 1.f, 0.35f, 1.f);
-		Source->Settings.FadeMode = static_cast<ELidarFadeMode>(FMath::Clamp(Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 1, 0, 2));
+		Source->Settings.FadeMode = static_cast<ELidarFadeMode>(FMath::Clamp(Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 1, 0, 3));
 		Source->Settings.HoldSeconds = Args.Num() > 7 ? FMath::Clamp(FCString::Atof(*Args[7]), 0.f, 30.f) : 0.5f;
 		Source->Settings.VanishSeconds = Args.Num() > 8 ? FMath::Clamp(FCString::Atof(*Args[8]), 0.f, 30.f) : 2.f;
 		Source->Settings.bOccludeByCapture = Args.Num() > 2 ? FCString::Atoi(*Args[2]) != 0 : true;
@@ -1531,9 +1693,9 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsEntityContactResponseCommand(
 		}
 	}));
 
-static FAutoConsoleCommandWithWorldAndArgs GTlsTransientTestCommand(
-	TEXT("tls.TransientTest"),
-	TEXT("tls.TransientTest [SecondScanAt=0] [Screenshots=1]: stops time, makes the entity appear at MinSpawnDistance, waits until the figure is in view, freezes it, clears the scans and fires one scan directly on the lidar (cooldown bypassed), optionally a second one at +SecondScanAt s; logs the expected entity alpha and takes a HighResShot at +0.4 s and +3.0 s, then resumes."),
+static FAutoConsoleCommandWithWorldAndArgs GTlsLatestScanTestCommand(
+	TEXT("tls.LatestScanTest"),
+	TEXT("tls.LatestScanTest [Hidden=0] [Screenshots=1]: stops time, makes the entity appear at MinSpawnDistance, waits until the figure is in view, freezes it, moves the nearest available residue 3 m in front of the camera and every other one out of the way, waits for the automatic first scan, clears the scans and fires scan A directly on the lidar (cooldown bypassed). Checks at +0.4, +3.0 and +4.4 s that every injected point of A is alive; fires scan B at +4.5 s (with Hidden=1 the figure first reappears out of sight and the trail is off); checks at +PointVanishSeconds + 0.1 s that A's entity points are gone and its captured and residue points kept, and that B holds entity points (Hidden=0) or none (Hidden=1); logs A's injected count again at +1.5 s after B. HighResShot at every checkpoint, then resumes and restores the residue."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		using namespace EntityDebug;
@@ -1541,32 +1703,60 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsTransientTestCommand(
 		UTimeStateSubsystem* TimeState = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
 		UScanDirectorComponent* Director = World ? FindPlayerDirector(World) : nullptr;
 		AEntity* Entity = World ? FindEntity(World) : nullptr;
-		if (!TimeState || !Director || !Director->GetLidarScan() || !Entity || AnyTestRunning())
+		APawn* Pawn = World ? GetPlayerPawn(World) : nullptr;
+		if (!TimeState || !Director || !Director->GetLidarScan() || !Entity || !Pawn || AnyTestRunning())
 		{
-			UE_LOG(LogTheLastShift, Warning, TEXT("tls.TransientTest: no game world / director / lidar / entity, or a test is running."));
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.LatestScanTest: no game world / director / lidar / entity / pawn, or a test is running."));
 			return;
 		}
-		if (!TimeState->IsStopped())
+		const bool bOwnStop = !TimeState->IsStopped();
+		if (bOwnStop)
 		{
 			TimeState->Stop();
 		}
 
-		GTransientTest = FTransientTest();
-		GTransientTest.World = World;
-		GTransientTest.Director = Director;
-		GTransientTest.Entity = Entity;
-		GTransientTest.SecondScanAt = Args.Num() > 0 ? FMath::Clamp(FCString::Atof(*Args[0]), 0.f, 2.9f) : 0.f;
-		GTransientTest.bScreenshots = Args.Num() > 1 ? FCString::Atoi(*Args[1]) != 0 : true;
-		GTransientTest.SavedSpeed = Entity->Speed;
-		GTransientTest.WaitStart = World->GetRealTimeSeconds();
-		GTransientTest.bRunning = true;
+		GLatestScanTest = FLatestScanTest();
+		GLatestScanTest.StopRealTime = bOwnStop ? World->GetRealTimeSeconds() : 0.0;
+		GLatestScanTest.World = World;
+		GLatestScanTest.Director = Director;
+		GLatestScanTest.Entity = Entity;
+		GLatestScanTest.bHiddenAtSecondScan = Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0;
+		GLatestScanTest.bScreenshots = Args.Num() > 1 ? FCString::Atoi(*Args[1]) != 0 : true;
+		GLatestScanTest.SavedSpeed = Entity->Speed;
+		GLatestScanTest.SavedTrailReach = Entity->TrailReach;
+		if (GLatestScanTest.bHiddenAtSecondScan)
+		{
+			Entity->TrailReach = 0.f;
+		}
+		float Nearest = TNumericLimits<float>::Max();
+		for (TActorIterator<AResidue> It(World); It; ++It)
+		{
+			const float Distance = FVector::Dist(It->GetActorLocation(), Pawn->GetActorLocation());
+			if (It->GetState() == EResidueState::Available && Distance < Nearest)
+			{
+				Nearest = Distance;
+				GLatestScanTest.Residue = *It;
+				GLatestScanTest.SavedResidueLocation = It->GetActorLocation();
+			}
+		}
+		for (TActorIterator<AResidue> It(World); It; ++It)
+		{
+			if (*It != GLatestScanTest.Residue.Get() && It->GetState() == EResidueState::Available)
+			{
+				GLatestScanTest.MovedResidues.Emplace(*It, It->GetActorLocation());
+				It->SetActorLocation(It->GetActorLocation() - FVector(0.f, 0.f, 100000.f));
+			}
+		}
+		GLatestScanTest.WaitStart = World->GetRealTimeSeconds();
+		GLatestScanTest.bRunning = true;
 		if (!Entity->IsManifested())
 		{
 			Entity->SpawnNow(Entity->MinSpawnDistance);
 		}
-		UE_LOG(LogTheLastShift, Log, TEXT("TransientTest started: second scan at %.2f s, hold %.2f s, vanish %.2f s, figure at %s."),
-			GTransientTest.SecondScanAt, Entity->PointHoldSeconds, Entity->PointVanishSeconds, *Entity->GetFigureLocation().ToString());
-		TransientTestStep();
+		UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest started: hidden at scan B %d, vanish %.2f s, figure at %s, residue %s."),
+			GLatestScanTest.bHiddenAtSecondScan ? 1 : 0, Entity->PointVanishSeconds, *Entity->GetFigureLocation().ToString(),
+			GLatestScanTest.Residue.IsValid() ? *GLatestScanTest.Residue->GetName() : TEXT("none"));
+		LatestScanTestStep();
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLidarVerifyOcclusionCommand(

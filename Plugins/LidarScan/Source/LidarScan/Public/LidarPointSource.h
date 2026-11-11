@@ -84,6 +84,11 @@ enum class ELidarFadeMode : uint8
 	 * that holds the points only: later scans never extend it.
 	 */
 	Transient,
+	/**
+	 * Full alpha while the scan that holds the points is the component's newest scan; once a later scan starts, to
+	 * zero over VanishSeconds on real time, then removed. At most one scan's worth of these points is ever shown.
+	 */
+	UntilNextScan,
 };
 
 /** How the points of one source are drawn and filtered. Read once per scan, when the source is gathered. */
@@ -108,8 +113,11 @@ struct LIDARSCAN_API FLidarSourceSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s", EditCondition = "FadeMode == ELidarFadeMode::Transient"))
 	float HoldSeconds = 0.5f;
 
-	/** Transient only: seconds over which the points go from full alpha to zero once the hold is over. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s", EditCondition = "FadeMode == ELidarFadeMode::Transient"))
+	/**
+	 * Transient: seconds over which the points go from full alpha to zero once the hold is over.
+	 * UntilNextScan: seconds over which they go from full alpha to zero once a later scan has started.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s", EditCondition = "FadeMode == ELidarFadeMode::Transient || FadeMode == ELidarFadeMode::UntilNextScan"))
 	float VanishSeconds = 2.0f;
 
 	/**
