@@ -12,6 +12,7 @@ class UStaticMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTerminalActivated, int32, Cost);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnTerminalInsufficientEnergy, int32, Cost, int32, BankedEnergy, bool, bTimeStopped);
+DECLARE_MULTICAST_DELEGATE_TwoParams(FOnAnyTerminalActivated, APowerTerminal* /*Terminal*/, int32 /*Cost*/);
 
 /**
  * Where energy is spent: Interact within InteractRadius, in Normal time, spends Cost banked energy and powers every
@@ -64,6 +65,9 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Terminal|Events")
 	FOnTerminalActivated OnActivated;
+
+	/** Every successful payment at any terminal, in any world, right after that terminal's OnActivated (listeners filter by world). */
+	static FOnAnyTerminalActivated OnAnyActivated;
 
 	UPROPERTY(BlueprintAssignable, Category = "Terminal|Events")
 	FOnTerminalInsufficientEnergy OnInsufficientEnergy;

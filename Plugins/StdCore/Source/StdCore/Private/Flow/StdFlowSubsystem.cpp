@@ -13,6 +13,7 @@
 #include "StdLog.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
 #include "Widgets/Text/STextBlock.h"
 
 namespace StdFlow
@@ -340,14 +341,31 @@ void UStdFlowSubsystem::EnsureOverlay()
 			return WeakThis.IsValid() && WeakThis->IsOverlayVisible() ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
 		})
 		[
-			SNew(STextBlock)
-			.Font(FCoreStyle::GetDefaultFontStyle("Regular", UStdProjectSettings::Get()->TransitionLabelFontSize))
-			.Text_Lambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->Label : FText::GetEmpty(); })
-			.ColorAndOpacity_Lambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->GetLabelColor() : FSlateColor(FLinearColor::Transparent); })
+			MakeLabelWidget(
+				TAttribute<FText>::CreateLambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->Label : FText::GetEmpty(); }),
+				TAttribute<FSlateColor>::CreateLambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->GetLabelColor() : FSlateColor(FLinearColor::Transparent); }))
 		];
 
 	ViewportClient->AddViewportWidgetContent(Overlay.ToSharedRef(), StdFlow::OverlayZOrder);
 	OverlayViewport = ViewportClient;
+}
+
+TSharedRef<SWidget> UStdFlowSubsystem::MakeLabelWidget(const TAttribute<FText>& InText, const TAttribute<FSlateColor>& InColor)
+{
+	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
+	const float MaxWidth = FMath::Clamp(Settings->TransitionLabelMaxWidth, 0.f, 4000.f);
+	return SNew(SBox)
+		.Padding(FMargin(48.f, 0.f))
+		.MaxDesiredWidth(MaxWidth > 0.f ? FOptionalSize(MaxWidth + 96.f) : FOptionalSize())
+		[
+			SNew(STextBlock)
+			.Font(FCoreStyle::GetDefaultFontStyle("Regular", Settings->TransitionLabelFontSize))
+			.Text(InText)
+			.ColorAndOpacity(InColor)
+			.Justification(ETextJustify::Center)
+			// A fixed wrap width: wrapping to the allotted width would shrink frame after frame in the centred overlay.
+			.WrapTextAt(MaxWidth)
+		];
 }
 
 void UStdFlowSubsystem::RemoveOverlay()

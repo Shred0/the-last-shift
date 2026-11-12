@@ -17,7 +17,7 @@ enum class ERunActListMode : uint8
 
 /**
  * The list of acts reached (one entry per run snapshot, "Area N — B%" with the battery at that act's entry), on StdCore's
- * choice-list screen. Choosing an act restarts the run from it (URunSubsystem::RestartFromAct). Reads the snapshots
+ * choice-list screen. In RunLost mode the body above the list is the Loss row of DT_Endings, in full. Choosing an act restarts the run from it (URunSubsystem::RestartFromAct). Reads the snapshots
  * from the run subsystem every time it is configured; holds no copy of them.
  */
 UCLASS()

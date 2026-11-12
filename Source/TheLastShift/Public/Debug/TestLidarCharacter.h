@@ -16,6 +16,9 @@ class UResidueCollectCueWidget;
 class UInteractPromptWidget;
 class UScanCueWidget;
 class UScanDirectorComponent;
+class UHomeAIComponent;
+class UTextChannelComponent;
+class UTextChannelWidget;
 class USpotLightComponent;
 struct FInputActionValue;
 
@@ -24,7 +27,8 @@ struct FInputActionValue;
  * First-person movement, toggleable flashlight, time stop toggle, scan requests through the scan director, the
  * scan-ready cue, and Interact: held near an Available residue while Stopped it collects (with the collect cue),
  * pressed near a power terminal it activates it; the Interact prompt shows its key where it applies. Input assets and
- * the cue widget class are assigned in BP_TestPawn.
+ * the cue widget class are assigned in BP_TestPawn. Carries the home AI's text channel (TextChannel, driven only by
+ * HomeAI) and shows it with the text channel widget.
  */
 UCLASS(Abstract)
 class THELASTSHIFT_API ATestLidarCharacter : public ACharacter
@@ -53,6 +57,14 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Test")
 	TObjectPtr<UScanDirectorComponent> ScanDirector;
 
+	/** The home AI's message queue. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Test")
+	TObjectPtr<UTextChannelComponent> TextChannel;
+
+	/** The one place that pushes to TextChannel and suspends it. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Test")
+	TObjectPtr<UHomeAIComponent> HomeAI;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Test")
 	bool bFlashlightOnAtStart = true;
 
@@ -76,6 +88,13 @@ protected:
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
 	TObjectPtr<UInteractPromptWidget> InteractPrompt;
+
+	/** The home AI's text in a lower corner, created for the local player. None = not shown. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Test|UI")
+	TSubclassOf<UTextChannelWidget> TextChannelWidgetClass;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
+	TObjectPtr<UTextChannelWidget> TextChannelWidget;
 
 	/**
 	 * The mapping context of the actions below. StdCore adds it to the local player and registers it for rebinding

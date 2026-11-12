@@ -10,6 +10,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
+#include "Run/HomeAIComponent.h"
 #include "Run/RunActListWidget.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
@@ -112,14 +113,27 @@ bool URunSubsystem::TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu
 	if (bMainMenu)
 	{
 		bStarted = Flow->ReturnToMainMenu();
+		if (bStarted)
+		{
+			LastTravelLabel = FText::GetEmpty();
+			LastTravelMinCovered = 0.f;
+		}
 	}
 	else
 	{
+		// The label is the destination act's AreaEntry line, never typed out; it stays at least as long as it takes to read.
 		const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+		const int32 DestinationAct = Settings->GetActOfMap(Level.ToSoftObjectPath().GetLongPackageName());
+		float ReadingSeconds = 0.f;
 		FStdTravelOptions Options;
-		Options.Label = Settings->TravelLabel;
-		Options.MinCoveredSeconds = FMath::Clamp(Settings->TravelHoldSeconds, 0.f, 30.f);
+		UHomeAIComponent::BuildTravelLabel(World, DestinationAct, Options.Label, ReadingSeconds);
+		Options.MinCoveredSeconds = FMath::Clamp(FMath::Max(Settings->TravelHoldSeconds, ReadingSeconds), 0.f, 60.f);
 		bStarted = Flow->TravelToLevelWithOptions(Level, Options);
+		if (bStarted)
+		{
+			LastTravelLabel = Options.Label;
+			LastTravelMinCovered = Options.MinCoveredSeconds;
+		}
 	}
 	if (bStarted)
 	{

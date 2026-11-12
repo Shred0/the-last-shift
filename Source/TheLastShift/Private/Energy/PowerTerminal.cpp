@@ -15,6 +15,8 @@
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PowerTerminal)
 
+FOnAnyTerminalActivated APowerTerminal::OnAnyActivated;
+
 namespace TerminalTuning
 {
 	// Mirrors of the UPROPERTY clamps: Blueprint and C++ writes bypass ClampMin/ClampMax.
@@ -131,5 +133,6 @@ bool APowerTerminal::TryActivate(APawn* InstigatorPawn)
 	}
 	UE_LOG(LogEnergy, Log, TEXT("%s: activated, spent %d, powered %d device(s)."), *GetName(), Price, Powered);
 	OnActivated.Broadcast(Price);
+	OnAnyActivated.Broadcast(this, Price);
 	return true;
 }

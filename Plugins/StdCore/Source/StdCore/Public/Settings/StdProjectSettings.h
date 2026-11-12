@@ -134,6 +134,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (ClampMin = "6", ClampMax = "96"))
 	int32 TransitionLabelFontSize = 20;
 
+	/** The label wraps onto several centred lines beyond this width (Slate units). 0 = never wraps. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (ClampMin = "0.0", ClampMax = "4000.0"))
+	float TransitionLabelMaxWidth = 960.f;
+
 	// Audio
 
 	/** Sound Mix with one adjuster per Sound Class below. The volume sliders override its adjusters. */

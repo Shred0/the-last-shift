@@ -41,6 +41,7 @@ void UStdChoiceListWidget::NativeOnInitialized()
 	// Focused itself while it has no entry yet (OpenChildScreen focuses before the owner fills it): the back keys still work.
 	SetIsFocusable(true);
 	SetTitle(Title);
+	SetBody(Body);
 	RebuildButtons();
 	Super::NativeOnInitialized();
 }
@@ -73,6 +74,13 @@ void UStdChoiceListWidget::BuildDefaultTree()
 		TitleSlot->SetPadding(FMargin(0.f, 0.f, 0.f, 48.f));
 	}
 
+	Text_Body = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("Text_Body"));
+	Text_Body->SetAutoWrapText(true);
+	if (UVerticalBoxSlot* BodySlot = Main->AddChildToVerticalBox(Text_Body))
+	{
+		BodySlot->SetPadding(FMargin(0.f, 0.f, 0.f, 40.f));
+	}
+
 	Box_Entries = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("Box_Entries"));
 	Main->AddChildToVerticalBox(Box_Entries);
 }
@@ -84,6 +92,16 @@ void UStdChoiceListWidget::SetTitle(const FText& InTitle)
 	{
 		Text_Title->SetText(Title);
 		Text_Title->SetVisibility(Title.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+	}
+}
+
+void UStdChoiceListWidget::SetBody(const FText& InBody)
+{
+	Body = InBody;
+	if (Text_Body)
+	{
+		Text_Body->SetText(Body);
+		Text_Body->SetVisibility(Body.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
 	}
 }
 

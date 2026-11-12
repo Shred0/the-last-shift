@@ -1,5 +1,5 @@
 // Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress,
-// the key prompt without a player, the order of the Controls tab rows.
+// the key prompt without a player, the order of the Controls tab rows, the wrapping of the covered screen's label.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -11,6 +11,10 @@
 #include "Settings/StdUserSettings.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/TextBlock.h"
+#include "Flow/StdFlowSubsystem.h"
+#include "Settings/StdProjectSettings.h"
+#include "Styling/SlateColor.h"
+#include "Widgets/SWidget.h"
 #include "UI/StdKeyPromptWidget.h"
 #include "UI/StdRadialProgress.h"
 #include "UI/StdUITheme.h"
@@ -202,6 +206,37 @@ bool FStdKeyBindingRowsTest::RunTest(const FString& Parameters)
 	Rows = Profile;
 	UStdInputSubsystem::ArrangeKeyBindingRows(Rows, ContextOrder, { ListD, ListB }, { TEXT("D") });
 	TestEqual(TEXT("Hidden wins over listed"), Names(Rows), FString(TEXT("B,B,A,C")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdFlowLabelWrapTest, "StdCore.Flow.LabelWrap", StdUnitTests::Flags)
+
+bool FStdFlowLabelWrapTest::RunTest(const FString& Parameters)
+{
+	const float MaxWidth = UStdProjectSettings::Get()->TransitionLabelMaxWidth;
+	if (!TestTrue(TEXT("The project sets a maximum label width"), MaxWidth > 0.f))
+	{
+		return false;
+	}
+	// 120 characters: wider than the maximum width at the usual transition font size.
+	FString Padded = TEXT("A long label for the covered screen, written to need more than one line");
+	while (Padded.Len() < 120)
+	{
+		Padded += TEXT(" and more");
+	}
+	Padded.LeftInline(120);
+	TestEqual(TEXT("The long label has 120 characters"), Padded.Len(), 120);
+
+	const TSharedRef<SWidget> Short = UStdFlowSubsystem::MakeLabelWidget(FText::FromString(TEXT("Short")), FSlateColor(FLinearColor::White));
+	const TSharedRef<SWidget> Wrapped = UStdFlowSubsystem::MakeLabelWidget(FText::FromString(Padded), FSlateColor(FLinearColor::White));
+	Short->SlatePrepass(1.f);
+	Wrapped->SlatePrepass(1.f);
+	const FVector2D ShortSize = Short->GetDesiredSize();
+	const FVector2D WrappedSize = Wrapped->GetDesiredSize();
+	AddInfo(FString::Printf(TEXT("Max width %.0f: one line %.0f x %.0f, 120 characters %.0f x %.0f."), MaxWidth, ShortSize.X, ShortSize.Y, WrappedSize.X, WrappedSize.Y));
+	TestTrue(TEXT("A short label is one line"), ShortSize.Y > 0.f);
+	TestTrue(TEXT("120 characters wrap onto two lines or more"), WrappedSize.Y >= 1.8f * ShortSize.Y);
+	TestTrue(TEXT("The wrapped label stays within the maximum width (and its side padding)"), WrappedSize.X <= MaxWidth + 96.f + 1.f);
 	return true;
 }
 

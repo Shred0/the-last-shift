@@ -1,4 +1,5 @@
-// Play In Editor tests: map transitions, pause and key remapping, through the same calls the menus use.
+// Play In Editor tests: map transitions, pause and key remapping, through the same calls the menus use, and the choice list
+// screen built for a player (its tree is built when a player owns it).
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -6,6 +7,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Blueprint/WidgetBlueprintLibrary.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/TextBlock.h"
+#include "Components/VerticalBox.h"
 #include "Editor.h"
 #include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
@@ -19,6 +23,7 @@
 #include "StdGameplayTags.h"
 #include "Tests/AutomationCommon.h"
 #include "Tests/AutomationEditorCommon.h"
+#include "UI/StdChoiceListWidget.h"
 #include "UI/StdMainMenuWidget.h"
 
 namespace StdPlayTests
@@ -413,6 +418,57 @@ bool FStdInputProjectRowsTest::RunTest(const FString& Parameters)
 	});
 
 	Step([]() { StdPlayTests::RestoreRowSettings(); });
+	ADD_LATENT_AUTOMATION_COMMAND(FEndPlayMapCommand());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdChoiceListBodyTest, "StdCore.UI.ChoiceListBody", StdPlayTests::Flags)
+
+bool FStdChoiceListBodyTest::RunTest(const FString& Parameters)
+{
+	using namespace StdPlayTests;
+	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
+	const FString MainMenuName = GetMapShortName(Settings->MainMenuMap);
+	StartPlayOnMap(this, Settings->MainMenuMap, MainMenuName);
+
+	Step([this]()
+	{
+		APlayerController* PlayerController = GetPlayerController();
+		UStdChoiceListWidget* Screen = PlayerController ? CreateWidget<UStdChoiceListWidget>(PlayerController, UStdChoiceListWidget::StaticClass()) : nullptr;
+		if (!TestNotNull(TEXT("A choice list is created for the player"), Screen))
+		{
+			return;
+		}
+		UTextBlock* Body = Screen->WidgetTree ? Cast<UTextBlock>(Screen->WidgetTree->FindWidget(TEXT("Text_Body"))) : nullptr;
+		UVerticalBox* Main = Screen->WidgetTree ? Cast<UVerticalBox>(Screen->WidgetTree->FindWidget(TEXT("Box_Main"))) : nullptr;
+		UWidget* Title = Screen->WidgetTree ? Screen->WidgetTree->FindWidget(TEXT("Text_Title")) : nullptr;
+		UWidget* Entries = Screen->WidgetTree ? Screen->WidgetTree->FindWidget(TEXT("Box_Entries")) : nullptr;
+		if (!TestNotNull(TEXT("Has Text_Body"), Body) || !TestNotNull(TEXT("Has Box_Main"), Main))
+		{
+			return;
+		}
+		const int32 TitleIndex = Main->GetChildIndex(Title);
+		const int32 BodyIndex = Main->GetChildIndex(Body);
+		const int32 EntriesIndex = Main->GetChildIndex(Entries);
+		TestTrue(TEXT("The body sits below the title and above the entries"), TitleIndex >= 0 && TitleIndex < BodyIndex && BodyIndex < EntriesIndex);
+		TestTrue(TEXT("The body wraps"), Body->GetAutoWrapText());
+		TestEqual(TEXT("No body by default: collapsed"), Body->GetVisibility(), ESlateVisibility::Collapsed);
+
+		const FText Text = FText::FromString(TEXT("A body line above the entries."));
+		Screen->SetBody(Text);
+		TestEqual(TEXT("The body is shown"), Body->GetText().ToString(), Text.ToString());
+		TestTrue(TEXT("A body is visible"), Body->GetVisibility() != ESlateVisibility::Collapsed);
+		TestEqual(TEXT("GetBody returns it"), Screen->GetBody().ToString(), Text.ToString());
+
+		TArray<FStdChoiceEntry> List;
+		List.AddDefaulted(2);
+		Screen->SetEntries(List);
+		TestEqual(TEXT("New entries keep the body"), Body->GetText().ToString(), Text.ToString());
+
+		Screen->SetBody(FText::GetEmpty());
+		TestEqual(TEXT("An empty body is collapsed"), Body->GetVisibility(), ESlateVisibility::Collapsed);
+	});
+
 	ADD_LATENT_AUTOMATION_COMMAND(FEndPlayMapCommand());
 	return true;
 }

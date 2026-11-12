@@ -49,9 +49,9 @@ private:
 };
 
 /**
- * A screen with a title and a list of labelled entries, optionally followed by a back entry. The widget tree is built
- * in C++ (no Widget Blueprint needed), with the names the theme styles: Border_Background, Text_Title, Button_* and
- * their labels, so it looks like the other Std Core menus. Keyboard and gamepad navigation and the focus highlight are
+ * A screen with a title, an optional body text and a list of labelled entries, optionally followed by a back entry.
+ * The widget tree is built in C++ (no Widget Blueprint needed), with the names the theme styles: Border_Background,
+ * Text_Title, Text_Body, Button_* and their labels, so it looks like the other Std Core menus. Keyboard and gamepad navigation and the focus highlight are
  * the screen base's.
  *
  * Choosing an entry broadcasts OnChoiceSelected with its index; the screen stays open (the owner decides). The back
@@ -66,6 +66,13 @@ class STDCORE_API UStdChoiceListWidget : public UStdScreenWidget
 public:
 	UFUNCTION(BlueprintCallable, Category = "Std Core|UI")
 	void SetTitle(const FText& InTitle);
+
+	/** Optional text shown between the title and the entries, wrapped to the column width. Empty = none. */
+	UFUNCTION(BlueprintCallable, Category = "Std Core|UI")
+	void SetBody(const FText& InBody);
+
+	UFUNCTION(BlueprintPure, Category = "Std Core|UI")
+	FText GetBody() const { return Body; }
 
 	/** Replaces the entries and focuses the first enabled one. */
 	UFUNCTION(BlueprintCallable, Category = "Std Core|UI")
@@ -116,6 +123,10 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
 	TObjectPtr<UTextBlock> Text_Title;
 
+	/** The body text above the entries; collapsed while the body is empty. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
+	TObjectPtr<UTextBlock> Text_Body;
+
 	/** Holds the entry buttons and the back entry. */
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
 	TObjectPtr<UVerticalBox> Box_Entries;
@@ -126,6 +137,7 @@ private:
 
 	TArray<FStdChoiceEntry> Entries;
 	FText Title;
+	FText Body;
 	FText BackLabel;
 	bool bAllowBack = true;
 

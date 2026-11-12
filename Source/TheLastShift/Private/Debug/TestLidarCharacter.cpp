@@ -14,8 +14,11 @@
 #include "LidarScanComponent.h"
 #include "Residue/Residue.h"
 #include "Residue/ResidueCollectCueWidget.h"
+#include "Run/HomeAIComponent.h"
+#include "Run/TextChannelWidget.h"
 #include "Scan/ScanCueWidget.h"
 #include "Scan/ScanDirectorComponent.h"
+#include "TextChannel/TextChannelComponent.h"
 #include "TheLastShift.h"
 #include "UI/InteractPromptWidget.h"
 #include "Time/TimeStateSubsystem.h"
@@ -47,9 +50,12 @@ ATestLidarCharacter::ATestLidarCharacter()
 	LidarScan->SetupAttachment(Camera);
 
 	ScanDirector = CreateDefaultSubobject<UScanDirectorComponent>(TEXT("ScanDirector"));
+	TextChannel = CreateDefaultSubobject<UTextChannelComponent>(TEXT("TextChannel"));
+	HomeAI = CreateDefaultSubobject<UHomeAIComponent>(TEXT("HomeAI"));
 
 	CollectCueClass = UResidueCollectCueWidget::StaticClass();
 	InteractPromptClass = UInteractPromptWidget::StaticClass();
+	TextChannelWidgetClass = UTextChannelWidget::StaticClass();
 }
 
 void ATestLidarCharacter::BeginPlay()
@@ -84,6 +90,12 @@ void ATestLidarCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		InteractPrompt->RemoveFromParent();
 		InteractPrompt = nullptr;
+	}
+	if (TextChannelWidget)
+	{
+		TextChannelWidget->SetChannel(nullptr);
+		TextChannelWidget->RemoveFromParent();
+		TextChannelWidget = nullptr;
 	}
 	Super::EndPlay(EndPlayReason);
 }
@@ -125,6 +137,16 @@ void ATestLidarCharacter::CreateScanCue()
 		{
 			InteractPrompt->SetInteractAction(InteractAction);
 			InteractPrompt->AddToViewport(0);
+		}
+	}
+
+	if (!TextChannelWidget && TextChannelWidgetClass)
+	{
+		TextChannelWidget = CreateWidget<UTextChannelWidget>(PC, TextChannelWidgetClass);
+		if (TextChannelWidget)
+		{
+			TextChannelWidget->SetChannel(TextChannel);
+			TextChannelWidget->AddToViewport(0);
 		}
 	}
 }

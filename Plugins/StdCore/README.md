@@ -350,8 +350,13 @@ Automation tests live in the editor-only module `StdCoreTests`, under the `StdCo
 | `StdCore.Settings.Volumes` | The volume formula (`StdAudio::ComputeClassVolumes`) and volume clamping. |
 | `StdCore.Theme.Styles` | The styles built by `UStdUITheme`. |
 | `StdCore.UI.RadialProgress` | Clamping, full state and desired size of `UStdRadialProgress`. |
+| `StdCore.UI.KeyPrompt` | `UStdKeyPromptWidget` without a player: builds its own tree (`Text_Key`, `Text_Label`), shows no key and reads Unbound, shows a label and collapses an empty one. |
+| `StdCore.UI.ChoiceListBody` | In PIE: the optional body text of a `UStdChoiceListWidget` created for the player: between the title and the entries, wrapped, collapsed while empty, kept when the entries change. |
+| `StdCore.Flow.LabelWrap` | The covered screen's label wraps a 120-character text onto several lines within *Transition Label Max Width*. |
+| `StdCore.Input.RowOrder` | The order of the Controls tab rows: context order grouped by category, hidden rows left out, listed rows first with their labels and categories, hidden wins over listed. |
 | `StdCore.Flow.Play` | In PIE: main menu shown, a missing map refused, Play travels to the gameplay map, pause and resume, back to the main menu. |
 | `StdCore.Input.Remap` | In PIE: reserved, gamepad and axis keys refused, a swap, an unchanged and a rejected remap, the keys after a reset. It leaves the default keys saved. |
+| `StdCore.Input.ProjectRows` | In PIE: the project's listed rows come first with their labels, and its hidden rows are gone from the Controls tab. |
 
 **Run them:**
 - **In the editor:** *Tools > Session Frontend > Automation*, filter `StdCore`, tick and *Start Tests*.

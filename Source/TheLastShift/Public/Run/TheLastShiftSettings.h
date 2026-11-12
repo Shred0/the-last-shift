@@ -7,6 +7,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "TheLastShiftSettings.generated.h"
 
+class UDataTable;
 class UWorld;
 
 /** Per-act size of a full time jump (a contact with response Jump or RewindAndJump). A graze is GrazeJumpFraction of it. */
@@ -57,8 +58,9 @@ struct THELASTSHIFT_API FScanColors
 
 /**
  * Project settings of the game (Project Settings > Game > The Last Shift), stored as text in Config/DefaultGame.ini.
- * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning and of the scan colours: the area
- * generator, the run subsystem and the home state subsystem read them from here and copy nothing.
+ * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning, of the scan colours and of
+ * which narrative tables the game reads: the area generator, the run subsystem, the home state subsystem and the home AI
+ * read them from here and copy nothing.
  */
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "The Last Shift"))
 class THELASTSHIFT_API UTheLastShiftSettings : public UDeveloperSettings
@@ -116,9 +118,25 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float TravelHoldSeconds = 4.f;
 
-	/** Short label shown on the black travel screen. */
-	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel")
-	FText TravelLabel;
+	/**
+	 * The home AI's messages (FAIMessageRow), imported from Narrative/DT_AIMessages.csv. Also the travel screen's label:
+	 * the AreaEntry row of the destination act (none: no label).
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> AIMessagesTable;
+
+	/** The ending texts (FEndingRow: Inject, Open, Loss), imported from Narrative/DT_Endings.csv. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> EndingsTable;
+
+	/** AIMessagesTable, loaded (null when unset or missing). */
+	UDataTable* LoadAIMessagesTable() const;
+
+	/** EndingsTable, loaded (null when unset or missing). */
+	UDataTable* LoadEndingsTable() const;
+
+	/** Text of the ending row RowName (Inject, Open, Loss), in full; empty when there is none. */
+	FText GetEndingText(FName RowName) const;
 
 	/** Act of the map named PackageName (1-based position in AreaMaps, PIE prefix ignored); 0 when it is not an area map. */
 	int32 GetActOfMap(const FString& PackageName) const;

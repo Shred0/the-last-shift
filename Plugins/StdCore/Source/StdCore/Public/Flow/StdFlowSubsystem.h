@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
 #include "Engine/EngineBaseTypes.h"
+#include "Misc/Attribute.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "StdFlowSubsystem.generated.h"
 
@@ -110,6 +111,12 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Std Core|Flow")
 	EStdFlowState GetState() const { return State; }
+
+	/**
+	 * The label of the covered screen: the project's transition font, centred, wrapped onto several lines beyond
+	 * UStdProjectSettings::TransitionLabelMaxWidth.
+	 */
+	static TSharedRef<SWidget> MakeLabelWidget(const TAttribute<FText>& InText, const TAttribute<FSlateColor>& InColor);
 
 private:
 	bool Tick(float DeltaTime);

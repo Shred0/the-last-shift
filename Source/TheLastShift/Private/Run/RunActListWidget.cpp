@@ -5,6 +5,7 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
 #include "Run/RunSubsystem.h"
+#include "Run/TheLastShiftSettings.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunActListWidget)
 
@@ -37,6 +38,8 @@ void URunActListWidget::Configure(ERunActListMode InMode)
 	}
 
 	SetTitle(Mode == ERunActListMode::RunLost ? LOCTEXT("PowerLostTitle", "Power lost") : LOCTEXT("SelectActTitle", "Select act"));
+	// The loss text is the Loss ending, in full: not an AI message, never degraded.
+	SetBody(Mode == ERunActListMode::RunLost ? UTheLastShiftSettings::Get()->GetEndingText(TEXT("Loss")) : FText::GetEmpty());
 	SetAllowBack(Mode == ERunActListMode::SelectAct);
 	SetBackLabel(Mode == ERunActListMode::SelectAct ? LOCTEXT("BackEntry", "Back") : FText::GetEmpty());
 	SetEntries(NewEntries);

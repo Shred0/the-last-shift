@@ -18,8 +18,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRunSnapshotsChanged);
 
 /**
  * The run across maps: which act the current map is, and the one-way travel to the next area through StdCore's
- * level transition (black screen with UTheLastShiftSettings::TravelLabel, held until the next area is ready and for
- * at least TravelHoldSeconds). The act is the current map's position in UTheLastShiftSettings::AreaMaps; this
+ * level transition (black screen with the destination act's AreaEntry line as its label, built by
+ * UHomeAIComponent::BuildTravelLabel, held until the next area is ready and for at least TravelHoldSeconds and the
+ * line's reading time; no label to the main menu). The act is the current map's position in UTheLastShiftSettings::AreaMaps; this
  * subsystem reads the settings and copies nothing. After the last area, travel goes back to the main menu. A run
  * starts in the first entry of AreaMaps (StartNewRun), never in StdCore's Gameplay Map.
  *
@@ -123,6 +124,10 @@ public:
 	float GetLastTravelToReadySeconds() const { return LastTravelReady; }
 	float GetLastTravelToFadeInSeconds() const { return LastTravelFadeIn; }
 
+	/** Label and minimum covered time given to the last travel that started (empty and 0 to the main menu). */
+	const FText& GetLastTravelLabel() const { return LastTravelLabel; }
+	float GetLastTravelMinCoveredSeconds() const { return LastTravelMinCovered; }
+
 private:
 	bool TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FString& What);
 
@@ -149,4 +154,6 @@ private:
 	float LastTravelCovered = -1.f;
 	float LastTravelReady = -1.f;
 	float LastTravelFadeIn = -1.f;
+	FText LastTravelLabel;
+	float LastTravelMinCovered = 0.f;
 };

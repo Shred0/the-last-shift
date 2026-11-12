@@ -2,7 +2,9 @@
 
 #include "Run/TheLastShiftSettings.h"
 
+#include "Engine/DataTable.h"
 #include "Engine/World.h"
+#include "Narrative/NarrativeRows.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(TheLastShiftSettings)
 
@@ -47,4 +49,21 @@ bool UTheLastShiftSettings::GetActTuning(int32 Act, FActTuning& OutTuning) const
 	OutTuning.JumpHomeSeconds = FMath::Clamp(Tuning->JumpHomeSeconds, 0.0, 1.0e12);
 	OutTuning.JumpBatteryDrop = FMath::Clamp(Tuning->JumpBatteryDrop, 0.0, 1.0);
 	return true;
+}
+
+UDataTable* UTheLastShiftSettings::LoadAIMessagesTable() const
+{
+	return AIMessagesTable.IsNull() ? nullptr : AIMessagesTable.LoadSynchronous();
+}
+
+UDataTable* UTheLastShiftSettings::LoadEndingsTable() const
+{
+	return EndingsTable.IsNull() ? nullptr : EndingsTable.LoadSynchronous();
+}
+
+FText UTheLastShiftSettings::GetEndingText(FName RowName) const
+{
+	const UDataTable* Table = LoadEndingsTable();
+	const FEndingRow* Row = Table ? Table->FindRow<FEndingRow>(RowName, TEXT("Ending"), false) : nullptr;
+	return Row ? Row->Text : FText::GetEmpty();
 }
