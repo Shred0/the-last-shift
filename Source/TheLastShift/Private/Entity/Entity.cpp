@@ -343,7 +343,7 @@ bool AEntity::RefreshPath()
 	FVector Goal;
 	TArray<FVector> Points;
 	float Length = 0.f;
-	LastPathRefreshTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+	LastPathRefreshTime = GetRunSeconds();
 	if (!GetPlayerNavLocation(Goal) || !FindPath(FigureLocation, Goal, Points, Length))
 	{
 		UE_LOG(LogEntity, Warning, TEXT("%s: no navigation path from %s to the player; keeping the old path."), *GetName(), *FigureLocation.ToString());
@@ -687,7 +687,7 @@ bool AEntity::Manifest(float TargetDistance, const TCHAR* Why)
 	PathPoints = Best->Path;
 	PathPoints[0] = FigureLocation;
 	FigureYaw = (PathPoints.Num() >= 2 ? (PathPoints[1] - PathPoints[0]) : (PlayerLocation - FigureLocation)).Rotation().Yaw;
-	LastPathRefreshTime = World->GetTimeSeconds();
+	LastPathRefreshTime = GetRunSeconds();
 	CachedPathDistanceFrame = MAX_uint64;
 	bManifested = true;
 	SetActorLocation(FigureLocation);
@@ -758,7 +758,8 @@ void AEntity::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (!bManifested || !TimeState || !TimeState->IsStopped())
+	// Neither the movement nor the contact check runs while the pause menu freezes the run.
+	if (!bManifested || !TimeState || !TimeState->IsStopped() || TimeState->IsRunFrozen())
 	{
 		return;
 	}
@@ -767,7 +768,7 @@ void AEntity::Tick(float DeltaSeconds)
 	SetActorLocation(FigureLocation);
 
 	// Between beats the player can move past the end of the path: chase the new position instead of idling.
-	if (PathPoints.Num() < 2 && GetWorld()->GetTimeSeconds() - LastPathRefreshTime >= EntityTuning::ExhaustedPathRefreshInterval)
+	if (PathPoints.Num() < 2 && GetRunSeconds() - LastPathRefreshTime >= EntityTuning::ExhaustedPathRefreshInterval)
 	{
 		RefreshPath();
 	}
@@ -782,10 +783,20 @@ void AEntity::Tick(float DeltaSeconds)
 #endif
 }
 
+double AEntity::GetRunSeconds() const
+{
+	if (TimeState)
+	{
+		return TimeState->GetRunSeconds();
+	}
+	const UWorld* World = GetWorld();
+	return World ? World->GetTimeSeconds() : 0.0;
+}
+
 void AEntity::CheckContact()
 {
 	const APawn* Pawn = GetPlayerPawn();
-	if (!Pawn || !bManifested)
+	if (!Pawn || !bManifested || (TimeState && TimeState->IsRunFrozen()))
 	{
 		return;
 	}

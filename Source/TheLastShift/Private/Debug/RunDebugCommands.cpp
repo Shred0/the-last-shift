@@ -290,6 +290,8 @@ namespace RunDebug
 		/** Act the next arrival must have; 0 = the main menu, -1 = any (the map the test starts in). */
 		int32 ExpectedAct = 0;
 		int32 Arrivals = 0;
+		/** Counts of the test's own PASS and FAIL lines. */
+		int32 Passed = 0;
 		int32 Failures = 0;
 		/** In every area, once settled: open the pause menu, check menu input, close it, check game input. */
 		bool bPauseCheck = true;
@@ -301,13 +303,20 @@ namespace RunDebug
 	};
 	static FChain GChain;
 
+	/** One PASS or FAIL line of the chain test, counted. */
+	static void ChainCheck(bool bOk, const FString& What)
+	{
+		GChain.Passed += bOk ? 1 : 0;
+		Report(TEXT("tls.RunChainTest"), bOk, What, GChain.Failures);
+	}
+
 	/** Logs the input state and checks it against what the place needs (game input in an area, menu input elsewhere). */
 	static void CheckInput(UWorld* World, bool bExpectGame, const FString& What)
 	{
 		const FString Name = TEXT("tls.RunChainTest");
 		TimeStateDebug::LogInputReport(World, *Name);
 		const TimeStateDebug::FInputReport R = TimeStateDebug::BuildInputReport(World);
-		Report(Name, bExpectGame ? R.IsGameReady() : R.IsMenuReady(), FString::Printf(TEXT("%s: %s input"), *What, bExpectGame ? TEXT("game") : TEXT("menu")), GChain.Failures);
+		ChainCheck(bExpectGame ? R.IsGameReady() : R.IsMenuReady(), FString::Printf(TEXT("%s: %s input"), *What, bExpectGame ? TEXT("game") : TEXT("menu")));
 	}
 
 	/** Presses Play the way the player does (the menu's button), or through StdCore when no menu widget is shown. */
@@ -323,8 +332,8 @@ namespace RunDebug
 
 	static void FinishChain(const TCHAR* Why)
 	{
-		UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: ===== %s (%d arrivals, %d failures%s%s) ====="), GChain.Failures == 0 ? TEXT("PASS") : TEXT("FAIL"),
-			GChain.Arrivals, GChain.Failures, Why ? TEXT(", ") : TEXT(""), Why ? Why : TEXT(""));
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: ===== %s (%d arrivals, %d checks passed, %d failed%s%s) ====="), GChain.Failures == 0 ? TEXT("PASS") : TEXT("FAIL"),
+			GChain.Arrivals, GChain.Passed, GChain.Failures, Why ? TEXT(", ") : TEXT(""), Why ? Why : TEXT(""));
 		GChain.bActive = false;
 		if (GChain.bQuit)
 		{
@@ -334,7 +343,6 @@ namespace RunDebug
 
 	static void ReportArrival(UWorld* World)
 	{
-		const FString Name = TEXT("tls.RunChainTest");
 		const FString Map = UWorld::RemovePIEPrefix(World->GetOutermost()->GetName());
 		const URunSubsystem* Run = URunSubsystem::Get(World);
 		const int32 Act = Run ? Run->GetActIndex() : -1;
@@ -343,18 +351,18 @@ namespace RunDebug
 		if (!Gen)
 		{
 			const FString Menu = UStdProjectSettings::Get()->MainMenuMap.ToSoftObjectPath().GetLongPackageName();
-			Report(Name, GChain.ExpectedAct == 0 && Act == 0 && Map == Menu,
-				FString::Printf(TEXT("arrival %d: %s, act %d (expected the main menu %s)"), GChain.Arrivals, *Map, Act, *Menu), GChain.Failures);
+			ChainCheck(GChain.ExpectedAct == 0 && Act == 0 && Map == Menu,
+				FString::Printf(TEXT("arrival %d: %s, act %d (expected the main menu %s)"), GChain.Arrivals, *Map, Act, *Menu));
 			CheckInput(World, false, FString::Printf(TEXT("arrival %d (%s)"), GChain.Arrivals, *Map));
 			return;
 		}
 		const AEntity* Entity = nullptr;
 		for (TActorIterator<AEntity> It(World); It; ++It) { Entity = *It; break; }
 		const bool bOk = Gen->IsReady() && Gen->bLastValidationPassed && (GChain.ExpectedAct < 0 || Act == GChain.ExpectedAct);
-		Report(Name, bOk, FString::Printf(TEXT("arrival %d: %s, act %d (expected %d), seed %d (%d tried), hash %016llx, route %.1f m, PCG instances %d, time to ready %.2f s, validation %s, entity %s ContactResponse %s"),
+		ChainCheck(bOk, FString::Printf(TEXT("arrival %d: %s, act %d (expected %d), seed %d (%d tried), hash %016llx, route %.1f m, PCG instances %d, time to ready %.2f s, validation %s, entity %s ContactResponse %s"),
 			GChain.Arrivals, *Map, Act, GChain.ExpectedAct, Gen->GetSeed(), Gen->LastSeedsTried, static_cast<uint64>(Gen->GetLayoutHash()), Gen->GetRouteLength() / 100.f,
 			Gen->GetPCGInstanceCount(), Gen->GetTimeToReadySeconds(), Gen->bLastValidationPassed ? TEXT("passed") : TEXT("FAILED"), *GetNameSafe(Entity),
-			Entity ? LexToString(Entity->ContactResponse) : TEXT("-")), GChain.Failures);
+			Entity ? LexToString(Entity->ContactResponse) : TEXT("-")));
 		CheckInput(World, true, FString::Printf(TEXT("arrival %d (%s)"), GChain.Arrivals, *Map));
 	}
 
@@ -364,7 +372,7 @@ namespace RunDebug
 		const double Now = FPlatformTime::Seconds();
 		if (Now - GChain.StartReal > 120.0)
 		{
-			++GChain.Failures;
+			ChainCheck(false, TEXT("an arrival within 120 s"));
 			FinishChain(TEXT("no arrival within 120 s"));
 			return false;
 		}
@@ -383,7 +391,7 @@ namespace RunDebug
 			GChain.StartReal = Now;
 			if (!PressPlay(World))
 			{
-				++GChain.Failures;
+				ChainCheck(false, TEXT("the main menu has a New game button"));
 				FinishChain(TEXT("no main menu with a New game button"));
 				return false;
 			}
@@ -428,16 +436,15 @@ namespace RunDebug
 		if (GChain.bPauseCheck && GChain.PausePhase < 3)
 		{
 			AStdPlayerController* GamePC = Cast<AStdPlayerController>(World->GetFirstPlayerController());
-			const FString Name = TEXT("tls.RunChainTest");
 			if (!GamePC)
 			{
-				Report(Name, false, FString::Printf(TEXT("pause menu: the player controller is %s, not a StdPlayerController (no pause menu)"),
-					*GetNameSafe(World->GetFirstPlayerController())), GChain.Failures);
+				ChainCheck(false, FString::Printf(TEXT("pause menu: the player controller is %s, not a StdPlayerController (no pause menu)"),
+					*GetNameSafe(World->GetFirstPlayerController())));
 				GChain.PausePhase = 3;
 			}
 			else if (GChain.PausePhase == 0)
 			{
-				Report(Name, GamePC->PauseGame(), TEXT("pause menu: opened"), GChain.Failures);
+				ChainCheck(GamePC->PauseGame(), TEXT("pause menu: opened"));
 				GChain.PausePhase = 1;
 				GChain.PhaseReal = Now;
 			}
@@ -446,7 +453,7 @@ namespace RunDebug
 				if (GChain.PausePhase == 1)
 				{
 					CheckInput(World, false, TEXT("pause menu open"));
-					Report(Name, GamePC->ResumeGame(), TEXT("pause menu: closed"), GChain.Failures);
+					ChainCheck(GamePC->ResumeGame(), TEXT("pause menu: closed"));
 					GChain.PausePhase = 2;
 					GChain.PhaseReal = Now;
 				}
@@ -474,7 +481,7 @@ namespace RunDebug
 			GChain.ExpectedAct > 0 ? *FString::Printf(TEXT("act %d"), GChain.ExpectedAct) : TEXT("the main menu"));
 		if (!Run || !Run->TravelToNextArea())
 		{
-			++GChain.Failures;
+			ChainCheck(false, FString::Printf(TEXT("travel from act %d accepted"), Act));
 			FinishChain(TEXT("travel refused"));
 			return false;
 		}

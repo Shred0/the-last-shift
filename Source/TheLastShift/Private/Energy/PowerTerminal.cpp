@@ -103,13 +103,14 @@ APowerTerminal* APowerTerminal::FindNearestInRange(const APawn* Pawn)
 
 bool APowerTerminal::TryActivate(APawn* InstigatorPawn)
 {
-	if (!IsInRange(InstigatorPawn))
+	const UTimeStateSubsystem* TimeState = GetWorld() ? GetWorld()->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+	if (!IsInRange(InstigatorPawn) || (TimeState && TimeState->IsRunFrozen()))
 	{
+		// Nothing is paid behind the pause menu.
 		return false;
 	}
 
 	UEnergySubsystem* Energy = UEnergySubsystem::Get(this);
-	const UTimeStateSubsystem* TimeState = GetWorld() ? GetWorld()->GetSubsystem<UTimeStateSubsystem>() : nullptr;
 	const int32 Price = TerminalTuning::Cost(Cost);
 	const int32 Banked = Energy ? Energy->GetBankedEnergy() : 0;
 	const bool bStopped = TimeState && TimeState->IsStopped();

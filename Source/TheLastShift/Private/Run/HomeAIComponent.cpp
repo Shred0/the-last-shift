@@ -9,7 +9,6 @@
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "Flow/StdFlowSubsystem.h"
-#include "Framework/StdPlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Narrative/NarrativeRows.h"
@@ -128,14 +127,13 @@ void UHomeAIComponent::UpdateSuspension()
 		return;
 	}
 	const UTimeStateSubsystem* TimeState = World->GetSubsystem<UTimeStateSubsystem>();
-	const APawn* Pawn = Cast<APawn>(GetOwner());
-	const AStdPlayerController* PC = Pawn ? Cast<AStdPlayerController>(Pawn->GetController()) : nullptr;
 	const UGameInstance* GameInstance = World->GetGameInstance();
 	const UStdFlowSubsystem* Flow = GameInstance ? GameInstance->GetSubsystem<UStdFlowSubsystem>() : nullptr;
 	const UHomeStateSubsystem* Home = UHomeStateSubsystem::Get(this);
 
 	const bool bStopped = TimeState && TimeState->IsStopped();
-	const bool bMenu = PC && PC->IsPausedByMenu();
+	// The pause menu: asked to the one place that knows the run is frozen.
+	const bool bMenu = TimeState && TimeState->IsRunFrozen();
 	const bool bCovered = Flow && Flow->IsTransitioning();
 	const bool bLost = Home && Home->IsRunLost();
 	Text->SetSuspended(bStopped || bMenu || bCovered || bLost);

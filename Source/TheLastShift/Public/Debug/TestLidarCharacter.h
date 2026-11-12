@@ -132,6 +132,9 @@ private:
 	void OnInteractPressed();
 	void OnInteractReleased();
 
+	/** UTimeStateSubsystem::IsRunFrozen of this pawn's world. */
+	bool IsRunFrozen() const;
+
 	UFUNCTION()
 	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
 

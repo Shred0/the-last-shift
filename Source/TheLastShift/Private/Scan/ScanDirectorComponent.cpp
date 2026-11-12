@@ -218,6 +218,12 @@ void UScanDirectorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 double UScanDirectorComponent::GetNow() const
 {
+	// The run's clock: it stands still while the pause menu freezes the run, and so does the timer manager, so the
+	// first-scan delay, the cooldown and the beat continue from where they were when the menu closes.
+	if (TimeState)
+	{
+		return TimeState->GetRunSeconds();
+	}
 	const UWorld* World = GetWorld();
 	return World ? World->GetTimeSeconds() : 0.0;
 }
@@ -275,6 +281,13 @@ bool UScanDirectorComponent::RequestScan()
 	if (!bCycleActive || !LidarScan)
 	{
 		// Normal time: scanning is simply not available, not worth a log line.
+		return false;
+	}
+
+	if (TimeState && TimeState->IsRunFrozen())
+	{
+		// No scan fires behind the pause menu, whoever asks.
+		UE_LOG(LogTheLastShift, Log, TEXT("ScanDirector: scan request refused, the run is frozen by the pause menu."));
 		return false;
 	}
 

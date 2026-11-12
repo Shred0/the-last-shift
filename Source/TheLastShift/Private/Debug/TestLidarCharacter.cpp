@@ -204,6 +204,12 @@ void ATestLidarCharacter::OnLook(const FInputActionValue& Value)
 	AddControllerPitchInput(-Axis.Y);
 }
 
+bool ATestLidarCharacter::IsRunFrozen() const
+{
+	const UTimeStateSubsystem* TimeState = GetWorld() ? GetWorld()->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+	return TimeState && TimeState->IsRunFrozen();
+}
+
 void ATestLidarCharacter::OnScan()
 {
 	// The director is the only path to the lidar plugin; it ignores requests during the cooldown and in Normal time.
@@ -212,9 +218,9 @@ void ATestLidarCharacter::OnScan()
 
 void ATestLidarCharacter::OnToggleFlashlight()
 {
-	// The flashlight is locked off while time is stopped.
+	// The flashlight is locked off while time is stopped, and stays as it is while the pause menu freezes the run.
 	const UTimeStateSubsystem* TimeState = GetWorld()->GetSubsystem<UTimeStateSubsystem>();
-	if (TimeState && TimeState->IsStopped())
+	if (TimeState && (TimeState->IsStopped() || TimeState->IsRunFrozen()))
 	{
 		return;
 	}
@@ -254,6 +260,11 @@ void ATestLidarCharacter::OnInteractPressed()
 
 void ATestLidarCharacter::OnInteractReleased()
 {
+	// Opening the pause menu releases every held key: a hold in progress stands still and continues after the menu.
+	if (IsRunFrozen())
+	{
+		return;
+	}
 	if (AResidue* Residue = HeldResidue.Get())
 	{
 		Residue->EndCollect();

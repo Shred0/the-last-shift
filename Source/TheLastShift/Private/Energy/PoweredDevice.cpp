@@ -46,6 +46,11 @@ void APoweredDevice::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 double APoweredDevice::GetNow() const
 {
+	// The run's clock: it stands still while the pause menu freezes the run, so the powered time does too.
+	if (TimeState)
+	{
+		return TimeState->GetRunSeconds();
+	}
 	const UWorld* World = GetWorld();
 	return World ? World->GetTimeSeconds() : 0.0;
 }
@@ -149,7 +154,7 @@ void APoweredDevice::HandleTimeStateChanged(ETimeState NewState, ETimeState OldS
 void APoweredDevice::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	if (IsTimed() && !IsTimeStopped() && GetRemainingSeconds() <= 0.f)
+	if (IsTimed() && !IsTimeStopped() && !(TimeState && TimeState->IsRunFrozen()) && GetRemainingSeconds() <= 0.f)
 	{
 		SetPowered(false, TEXT("time ran out"));
 	}

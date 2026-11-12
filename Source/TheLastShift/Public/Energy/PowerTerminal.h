@@ -42,7 +42,7 @@ public:
 	TArray<TObjectPtr<APoweredDevice>> Targets;
 
 	/**
-	 * Interact from Instigator. Out of range: false, nothing happens. In range: in Normal time with enough banked
+	 * Interact from Instigator. Out of range, or while the pause menu freezes the run: false, nothing happens. In range: in Normal time with enough banked
 	 * energy, spends Cost, powers Targets, fires OnActivated and returns true; otherwise fires OnInsufficientEnergy and
 	 * returns false.
 	 */

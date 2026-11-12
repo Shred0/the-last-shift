@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// Automation tests of the text channel that need no world (Brief 6, criteria 2 to 7): TheLastShift.TextChannel.*.
+// Automation tests of the text channel that need no world (Brief 6, criteria 2 to 7; Brief 7: the structure of the
+// narrative CSV files, never their wording, number or length): TheLastShift.TextChannel.*.
 // Run with: Automation RunTests TheLastShift.TextChannel. Development editor builds only.
 
 #include "CoreMinimal.h"
@@ -11,6 +12,7 @@
 #include "Debug/TextTestListener.h"
 #include "Engine/DataTable.h"
 #include "Misc/FileHelper.h"
+#include "Internationalization/Regex.h"
 #include "Misc/Paths.h"
 #include "Narrative/NarrativeRows.h"
 #include "TextChannel/TextChannelComponent.h"
@@ -368,80 +370,242 @@ bool FTextChannelSelectionTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// --- Structure of the narrative CSV files (Brief 7): never their wording, their number or their length ---
+
+#if WITH_EDITOR
+namespace NarrativeCsv
+{
+	static const TCHAR* AllowedTokens[] = { TEXT("{still}"), TEXT("{jump}"), TEXT("{home}"), TEXT("{battery}") };
+	static const FName AIMessageTextColumns[] = { TEXT("Text"), TEXT("TextNoArticles"), TEXT("TextAbbreviated"), TEXT("TextScattered") };
+
+	static FString Load(const TCHAR* FileName)
+	{
+		FString Csv;
+		FFileHelper::LoadFileToString(Csv, *FPaths::Combine(FPaths::ProjectDir(), TEXT("Narrative"), FileName));
+		return Csv;
+	}
+
+	/** Non-empty physical lines of Csv minus the header: equal to the row count unless a cell spans lines. */
+	static int32 CountDataLines(const FString& Csv)
+	{
+		TArray<FString> Lines;
+		Csv.ParseIntoArrayLines(Lines, true);
+		int32 Count = 0;
+		for (const FString& Line : Lines)
+		{
+			Count += Line.TrimStartAndEnd().IsEmpty() ? 0 : 1;
+		}
+		return FMath::Max(Count - 1, 0);
+	}
+
+	static UDataTable* Parse(const FString& Csv, UScriptStruct* Struct, TArray<FString>& OutProblems, const TCHAR* File)
+	{
+		UDataTable* Table = NewObject<UDataTable>(GetTransientPackage());
+		Table->RowStruct = Struct;
+		for (const FString& Problem : Table->CreateTableFromCSVString(Csv))
+		{
+			OutProblems.Add(FString::Printf(TEXT("%s does not parse against %s: %s"), File, *Struct->GetName(), *Problem));
+		}
+		if (CountDataLines(Csv) != Table->GetRowMap().Num())
+		{
+			OutProblems.Add(FString::Printf(TEXT("%s: %d data lines for %d rows, a cell has a line break"), File, CountDataLines(Csv), Table->GetRowMap().Num()));
+		}
+		return Table;
+	}
+
+	static FString TextCell(const UScriptStruct* Struct, const uint8* Row, FName Column)
+	{
+		const FTextProperty* Property = CastField<FTextProperty>(Struct->FindPropertyByName(Column));
+		return Property ? Property->GetPropertyValue_InContainer(Row).ToString() : FString();
+	}
+
+	static void CheckLineBreaks(const TCHAR* File, const FName& RowName, FName Column, const FString& Cell, TArray<FString>& OutProblems)
+	{
+		if (Cell.Contains(TEXT("\n")) || Cell.Contains(TEXT("\r")))
+		{
+			OutProblems.Add(FString::Printf(TEXT("%s, row %s, %s: the cell has a line break"), File, *RowName.ToString(), *Column.ToString()));
+		}
+	}
+
+	/** Whole words of S, lowercase, with every {token} removed first. */
+	static TArray<FString> WordsWithoutTokens(const FString& S)
+	{
+		FString Plain;
+		for (int32 I = 0; I < S.Len(); ++I)
+		{
+			if (S[I] == TEXT('{'))
+			{
+				const int32 Close = S.Find(TEXT("}"), ESearchCase::CaseSensitive, ESearchDir::FromStart, I);
+				if (Close != INDEX_NONE)
+				{
+					Plain.AppendChar(TEXT(' '));
+					I = Close;
+					continue;
+				}
+			}
+			Plain.AppendChar(S[I]);
+		}
+		return TextChannelTests::Words(Plain);
+	}
+
+	/** Every problem of DT_AIMessages.csv (empty: the structure is right). */
+	static TArray<FString> CheckAIMessages(const FString& Csv, const TCHAR* File = TEXT("DT_AIMessages.csv"))
+	{
+		TArray<FString> Problems;
+		UScriptStruct* Struct = FAIMessageRow::StaticStruct();
+		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
+		if (Table->GetRowMap().IsEmpty())
+		{
+			Problems.Add(FString::Printf(TEXT("%s has no rows"), File));
+		}
+		const UEnum* Triggers = StaticEnum<ETextTrigger>();
+		const FRegexPattern NamePattern(TEXT("^A([1-4])_([A-Za-z]+)_([0-9]+)$"));
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FString Name = Pair.Key.ToString();
+			const FAIMessageRow& Row = *reinterpret_cast<const FAIMessageRow*>(Pair.Value);
+			const int64 TriggerValue = static_cast<int64>(Row.Trigger);
+			if (!Triggers || !Triggers->IsValidEnumValue(TriggerValue) || Triggers->GetNameStringByValue(TriggerValue).EndsWith(TEXT("_MAX")))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: invalid trigger"), File, *Name));
+			}
+			if (Row.Act < 1 || Row.Act > 4)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: act %d is not 1-4"), File, *Name, Row.Act));
+			}
+			if (Row.Order < 0 || Row.Order > 999)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: order %d is not 0-999"), File, *Name, Row.Order));
+			}
+			FRegexMatcher Match(NamePattern, Name);
+			if (!Match.FindNext())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not follow A<act>_<Trigger>_<order>"), File, *Name));
+			}
+			else if (FCString::Atoi(*Match.GetCaptureGroup(1)) != Row.Act || Match.GetCaptureGroup(2) != LexToString(Row.Trigger)
+				|| FCString::Atoi(*Match.GetCaptureGroup(3)) != Row.Order)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not match its columns (act %d, trigger %s, order %d)"), File, *Name, Row.Act,
+					LexToString(Row.Trigger), Row.Order));
+			}
+
+			for (const FName& Column : AIMessageTextColumns)
+			{
+				const FString Cell = TextCell(Struct, Pair.Value, Column);
+				CheckLineBreaks(File, Pair.Key, Column, Cell, Problems);
+				for (int32 I = 0; I < Cell.Len(); ++I)
+				{
+					if (Cell[I] != TEXT('{'))
+					{
+						continue;
+					}
+					const int32 Close = Cell.Find(TEXT("}"), ESearchCase::CaseSensitive, ESearchDir::FromStart, I);
+					const FString Token = Close == INDEX_NONE ? Cell.Mid(I) : Cell.Mid(I, Close - I + 1);
+					bool bKnown = false;
+					for (const TCHAR* Allowed : AllowedTokens)
+					{
+						bKnown |= Token.Equals(Allowed, ESearchCase::CaseSensitive);
+					}
+					if (!bKnown)
+					{
+						Problems.Add(FString::Printf(TEXT("%s, row %s, %s: unknown token %s (allowed: {still}, {jump}, {home}, {battery})"), File, *Name, *Column.ToString(), *Token));
+					}
+					else if (Token == TEXT("{jump}") && Row.Trigger != ETextTrigger::JumpReturn)
+					{
+						Problems.Add(FString::Printf(TEXT("%s, row %s, %s: {jump} in a %s row ({jump} belongs to JumpReturn rows only)"), File, *Name, *Column.ToString(),
+							LexToString(Row.Trigger)));
+					}
+					I = Close == INDEX_NONE ? Cell.Len() : Close;
+				}
+			}
+			const FString Text = Row.Text.ToString();
+			if (Row.Trigger == ETextTrigger::JumpReturn && !Text.StartsWith(TEXT("[PLACEHOLDER]"), ESearchCase::CaseSensitive)
+				&& !WordsWithoutTokens(Text).Contains(TEXT("still")))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: a JumpReturn text without the word \"still\" (the {still} token does not count)"), File, *Name));
+			}
+		}
+		return Problems;
+	}
+
+	/** Every problem of DT_Endings.csv (empty: the structure is right). */
+	static TArray<FString> CheckEndings(const FString& Csv, const TCHAR* File = TEXT("DT_Endings.csv"))
+	{
+		TArray<FString> Problems;
+		UScriptStruct* Struct = FEndingRow::StaticStruct();
+		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
+		for (const TCHAR* Required : { TEXT("Inject"), TEXT("Open"), TEXT("Loss") })
+		{
+			if (!Table->GetRowMap().Contains(FName(Required)))
+			{
+				Problems.Add(FString::Printf(TEXT("%s: no row %s (the rows are Inject, Open and Loss)"), File, Required));
+			}
+		}
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			CheckLineBreaks(File, Pair.Key, TEXT("Text"), TextCell(Struct, Pair.Value, TEXT("Text")), Problems);
+		}
+		return Problems;
+	}
+
+	/** Csv with one more data line, on a line of its own. */
+	static FString WithLine(const FString& Csv, const FString& Line)
+	{
+		return Csv + (Csv.EndsWith(TEXT("\n")) ? TEXT("") : TEXT("\n")) + Line + TEXT("\n");
+	}
+}
+#endif
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTextChannelCsvTest, "TheLastShift.TextChannel.Csv", TextChannelTests::Flags)
 
 bool FTextChannelCsvTest::RunTest(const FString& Parameters)
 {
 #if WITH_EDITOR
-	struct FFile { const TCHAR* Name; UScriptStruct* Struct; TArray<FName> TextColumns; };
-	const FFile Files[] = {
-		{ TEXT("DT_AIMessages.csv"), FAIMessageRow::StaticStruct(), { TEXT("Text"), TEXT("TextNoArticles"), TEXT("TextAbbreviated"), TEXT("TextScattered") } },
-		{ TEXT("DT_Endings.csv"), FEndingRow::StaticStruct(), { TEXT("Text") } },
+	using namespace NarrativeCsv;
+	const FString Messages = Load(TEXT("DT_AIMessages.csv"));
+	const FString Endings = Load(TEXT("DT_Endings.csv"));
+	TestFalse(TEXT("Narrative/DT_AIMessages.csv is read"), Messages.IsEmpty());
+	TestFalse(TEXT("Narrative/DT_Endings.csv is read"), Endings.IsEmpty());
+	const TArray<FString> MessageProblems = CheckAIMessages(Messages);
+	const TArray<FString> EndingProblems = CheckEndings(Endings);
+	for (const FString& Problem : MessageProblems) { AddError(Problem); }
+	for (const FString& Problem : EndingProblems) { AddError(Problem); }
+	AddInfo(FString::Printf(TEXT("DT_AIMessages.csv: %d data lines, %d problems; DT_Endings.csv: %d data lines, %d problems."), CountDataLines(Messages),
+		MessageProblems.Num(), CountDataLines(Endings), EndingProblems.Num()));
+	TestEqual(TEXT("DT_AIMessages.csv: structure right (parse, names, triggers, acts, tokens, {jump}, line breaks, still)"), MessageProblems.Num(), 0);
+	TestEqual(TEXT("DT_Endings.csv: structure right (parse, Inject, Open, Loss, line breaks)"), EndingProblems.Num(), 0);
+#endif
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTextChannelCsvCheckTest, "TheLastShift.TextChannel.CsvCheck", TextChannelTests::Flags)
+
+bool FTextChannelCsvCheckTest::RunTest(const FString& Parameters)
+{
+#if WITH_EDITOR
+	using namespace NarrativeCsv;
+	// Each case adds one bad row to a copy of the committed file, so it holds whatever the file holds.
+	const FString Base = Load(TEXT("DT_AIMessages.csv"));
+	TestEqual(TEXT("The committed DT_AIMessages.csv has no problem before a bad row is added"), CheckAIMessages(Base).Num(), 0);
+	struct FCase { const TCHAR* What; const TCHAR* Line; const TCHAR* Expected; };
+	const FCase Cases[] = {
+		{ TEXT("an unknown token"), TEXT("A1_Spend_901,Spend,1,901,\"A test line with {bogus} in it.\",,,"), TEXT("unknown token {bogus}") },
+		{ TEXT("{jump} in a Spend row"), TEXT("A1_Spend_902,Spend,1,902,\"A test line with {jump} in it.\",,,"), TEXT("{jump} in a Spend row") },
+		{ TEXT("a line break in a cell"), TEXT("A1_Spend_903,Spend,1,903,\"A test line,\nbroken in two.\",,,"), TEXT("line break") },
+		{ TEXT("a JumpReturn text without \"still\""), TEXT("A1_JumpReturn_904,JumpReturn,1,904,\"A return after {still} with a jump of {jump}.\",,,"),
+			TEXT("without the word \"still\"") },
 	};
-	for (const FFile& File : Files)
+	for (const FCase& Case : Cases)
 	{
-		const FString Path = FPaths::Combine(FPaths::ProjectDir(), TEXT("Narrative"), File.Name);
-		FString Csv;
-		if (!TestTrue(FString::Printf(TEXT("%s is read"), File.Name), FFileHelper::LoadFileToString(Csv, *Path)))
-		{
-			continue;
-		}
-		UDataTable* Table = NewObject<UDataTable>(GetTransientPackage());
-		Table->RowStruct = File.Struct;
-		const TArray<FString> Problems = Table->CreateTableFromCSVString(Csv);
-		TestEqual(FString::Printf(TEXT("%s parses with zero problems (%s)"), File.Name, *FString::Join(Problems, TEXT("; "))), Problems.Num(), 0);
-		TestTrue(FString::Printf(TEXT("%s has rows (%d)"), File.Name, Table->GetRowMap().Num()), Table->GetRowMap().Num() > 0);
-
-		int32 Cells = 0;
-		int32 Placeholder = 0;
-		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
-		{
-			for (const FName& Column : File.TextColumns)
-			{
-				const FTextProperty* Property = CastField<FTextProperty>(File.Struct->FindPropertyByName(Column));
-				if (!Property)
-				{
-					AddError(FString::Printf(TEXT("%s: no text column %s"), File.Name, *Column.ToString()));
-					continue;
-				}
-				const FString Cell = Property->GetPropertyValue_InContainer(Pair.Value).ToString();
-				if (!Cell.IsEmpty())
-				{
-					++Cells;
-					Placeholder += Cell.StartsWith(TEXT("[PLACEHOLDER]"), ESearchCase::CaseSensitive) ? 1 : 0;
-					if (!Cell.StartsWith(TEXT("[PLACEHOLDER]"), ESearchCase::CaseSensitive))
-					{
-						AddError(FString::Printf(TEXT("%s, row %s, %s does not start with [PLACEHOLDER]"), File.Name, *Pair.Key.ToString(), *Column.ToString()));
-					}
-				}
-			}
-		}
-		AddInfo(FString::Printf(TEXT("%s: %d rows, %d text cells, %d start with [PLACEHOLDER]."), File.Name, Table->GetRowMap().Num(), Cells, Placeholder));
-		TestEqual(FString::Printf(TEXT("%s: every text cell starts with [PLACEHOLDER]"), File.Name), Placeholder, Cells);
+		const TArray<FString> Problems = CheckAIMessages(WithLine(Base, Case.Line), TEXT("DT_AIMessages.csv (copy)"));
+		const FString All = FString::Join(Problems, TEXT(" | "));
+		AddInfo(FString::Printf(TEXT("%s: %s"), Case.What, *All));
+		TestTrue(FString::Printf(TEXT("%s fails with a clear message (\"%s\" in: %s)"), Case.What, Case.Expected, *All),
+			Problems.Num() > 0 && All.Contains(Case.Expected, ESearchCase::CaseSensitive));
 	}
-
-	// The AI messages cover what the brief asks for.
-	const FString AIPath = FPaths::Combine(FPaths::ProjectDir(), TEXT("Narrative"), TEXT("DT_AIMessages.csv"));
-	FString Csv;
-	FFileHelper::LoadFileToString(Csv, *AIPath);
-	UDataTable* Table = NewObject<UDataTable>(GetTransientPackage());
-	Table->RowStruct = FAIMessageRow::StaticStruct();
-	Table->CreateTableFromCSVString(Csv);
-	for (int32 Act = 1; Act <= 4; ++Act)
-	{
-		const TArray<FName> Returns = UTextChannelComponent::FindRows(Table, ETextTrigger::JumpReturn, Act);
-		TestEqual(FString::Printf(TEXT("Act %d: two JumpReturn rows"), Act), Returns.Num(), 2);
-		for (const FName& Name : Returns)
-		{
-			const FString Text = Table->FindRow<FAIMessageRow>(Name, TEXT("Test"))->Text.ToString();
-			TestTrue(FString::Printf(TEXT("%s uses all four tokens"), *Name.ToString()),
-				Text.Contains(TEXT("{still}")) && Text.Contains(TEXT("{jump}")) && Text.Contains(TEXT("{home}")) && Text.Contains(TEXT("{battery}")));
-		}
-		TestEqual(FString::Printf(TEXT("Act %d: one AreaEntry row"), Act), UTextChannelComponent::FindRows(Table, ETextTrigger::AreaEntry, Act).Num(), 1);
-		TestEqual(FString::Printf(TEXT("Act %d: one Spend row"), Act), UTextChannelComponent::FindRows(Table, ETextTrigger::Spend, Act).Num(), 1);
-		TestEqual(FString::Printf(TEXT("Act %d: AreaStart rows"), Act), UTextChannelComponent::FindRows(Table, ETextTrigger::AreaStart, Act).Num(), Act == 1 ? 3 : 0);
-		TestEqual(FString::Printf(TEXT("Act %d: FirstEnergy rows"), Act), UTextChannelComponent::FindRows(Table, ETextTrigger::FirstEnergy, Act).Num(), Act == 1 ? 1 : 0);
-	}
+	const FString NoLoss = Load(TEXT("DT_Endings.csv")).Replace(TEXT("\nLoss,"), TEXT("\nLost,"));
+	TestTrue(TEXT("DT_Endings.csv without the Loss row fails"),
+		FString::Join(CheckEndings(NoLoss, TEXT("DT_Endings.csv (copy)")), TEXT(" | ")).Contains(TEXT("no row Loss")));
 #endif
 	return true;
 }

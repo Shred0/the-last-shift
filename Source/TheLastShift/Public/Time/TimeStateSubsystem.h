@@ -19,6 +19,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnTimeStateChanged, ETimeState, 
  * Owns the time-stop state of the world and the stopped-time accounting (current stop, last stop, cumulative).
  * No time dilation is involved: game time keeps running while Stopped and the systems that care about the state query
  * it or listen to OnTimeStateChanged. All durations are world time, which the game never dilates.
+ *
+ * It is also the one place that knows the run is frozen by StdCore's pause menu (IsRunFrozen), in either time state,
+ * and it owns the run's clock (GetRunSeconds), which stands still meanwhile. Every time-dependent system of the game
+ * reads its time from GetRunSeconds and refuses actions while IsRunFrozen; none keeps a copy of the flag.
  */
 UCLASS()
 class THELASTSHIFT_API UTimeStateSubsystem : public UWorldSubsystem
@@ -34,9 +38,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "TimeState")
 	void Resume(EStopExitReason Reason = EStopExitReason::Resumed);
 
-	/** Stop, or Resume with reason Resumed. */
+	/** The player's Stop/Resume: Stop, or Resume with reason Resumed. Refused while the run is frozen. */
 	UFUNCTION(BlueprintCallable, Category = "TimeState")
 	void Toggle();
+
+	/**
+	 * True while StdCore's pause menu is open (the local AStdPlayerController's IsPausedByMenu, read on every call): the
+	 * run stands still in either time state and continues from where it was when the menu closes.
+	 */
+	UFUNCTION(BlueprintPure, Category = "TimeState")
+	bool IsRunFrozen() const;
+
+	/**
+	 * The run's clock in seconds: world time, which does not advance while the menu pauses the world. Timers, holds and
+	 * durations of the game are measured on it, so they stand still while the run is frozen.
+	 */
+	UFUNCTION(BlueprintPure, Category = "TimeState", meta = (Units = "s"))
+	double GetRunSeconds() const;
 
 	UFUNCTION(BlueprintPure, Category = "TimeState")
 	ETimeState GetState() const { return State; }
@@ -71,7 +89,6 @@ protected:
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 
 private:
-	double GetNow() const;
 	void SetState(ETimeState NewState, EStopExitReason Reason);
 
 	/** Part of the current stop that counts towards the cumulative total (it starts later after a reset). */

@@ -102,11 +102,14 @@ public:
 
 	// --- Actions ---
 
-	/** Starts the hold for Collector. Fails (false) unless Available, time Stopped and Collector within CollectRadius. */
+	/**
+	 * Starts the hold for Collector. Fails (false) unless Available, time Stopped, the run not frozen by the pause menu
+	 * and Collector within CollectRadius.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Residue")
 	bool BeginCollect(APawn* Collector);
 
-	/** Interact released: an unfinished hold resets. */
+	/** Interact released: an unfinished hold resets. Ignored while the run is frozen by the pause menu: the hold stands still. */
 	UFUNCTION(BlueprintCallable, Category = "Residue")
 	void EndCollect();
 
@@ -180,6 +183,10 @@ private:
 	void CompleteCollect();
 	void Return(const TCHAR* Why);
 	void CheckRegenerate(int32 TotalEnergy);
+
+	/** The run's clock (UTimeStateSubsystem::GetRunSeconds), world time before the time state is bound. */
+	double GetRunSeconds() const;
+
 	void BuildCluster();
 	FVector GetCollectorViewPoint(const APawn* Pawn) const;
 

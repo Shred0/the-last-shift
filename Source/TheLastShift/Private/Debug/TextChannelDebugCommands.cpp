@@ -2,9 +2,11 @@
 
 // Debug console commands for the home AI's text channel (Brief 6): tls.Text.Push, tls.Text.Trigger, tls.Text.Say,
 // tls.Text.Print, tls.Text.State and tls.TextChannelTest. The battery is set with tls.Home.Set. tls.TextChannelTest
-// runs on the core ticker, so it survives map changes. Development builds only.
+// runs on the core ticker, so it survives map changes, and reads the neutral fixture tables of NarrativeFixture, never
+// the rows of Narrative/ (Brief 7). Development builds only.
 
 #include "Debug/HomeTestListener.h"
+#include "Debug/NarrativeFixture.h"
 #include "Debug/TextTestListener.h"
 #include "Debug/TlsDebugCommon.h"
 #include "Area/AreaGenerator.h"
@@ -243,6 +245,7 @@ namespace TextDebug
 			GLog->RemoveOutputDevice(GRun.Warnings.Get());
 			GRun.Warnings.Reset();
 		}
+		NarrativeFixture::Restore(W());
 		GRun.bRunning = false;
 		UE_LOG(LogTheLastShift, Log, TEXT("%s summary (%s): %d checks passed, %d failed%s."), *GRun.Name,
 			GRun.Failed == 0 && GRun.Next >= GRun.Steps.Num() ? TEXT("PASS") : TEXT("FAIL"), GRun.Passed, GRun.Failed, Why);
@@ -589,6 +592,7 @@ namespace TextDebug
 			GRun.Jumps.Reset(NewObject<UTlsHomeTestListener>());
 			GRun.Warnings = MakeShared<FWarningCounter>();
 			GLog->AddOutputDevice(GRun.Warnings.Get());
+			NarrativeFixture::Install(W());
 			Note(FString::Printf(TEXT("tables: messages %s, endings %s"), *GetNameSafe(UTheLastShiftSettings::Get()->LoadAIMessagesTable()),
 				*GetNameSafe(UTheLastShiftSettings::Get()->LoadEndingsTable())));
 			GRun.TravelFrom = W();
@@ -632,10 +636,17 @@ namespace TextDebug
 				FString::Printf(TEXT("Resume: the same message restarts from its first character (\"%s\")"), *C->GetVisibleText()));
 			return 0.f;
 		}));
-		S.Add(WaitFor(TEXT("area 1: the three AreaStart rows"), []() { const UTextChannelComponent* C = Channel(); return StartsOf(TEXT("AreaStart")) >= 3 && C && !C->IsBusy(); }, 60.f, []()
+		S.Add(WaitFor(TEXT("area 1: every AreaStart row"), []()
 		{
+			const UTextChannelComponent* C = Channel();
+			const int32 Rows = UTextChannelComponent::FindRows(UTheLastShiftSettings::Get()->LoadAIMessagesTable(), ETextTrigger::AreaStart, 1).Num();
+			return Rows > 0 && StartsOf(TEXT("AreaStart")) >= Rows && C && !C->IsBusy();
+		}, 60.f, []()
+		{
+			const TArray<FName> Rows = UTextChannelComponent::FindRows(UTheLastShiftSettings::Get()->LoadAIMessagesTable(), ETextTrigger::AreaStart, 1);
+			const FString Want = FString::JoinBy(Rows, TEXT(","), [](const FName& N) { return N.ToString(); });
 			const FString Got = FString::JoinBy(GRun.Text->Started, TEXT(","), [](const FName& N) { return N.ToString(); });
-			Check(Got == TEXT("A1_AreaStart_1,A1_AreaStart_2,A1_AreaStart_3"), FString::Printf(TEXT("area 1 shows the three AreaStart rows in order: %s"), *Got));
+			Check(Got == Want, FString::Printf(TEXT("area 1 shows the %d AreaStart rows of the table in order: %s (expected %s)"), Rows.Num(), *Got, *Want));
 			return 1.0f;
 		}));
 
@@ -1020,7 +1031,7 @@ static FAutoConsoleCommandWithWorld GTlsTextStateCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsTextChannelTestCommand(
 	TEXT("tls.TextChannelTest"),
-	TEXT("tls.TextChannelTest (fresh PIE in MainMenu; starts a new run and clears the save): area 1's AreaStart rows, a Stop during a message, a push while Stopped, the first banked energy once, the layout at a terminal, a payment and a refusal, a rewind and a graze in act 1, the same row at batteries 0.65/0.35/0.05/0.02, travel labels 1->2 (full), 2->3 (0.35) and 3->4 (0.02), a contact in act 2, the loss and the main menu; screenshots in Saved/Screenshots/Brief6."),
+	TEXT("tls.TextChannelTest (fresh PIE in MainMenu; starts a new run and clears the save; reads neutral fixture tables, not Narrative/): area 1's AreaStart rows, a Stop during a message, a push while Stopped, the first banked energy once, the layout at a terminal, a payment and a refusal, a rewind and a graze in act 1, the same row at batteries 0.65/0.35/0.05/0.02, travel labels 1->2 (full), 2->3 (0.35) and 3->4 (0.02), a contact in act 2, the loss and the main menu; screenshots in Saved/Screenshots/Brief6."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		TArray<TextDebug::FStep> Steps;

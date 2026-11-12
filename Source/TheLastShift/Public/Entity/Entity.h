@@ -434,6 +434,10 @@ private:
 
 	void RecordExit(EStopExitReason Reason);
 	void CheckContact();
+
+	/** The run's clock (UTimeStateSubsystem::GetRunSeconds), world time before the time state is bound. */
+	double GetRunSeconds() const;
+
 	void DrawDebug() const;
 
 	UPROPERTY(Transient)

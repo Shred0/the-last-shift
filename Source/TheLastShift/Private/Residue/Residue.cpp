@@ -161,15 +161,14 @@ float AResidue::GetCollectProgress() const
 	{
 		return 0.f;
 	}
-	const UWorld* World = GetWorld();
-	const double Elapsed = World ? World->GetTimeSeconds() - CollectStartTime : 0.0;
+	const double Elapsed = GetRunSeconds() - CollectStartTime;
 	return FMath::Clamp(static_cast<float>(Elapsed / ResidueTuning::Seconds(CollectSeconds)), 0.f, 1.f);
 }
 
 bool AResidue::BeginCollect(APawn* InCollector)
 {
 	EnsureBound();
-	if (State != EResidueState::Available || !TimeState || !TimeState->IsStopped() || !IsInCollectRange(InCollector))
+	if (State != EResidueState::Available || !TimeState || !TimeState->IsStopped() || TimeState->IsRunFrozen() || !IsInCollectRange(InCollector))
 	{
 		UE_LOG(LogResidue, Verbose, TEXT("%s: collect refused (state %s, stopped %d, in range %d)."), *GetName(), LexToString(State),
 			TimeState && TimeState->IsStopped() ? 1 : 0, IsInCollectRange(InCollector) ? 1 : 0);
@@ -181,7 +180,7 @@ bool AResidue::BeginCollect(APawn* InCollector)
 	}
 
 	Collector = InCollector;
-	CollectStartTime = GetWorld()->GetTimeSeconds();
+	CollectStartTime = GetRunSeconds();
 	SetActorTickEnabled(true);
 	UE_LOG(LogResidue, Log, TEXT("%s: hold started (%.2f s needed)."), *GetName(), ResidueTuning::Seconds(CollectSeconds));
 	OnCollectProgress.Broadcast(0.f);
@@ -190,6 +189,13 @@ bool AResidue::BeginCollect(APawn* InCollector)
 
 void AResidue::EndCollect()
 {
+	// Opening the pause menu takes the keyboard focus and releases every held key: the hold stands still instead, and
+	// continues from where it was when the menu closes.
+	if (TimeState && TimeState->IsRunFrozen())
+	{
+		UE_LOG(LogResidue, Log, TEXT("%s: release ignored, the run is frozen by the pause menu (hold kept at %.2f)."), *GetName(), GetCollectProgress());
+		return;
+	}
 	if (IsCollecting())
 	{
 		CancelCollect(TEXT("released"));
@@ -214,6 +220,10 @@ void AResidue::Tick(float DeltaSeconds)
 		SetActorTickEnabled(false);
 		return;
 	}
+	if (TimeState && TimeState->IsRunFrozen())
+	{
+		return;
+	}
 	if (!TimeState || !TimeState->IsStopped())
 	{
 		CancelCollect(TEXT("time is not stopped"));
@@ -235,7 +245,7 @@ void AResidue::Tick(float DeltaSeconds)
 
 void AResidue::CompleteCollect()
 {
-	const double Held = GetWorld()->GetTimeSeconds() - CollectStartTime;
+	const double Held = GetRunSeconds() - CollectStartTime;
 	Collector.Reset();
 	SetActorTickEnabled(false);
 	State = EResidueState::Collected;
@@ -250,6 +260,16 @@ void AResidue::CompleteCollect()
 	{
 		UE_LOG(LogResidue, Warning, TEXT("%s: no energy subsystem, the collected energy is lost."), *GetName());
 	}
+}
+
+double AResidue::GetRunSeconds() const
+{
+	if (TimeState)
+	{
+		return TimeState->GetRunSeconds();
+	}
+	const UWorld* World = GetWorld();
+	return World ? World->GetTimeSeconds() : 0.0;
 }
 
 void AResidue::Return(const TCHAR* Why)

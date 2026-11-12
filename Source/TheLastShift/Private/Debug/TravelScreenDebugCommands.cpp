@@ -3,8 +3,10 @@
 // tls.TravelScreenTest (Brief 6b): the travel screen's progress bar and walk marker on every kind of travel the run makes.
 // It samples StdCore's flow every frame on the core ticker (so it survives map changes): bar and marker never going back,
 // both at their end when the screen uncovers, the longest interval without a frame, and the run subsystem's record of
-// each real step of an area build. Development builds only.
+// each real step of an area build. The entry lines come from the neutral fixture tables of NarrativeFixture, never from
+// the rows of Narrative/ (Brief 7). Development builds only.
 
+#include "Debug/NarrativeFixture.h"
 #include "Debug/TlsDebugCommon.h"
 #include "Area/AreaGenerator.h"
 #include "Containers/Ticker.h"
@@ -115,6 +117,7 @@ namespace TravelScreenDebug
 
 	static void Finish(const TCHAR* Why)
 	{
+		NarrativeFixture::Restore(W());
 		GRun.bRunning = false;
 		for (const FString& Kind : GRun.Kinds)
 		{
@@ -498,6 +501,7 @@ namespace TravelScreenDebug
 			Check(Std->bTransitionProgressBar && Std->bTransitionMarker && Std->TransitionMarkerImage.IsNull(),
 				FString::Printf(TEXT("the game switches the bar and the marker on (bar %d, marker %d), placeholder marker (no image)"),
 					Std->bTransitionProgressBar ? 1 : 0, Std->bTransitionMarker ? 1 : 0));
+			NarrativeFixture::Install(W());
 			const FTravelProgressFractions& P = UTheLastShiftSettings::Get()->TravelProgress;
 			Note(FString::Printf(TEXT("fractions: map loaded %.2f (StdCore), route planned %.2f, geometry built %.2f, navigation ready %.2f, player released 1"),
 				Std->TransitionMapLoadedProgress, P.RoutePlanned, P.GeometryBuilt, P.NavigationReady));

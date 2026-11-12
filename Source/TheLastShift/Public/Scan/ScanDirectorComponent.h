@@ -34,7 +34,8 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnScanDirectorLifecycle, UScanDirectorCompo
  * for the rewind reasons.
  * This is the only game object that talks to the lidar plugin, point-source registration included; game systems
  * subscribe to the events here.
- * All clocks use world time, the same clock as UTimeStateSubsystem (the game never dilates time).
+ * All clocks use UTimeStateSubsystem::GetRunSeconds (world time, never dilated): while the pause menu freezes the run
+ * they and the timer manager stand still, so every timer continues from where it was when the menu closes.
  */
 UCLASS(ClassGroup = (TheLastShift), meta = (BlueprintSpawnableComponent))
 class THELASTSHIFT_API UScanDirectorComponent : public UActorComponent
@@ -66,8 +67,8 @@ public:
 
 	/**
 	 * Scans now if time is Stopped and the cooldown has elapsed, then restarts the cooldown. Returns true if a scan
-	 * was issued. Returns false (and does nothing) during the cooldown, before the automatic first scan, and in
-	 * Normal time.
+	 * was issued. Returns false (and does nothing) during the cooldown, before the automatic first scan, in
+	 * Normal time, and while the run is frozen by the pause menu.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Scan")
 	bool RequestScan();
