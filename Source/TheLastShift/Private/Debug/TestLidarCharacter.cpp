@@ -6,12 +6,10 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/SpotLightComponent.h"
 #include "EnhancedInputComponent.h"
-#include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
-#include "InputMappingContext.h"
 #include "Energy/PowerTerminal.h"
 #include "LidarScanComponent.h"
 #include "Residue/Residue.h"
@@ -93,7 +91,6 @@ void ATestLidarCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void ATestLidarCharacter::PawnClientRestart()
 {
 	Super::PawnClientRestart();
-	AddInputMapping();
 	CreateScanCue();
 }
 
@@ -129,20 +126,6 @@ void ATestLidarCharacter::CreateScanCue()
 			InteractPrompt->SetInteractAction(InteractAction);
 			InteractPrompt->AddToViewport(0);
 		}
-	}
-}
-
-void ATestLidarCharacter::AddInputMapping() const
-{
-	const APlayerController* PC = Cast<APlayerController>(GetController());
-	if (!PC || !InputMapping)
-	{
-		return;
-	}
-
-	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
-	{
-		Subsystem->AddMappingContext(InputMapping, 0);
 	}
 }
 

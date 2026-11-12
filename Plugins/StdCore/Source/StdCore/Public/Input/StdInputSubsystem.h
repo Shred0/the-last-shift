@@ -6,6 +6,7 @@
 #include "InputCoreTypes.h"
 #include "Subsystems/LocalPlayerSubsystem.h"
 #include "UserSettings/EnhancedInputUserSettings.h"
+#include "Settings/StdProjectSettings.h"
 #include "StdInputSubsystem.generated.h"
 
 class UEnhancedInputLocalPlayerSubsystem;
@@ -73,13 +74,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Std Core|Input")
 	void ApplyMappingContexts();
 
-	/** Remappable keyboard/mouse entries, grouped by category in the order they first appear. */
+	/**
+	 * Remappable keyboard/mouse entries as the Controls tab lists them: the rows named in UStdProjectSettings::KeyBindingRows
+	 * first, in that order and with those labels, then the others grouped by category in the order they first appear.
+	 * Mappings in UStdProjectSettings::HiddenKeyMappings are left out.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Std Core|Input")
 	TArray<FStdKeyBindingRow> GetRemappableKeys() const;
 
 	/**
-	 * Assigns NewKey to an entry. A key already used by another entry is swapped with it; reserved keys, gamepad
-	 * keys and axes are refused. OutMessage explains a swap or a refusal (empty otherwise). Saved immediately.
+	 * Orders Rows the way GetRemappableKeys returns them: removes Hidden names, sorts by MappingOrder (unknown names
+	 * last), groups by category, then moves the rows named in Listed to the front, in Listed order, with its labels and
+	 * categories. Needs no player: the rule the tests check.
+	 */
+	static void ArrangeKeyBindingRows(TArray<FStdKeyBindingRow>& Rows, const TArray<FName>& MappingOrder,
+		const TArray<FStdKeyBindingRowSetting>& Listed, const TArray<FName>& Hidden);
+
+	/**
+	 * Assigns NewKey to an entry of GetRemappableKeys. A key already used by another of those entries is swapped with
+	 * it; reserved keys, gamepad keys and axes are refused, and so are hidden entries. OutMessage explains a swap or a
+	 * refusal (empty otherwise). Saved immediately.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Std Core|Input")
 	EStdRemapResult RemapKey(FName MappingName, EPlayerMappableKeySlot Slot, FKey NewKey, FText& OutMessage);

@@ -122,7 +122,7 @@ namespace RunDebug
 		GTravel.bNewWorldSeen = true;
 		if (Gen && !Gen->IsReady())
 		{
-			// Held: Q and movement must do nothing.
+			// Held: the time stop key and movement must do nothing.
 			const UTimeStateSubsystem* Time = World->GetSubsystem<UTimeStateSubsystem>();
 			GTravel.StopsWhileHeld += Time && Time->IsStopped() ? 1 : 0;
 			if (Pawn)
@@ -136,7 +136,7 @@ namespace RunDebug
 				// Every tick while held.
 				{
 					GTravel.LastProbeReal = Now;
-					TimeStateDebug::PressKey(World, EKeys::Q);
+					TimeStateDebug::PressKey(World, TimeStateDebug::BoundKey(World, TEXT("TimeStopAction")));
 					Pawn->AddMovementInput(Pawn->GetActorForwardVector(), 1.f, true);
 					++GTravel.Probes;
 				}
@@ -213,7 +213,7 @@ namespace RunDebug
 		case 0:
 			if (GExit.bStopped)
 			{
-				TimeStateDebug::PressKey(World, EKeys::Q);
+				TimeStateDebug::PressKey(World, TimeStateDebug::BoundKey(World, TEXT("TimeStopAction")));
 			}
 			Next();
 			break;
@@ -247,7 +247,7 @@ namespace RunDebug
 			Report(Name, !Exit->HasTriggered() && !F->IsTransitioning() && Exit->GetVolume()->IsOverlappingActor(Pawn),
 				FString::Printf(TEXT("inside the exit for 2 s while Stopped: no travel (overlapping %d, triggered %d, transition %d)"),
 					Exit->GetVolume()->IsOverlappingActor(Pawn) ? 1 : 0, Exit->HasTriggered() ? 1 : 0, F->IsTransitioning() ? 1 : 0), GExit.Failures);
-			TimeStateDebug::PressKey(World, EKeys::Q);
+			TimeStateDebug::PressKey(World, TimeStateDebug::BoundKey(World, TEXT("TimeStopAction")));
 			Next();
 			break;
 		case 3:

@@ -56,6 +56,28 @@ struct STDCORE_API FStdMappingContextSetting
 };
 
 /**
+ * One row of the Controls tab named by the project: a Player Mappable Key name (set on the Input Action, or on the
+ * mapping with Override Settings) and how the row is labelled. Rows are listed in the order of the setting.
+ */
+USTRUCT(BlueprintType)
+struct STDCORE_API FStdKeyBindingRowSetting
+{
+	GENERATED_BODY()
+
+	/** Player Mappable Key name of the mapping (e.g. Interact). One action may have several, one per row. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
+	FName MappingName;
+
+	/** Label of the row. Empty: the display name set on the mapping or the action. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
+	FText DisplayName;
+
+	/** Header shown above the row when it differs from the previous row's. Empty: no header. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
+	FText Category;
+};
+
+/**
  * Per-project settings of the Std Core plugin: Project Settings > Game > Std Core.
  * Saved in the host project's DefaultGame.ini. Every default points to an asset inside the plugin,
  * so the plugin works as soon as it is copied, and a project can replace any of them without code changes.
@@ -144,6 +166,20 @@ public:
 	/** Keys the player can never assign while remapping. Gamepad keys and axes are always refused as well. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
 	TArray<FKey> ReservedKeys;
+
+	/**
+	 * Rows the Controls tab lists first, in this order, with these labels. Remappable mappings not named here follow
+	 * them, grouped by category as before. Empty: every remappable mapping, grouped by category.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
+	TArray<FStdKeyBindingRowSetting> KeyBindingRows;
+
+	/**
+	 * Player Mappable Key names never shown in the Controls tab and never remapped: the project's way to drop rows of
+	 * mapping contexts it registers but does not use. A hidden mapping keeps its default key and takes no part in swaps.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
+	TArray<FName> HiddenKeyMappings;
 
 	// UI
 

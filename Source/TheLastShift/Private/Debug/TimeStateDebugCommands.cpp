@@ -376,7 +376,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsReportCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsCycleTestCommand(
 	TEXT("tls.CycleTest"),
-	TEXT("tls.CycleTest [Cycles=20] [StopSeconds=4.6] [Key=Q]: Stop/Resume cycles via simulated key presses, checks each Resume leaves nothing behind."),
+	TEXT("tls.CycleTest [Cycles=20] [StopSeconds=4.6] [Key=the time stop key]: Stop/Resume cycles via simulated key presses, checks each Resume leaves nothing behind."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		using namespace TimeStateDebug;
@@ -405,7 +405,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsCycleTestCommand(
 		GCycleTest.World = World;
 		GCycleTest.Total = Args.Num() > 0 ? FMath::Max(FCString::Atoi(*Args[0]), 1) : 20;
 		GCycleTest.StopSeconds = Args.Num() > 1 ? FMath::Max(FCString::Atof(*Args[1]), 0.1f) : 4.6f;
-		GCycleTest.Key = FKey(Args.Num() > 2 ? FName(*Args[2]) : FName(TEXT("Q")));
+		GCycleTest.Key = Args.Num() > 2 ? FKey(FName(*Args[2])) : BoundKey(World, TEXT("TimeStopAction"));
 		GCycleTest.SettleSeconds = SettleSeconds + 0.15f;
 		GCycleTest.bRunning = true;
 

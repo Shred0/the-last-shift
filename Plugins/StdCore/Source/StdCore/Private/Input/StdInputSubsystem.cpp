@@ -150,7 +150,7 @@ TArray<FStdKeyBindingRow> UStdInputSubsystem::GetRemappableKeys() const
 	}
 
 	// The profile stores its rows in a map, whose order changes once saved keys are loaded: follow the order of the
-	// configured mapping contexts instead, then group by category in the order categories first appear.
+	// configured mapping contexts instead.
 	TArray<FName> MappingOrder;
 	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
 	for (int32 Index = 0; Index < Settings->MappingContexts.Num(); ++Index)
@@ -169,6 +169,25 @@ TArray<FStdKeyBindingRow> UStdInputSubsystem::GetRemappableKeys() const
 			}
 		}
 	}
+	for (const FStdKeyBindingRowSetting& Entry : Settings->KeyBindingRows)
+	{
+		if (!Rows.IsEmpty() && !Rows.ContainsByPredicate([&Entry](const FStdKeyBindingRow& Row) { return Row.MappingName == Entry.MappingName; }))
+		{
+			StdLog::WarnOnce(TEXT("KeyBindingRows|") + Entry.MappingName.ToString(), FString::Printf(
+				TEXT("Std Core setting 'KeyBindingRows' names '%s', which no registered mapping context maps to a keyboard or mouse key. The row is skipped."),
+				*Entry.MappingName.ToString()));
+		}
+	}
+
+	ArrangeKeyBindingRows(Rows, MappingOrder, Settings->KeyBindingRows, Settings->HiddenKeyMappings);
+	return Rows;
+}
+
+void UStdInputSubsystem::ArrangeKeyBindingRows(TArray<FStdKeyBindingRow>& Rows, const TArray<FName>& MappingOrder,
+	const TArray<FStdKeyBindingRowSetting>& Listed, const TArray<FName>& Hidden)
+{
+	Rows.RemoveAll([&Hidden](const FStdKeyBindingRow& Row) { return Hidden.Contains(Row.MappingName); });
+
 	Rows.StableSort([&MappingOrder](const FStdKeyBindingRow& A, const FStdKeyBindingRow& B)
 	{
 		const int32 IndexA = MappingOrder.IndexOfByKey(A.MappingName);
@@ -176,6 +195,29 @@ TArray<FStdKeyBindingRow> UStdInputSubsystem::GetRemappableKeys() const
 		return (IndexA == INDEX_NONE ? MAX_int32 : IndexA) < (IndexB == INDEX_NONE ? MAX_int32 : IndexB);
 	});
 
+	// The rows the project names, in its order and with its labels.
+	TArray<FStdKeyBindingRow> Arranged;
+	for (const FStdKeyBindingRowSetting& Entry : Listed)
+	{
+		for (int32 Index = 0; Index < Rows.Num();)
+		{
+			if (Rows[Index].MappingName != Entry.MappingName)
+			{
+				++Index;
+				continue;
+			}
+			FStdKeyBindingRow Row = Rows[Index];
+			Rows.RemoveAt(Index);
+			if (!Entry.DisplayName.IsEmpty())
+			{
+				Row.DisplayName = Entry.DisplayName;
+			}
+			Row.Category = Entry.Category;
+			Arranged.Add(MoveTemp(Row));
+		}
+	}
+
+	// The others, grouped by category in the order categories first appear.
 	TArray<FString> CategoryOrder;
 	for (const FStdKeyBindingRow& Row : Rows)
 	{
@@ -186,7 +228,8 @@ TArray<FStdKeyBindingRow> UStdInputSubsystem::GetRemappableKeys() const
 		return CategoryOrder.IndexOfByKey(A.Category.ToString()) < CategoryOrder.IndexOfByKey(B.Category.ToString());
 	});
 
-	return Rows;
+	Arranged.Append(MoveTemp(Rows));
+	Rows = MoveTemp(Arranged);
 }
 
 const FPlayerKeyMapping* UStdInputSubsystem::FindMapping(FName MappingName, EPlayerMappableKeySlot Slot) const
@@ -247,7 +290,7 @@ EStdRemapResult UStdInputSubsystem::RemapKey(FName MappingName, EPlayerMappableK
 	}
 
 	const FPlayerKeyMapping* Mapping = FindMapping(MappingName, Slot);
-	if (!Mapping || !IsKeyboardMouseMapping(*Mapping))
+	if (!Mapping || !IsKeyboardMouseMapping(*Mapping) || UStdProjectSettings::Get()->HiddenKeyMappings.Contains(MappingName))
 	{
 		OutMessage = LOCTEXT("RemapUnknownAction", "This action cannot be remapped.");
 		UE_LOG(LogStdCore, Warning, TEXT("RemapKey: no remappable keyboard/mouse mapping named '%s'."), *MappingName.ToString());
@@ -275,6 +318,13 @@ EStdRemapResult UStdInputSubsystem::RemapKey(FName MappingName, EPlayerMappableK
 			OtherRow = Row;
 			break;
 		}
+	}
+
+	// A swap gives the other entry this entry's key: never leave it without one.
+	if (OtherRow.IsSet() && !OldKey.IsValid())
+	{
+		OutMessage = LOCTEXT("RemapFailed", "The key could not be assigned.");
+		return EStdRemapResult::Rejected;
 	}
 
 	FMapPlayerKeyArgs Args;

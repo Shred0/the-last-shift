@@ -213,6 +213,26 @@ Never use `SC_Master` directly. To add a finer category (for example `SC_Footste
 
 The new entry appears in the Controls tab by itself.
 
+### Choose the rows of the Controls tab
+
+By default the Controls tab lists every remappable keyboard and mouse entry of the configured mapping contexts, grouped by category. Two settings in *Project Settings > Std Core > Input* (section `[/Script/StdCore.StdProjectSettings]` of the project's `DefaultGame.ini`) change that without touching the plugin:
+
+- **Key Binding Rows** (`KeyBindingRows`): the rows the tab lists first, in this order. Each entry names a Player Mappable Key name (`MappingName`, as set on the Input Action or on the mapping), an optional label (`DisplayName`; empty keeps the mapping's own) and an optional header (`Category`; empty shows none). Entries not named here follow, grouped by category as before.
+- **Hidden Key Mappings** (`HiddenKeyMappings`): names never shown and never remapped, for entries of a registered context that the project does not use. A hidden entry keeps its default key and takes no part in swaps.
+
+Swaps and refusals apply between the rows the tab shows; *Reset to defaults* restores every row.
+
+```ini
+[/Script/StdCore.StdProjectSettings]
+!KeyBindingRows=ClearArray
++KeyBindingRows=(MappingName="Dash",DisplayName=NSLOCTEXT("MyGame", "ControlsDash", "Dash"))
++KeyBindingRows=(MappingName="Interact",DisplayName=NSLOCTEXT("MyGame", "ControlsUse", "Use"),Category=NSLOCTEXT("MyGame", "ControlsActions", "Actions"))
+!HiddenKeyMappings=ClearArray
++HiddenKeyMappings=Jump
+```
+
+Here the tab lists Dash, then Interact labelled "Use" under an "Actions" header, then the plugin's movement rows; Jump is gone. `UStdInputSubsystem::GetRemappableKeys` returns the rows in that order. A listed name that no registered context maps to a keyboard or mouse key is skipped with one warning in the log.
+
 ### Bind to a tag
 
 C++ (works on any `UEnhancedInputComponent`, no custom input component class):

@@ -513,8 +513,8 @@ namespace HomeDebug
 			}
 			Check(Screen && Matching == GRun.SavedSnapshots.Num() && Screen->GetEntryCount() == GRun.SavedSnapshots.Num() + 1 && Screen->GetActOfEntry(Screen->GetEntryCount() - 1) == 0,
 				FString::Printf(TEXT("%s: the list has the %d acts reached with their entry battery, then Main menu (%d match)"), *Label, GRun.SavedSnapshots.Num(), Matching));
-			// Input: Q (time stop) and pause.
-			TimeStateDebug::PressKey(W(), EKeys::Q);
+			// Input: the time stop key and pause.
+			TimeStateDebug::PressKey(W(), TimeStateDebug::BoundKey(W(), TEXT("TimeStopAction")));
 			AStdPlayerController* StdPC = Cast<AStdPlayerController>(PC());
 			const bool bPaused = StdPC && StdPC->PauseGame();
 			Check(!bPaused && (!StdPC || !StdPC->IsPausedByMenu()), FString::Printf(TEXT("%s: the pause menu does not open (PauseGame %d, bCanPause %d)"), *Label, bPaused ? 1 : 0, StdPC && StdPC->bCanPause ? 1 : 0));
@@ -524,7 +524,7 @@ namespace HomeDebug
 		}));
 		S.Add(Do(Label + TEXT(": still Normal, UI input"), [Label]()
 		{
-			Check(!IsStopped(), FString::Printf(TEXT("%s: Q on the loss screen did not stop time"), *Label));
+			Check(!IsStopped(), FString::Printf(TEXT("%s: the time stop key on the loss screen did not stop time"), *Label));
 			CheckInput(false, Label + TEXT(" (loss screen)"));
 			return 0.f;
 		}));

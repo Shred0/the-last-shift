@@ -5,10 +5,12 @@
 // Helpers shared by the tls.* console commands (implemented in TimeStateDebugCommands.cpp). Development builds only.
 
 #include "CoreMinimal.h"
+#include "Input/StdInputSubsystem.h"
 #include "Time/TimeState.h"
 
 #if !UE_BUILD_SHIPPING
 
+class UInputAction;
 class UScanDirectorComponent;
 class UWorld;
 struct FKey;
@@ -20,6 +22,27 @@ namespace TimeStateDebug
 
 	/** Simulates a real key press on the first local player controller: pressed now, released next tick. */
 	bool PressKey(UWorld* World, const FKey& Key);
+
+	/** The local pawn's input action held in the property named PropertyName (e.g. TimeStopAction), or null. */
+	const UInputAction* FindPawnAction(UWorld* World, FName PropertyName);
+
+	/**
+	 * The keyboard or mouse key bound now to that pawn action, following the player's saved rebinding (implemented in
+	 * InputDebugCommands.cpp). Tests press this instead of a fixed letter, so a saved rebinding cannot change their result.
+	 */
+	FKey BoundKey(UWorld* World, FName PropertyName);
+
+	/** StdCore's input subsystem of the first local player, or null. */
+	UStdInputSubsystem* StdInputOf(UWorld* World);
+
+	/** The rows of StdCore's Controls tab with their current keys, so a test that rebinds can put the player's keys back. */
+	TArray<FStdKeyBindingRow> SaveBindings(UWorld* World);
+
+	/** Resets to the defaults, then gives each saved row its saved key. Returns whether every row has its saved key again. */
+	bool RestoreBindings(UWorld* World, const TArray<FStdKeyBindingRow>& Saved);
+
+	/** The first keyboard key of a fixed test list that no Controls row holds, StdCore accepts and Avoid does not name. */
+	FKey FreeKey(UWorld* World, const TArray<FKey>& Avoid);
 
 	/** The scan director of the local player's pawn, else the first one in the world. */
 	UScanDirectorComponent* FindPlayerDirector(UWorld* World);

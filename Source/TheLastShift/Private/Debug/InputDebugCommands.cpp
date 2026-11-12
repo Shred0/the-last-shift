@@ -26,6 +26,7 @@
 #include "HAL/IConsoleManager.h"
 #include "InputAction.h"
 #include "InputMappingContext.h"
+#include "Input/StdInputSubsystem.h"
 #include "Settings/StdProjectSettings.h"
 #include "TheLastShift.h"
 #include "Components/TextBlock.h"
@@ -54,6 +55,88 @@ namespace TimeStateDebug
 	bool FInputReport::IsMenuReady() const
 	{
 		return bHasController && bViewportIgnoresInput && bCursorShown && !bViewportFocused && !MenuFocus.IsEmpty() && !bTransitioning;
+	}
+
+	const UInputAction* FindPawnAction(UWorld* World, FName PropertyName)
+	{
+		const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+		const FObjectProperty* Property = Pawn ? FindFProperty<FObjectProperty>(Pawn->GetClass(), PropertyName) : nullptr;
+		return Property ? Cast<UInputAction>(Property->GetObjectPropertyValue_InContainer(Pawn)) : nullptr;
+	}
+
+	UStdInputSubsystem* StdInputOf(UWorld* World)
+	{
+		const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		const ULocalPlayer* LocalPlayer = PC ? PC->GetLocalPlayer() : nullptr;
+		return LocalPlayer ? LocalPlayer->GetSubsystem<UStdInputSubsystem>() : nullptr;
+	}
+
+	FKey BoundKey(UWorld* World, FName PropertyName)
+	{
+		const UStdInputSubsystem* Input = StdInputOf(World);
+		const FKey Key = Input ? Input->GetKeyForAction(FindPawnAction(World, PropertyName)) : FKey();
+		if (!Key.IsValid())
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("BoundKey: the pawn's %s has no key."), *PropertyName.ToString());
+		}
+		return Key;
+	}
+
+	TArray<FStdKeyBindingRow> SaveBindings(UWorld* World)
+	{
+		const UStdInputSubsystem* Input = StdInputOf(World);
+		return Input ? Input->GetRemappableKeys() : TArray<FStdKeyBindingRow>();
+	}
+
+	bool RestoreBindings(UWorld* World, const TArray<FStdKeyBindingRow>& Saved)
+	{
+		UStdInputSubsystem* Input = StdInputOf(World);
+		if (!Input)
+		{
+			return false;
+		}
+		Input->ResetKeysToDefaults();
+		// Giving a row its saved key swaps it with the row holding that key, which never holds its own saved key (the
+		// saved keys are distinct): rows already restored are not touched again, so one pass is enough.
+		for (const FStdKeyBindingRow& Row : Saved)
+		{
+			if (Row.CurrentKey.IsValid() && Row.CurrentKey != Row.DefaultKey)
+			{
+				FText Message;
+				Input->RemapKey(Row.MappingName, Row.Slot, Row.CurrentKey, Message);
+			}
+		}
+		bool bAllBack = true;
+		for (const FStdKeyBindingRow& Now : Input->GetRemappableKeys())
+		{
+			const FStdKeyBindingRow* Was = Saved.FindByPredicate([&Now](const FStdKeyBindingRow& Row)
+			{
+				return Row.MappingName == Now.MappingName && Row.Slot == Now.Slot;
+			});
+			bAllBack &= Was && Was->CurrentKey == Now.CurrentKey;
+		}
+		return bAllBack;
+	}
+
+	FKey FreeKey(UWorld* World, const TArray<FKey>& Avoid)
+	{
+		const UStdInputSubsystem* Input = StdInputOf(World);
+		if (!Input)
+		{
+			return FKey();
+		}
+		const TArray<FStdKeyBindingRow> Rows = Input->GetRemappableKeys();
+		for (const FKey& Candidate : { EKeys::R, EKeys::T, EKeys::G, EKeys::H, EKeys::J, EKeys::K, EKeys::L, EKeys::Y, EKeys::U, EKeys::O, EKeys::P })
+		{
+			FText Reason;
+			const bool bHeld = Rows.ContainsByPredicate([&Candidate](const FStdKeyBindingRow& Row) { return Row.CurrentKey == Candidate || Row.DefaultKey == Candidate; });
+			if (!bHeld && !Avoid.Contains(Candidate) && Input->CanAssignKey(Candidate, Reason))
+			{
+				return Candidate;
+			}
+		}
+		return FKey();
 	}
 
 	/** The topmost screen of the main menu or of the pause menu, or null. */

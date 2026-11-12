@@ -77,6 +77,11 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
 	TObjectPtr<UInteractPromptWidget> InteractPrompt;
 
+	/**
+	 * The mapping context of the actions below. StdCore adds it to the local player and registers it for rebinding
+	 * (MappingContexts in Config/DefaultGame.ini), so its keys follow the Controls tab; the pawn never adds it itself.
+	 * Read by tls.InputReport.
+	 */
 	UPROPERTY(EditDefaultsOnly, Category = "Test|Input")
 	TObjectPtr<UInputMappingContext> InputMapping;
 
@@ -99,7 +104,6 @@ protected:
 	TObjectPtr<UInputAction> InteractAction;
 
 private:
-	void AddInputMapping() const;
 	void CreateScanCue();
 	void OnMove(const FInputActionValue& Value);
 	void OnLook(const FInputActionValue& Value);

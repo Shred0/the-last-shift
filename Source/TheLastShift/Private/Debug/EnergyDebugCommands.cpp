@@ -424,7 +424,7 @@ namespace EnergyDebug
 	{
 		if (APlayerController* Controller = PC())
 		{
-			Controller->InputKey(FInputKeyEventArgs::CreateSimulated(EKeys::E, Event, Event == IE_Pressed ? 1.f : 0.f));
+			Controller->InputKey(FInputKeyEventArgs::CreateSimulated(TimeStateDebug::BoundKey(Controller->GetWorld(), TEXT("InteractAction")), Event, Event == IE_Pressed ? 1.f : 0.f));
 		}
 	}
 

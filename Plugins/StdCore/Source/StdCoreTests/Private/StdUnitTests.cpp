@@ -1,11 +1,12 @@
 // Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress,
-// the key prompt without a player.
+// the key prompt without a player, the order of the Controls tab rows.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Input/StdInputSubsystem.h"
 #include "Settings/StdSettingsSubsystem.h"
 #include "Settings/StdUserSettings.h"
 #include "Blueprint/WidgetTree.h"
@@ -132,6 +133,75 @@ bool FStdKeyPromptTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("An empty label is collapsed"), Label->GetVisibility(), ESlateVisibility::Collapsed);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdKeyBindingRowsTest, "StdCore.Input.RowOrder", StdUnitTests::Flags)
+
+bool FStdKeyBindingRowsTest::RunTest(const FString& Parameters)
+{
+	auto MakeRow = [](const TCHAR* Name, const TCHAR* Label, const TCHAR* Category, EPlayerMappableKeySlot Slot = EPlayerMappableKeySlot::First)
+	{
+		FStdKeyBindingRow Row;
+		Row.MappingName = Name;
+		Row.Slot = Slot;
+		Row.DisplayName = FText::FromString(Label);
+		Row.Category = FText::FromString(Category);
+		return Row;
+	};
+	auto Names = [](const TArray<FStdKeyBindingRow>& Rows)
+	{
+		FString Out;
+		for (const FStdKeyBindingRow& Row : Rows)
+		{
+			Out += (Out.IsEmpty() ? TEXT("") : TEXT(",")) + Row.MappingName.ToString();
+		}
+		return Out;
+	};
+
+	// As the profile may return them: map order, not context order.
+	const TArray<FStdKeyBindingRow> Profile = {
+		MakeRow(TEXT("C"), TEXT("Cee"), TEXT("Actions")),
+		MakeRow(TEXT("A"), TEXT("Ay"), TEXT("Movement")),
+		MakeRow(TEXT("D"), TEXT("Dee"), TEXT("Actions")),
+		MakeRow(TEXT("B"), TEXT("Bee"), TEXT("Movement")),
+		MakeRow(TEXT("B"), TEXT("Bee 2"), TEXT("Movement"), EPlayerMappableKeySlot::Second),
+	};
+	const TArray<FName> ContextOrder = { TEXT("A"), TEXT("B"), TEXT("C"), TEXT("D") };
+
+	TArray<FStdKeyBindingRow> Rows = Profile;
+	UStdInputSubsystem::ArrangeKeyBindingRows(Rows, ContextOrder, {}, {});
+	TestEqual(TEXT("No project rows: context order, grouped by category"), Names(Rows), FString(TEXT("A,B,B,C,D")));
+
+	Rows = Profile;
+	UStdInputSubsystem::ArrangeKeyBindingRows(Rows, ContextOrder, {}, { TEXT("B"), TEXT("Z") });
+	TestEqual(TEXT("Hidden names are left out, unknown hidden names ignored"), Names(Rows), FString(TEXT("A,C,D")));
+
+	FStdKeyBindingRowSetting ListD;
+	ListD.MappingName = TEXT("D");
+	ListD.DisplayName = FText::FromString(TEXT("Dee listed"));
+	FStdKeyBindingRowSetting ListB;
+	ListB.MappingName = TEXT("B");
+	ListB.Category = FText::FromString(TEXT("Listed"));
+	FStdKeyBindingRowSetting ListMissing;
+	ListMissing.MappingName = TEXT("Missing");
+
+	Rows = Profile;
+	UStdInputSubsystem::ArrangeKeyBindingRows(Rows, ContextOrder, { ListD, ListMissing, ListB }, {});
+	TestEqual(TEXT("Listed rows first in listed order (every slot), then the others"), Names(Rows), FString(TEXT("D,B,B,A,C")));
+	if (Rows.Num() == 5)
+	{
+		TestEqual(TEXT("A listed label replaces the mapping's"), Rows[0].DisplayName.ToString(), FString(TEXT("Dee listed")));
+		TestTrue(TEXT("A listed row takes the listed category, empty here"), Rows[0].Category.IsEmpty());
+		TestEqual(TEXT("An empty listed label keeps the mapping's"), Rows[1].DisplayName.ToString(), FString(TEXT("Bee")));
+		TestEqual(TEXT("Slots keep their order"), Rows[2].Slot, EPlayerMappableKeySlot::Second);
+		TestEqual(TEXT("The listed category is used"), Rows[2].Category.ToString(), FString(TEXT("Listed")));
+		TestEqual(TEXT("Unlisted rows keep their category"), Rows[4].Category.ToString(), FString(TEXT("Actions")));
+	}
+
+	Rows = Profile;
+	UStdInputSubsystem::ArrangeKeyBindingRows(Rows, ContextOrder, { ListD, ListB }, { TEXT("D") });
+	TestEqual(TEXT("Hidden wins over listed"), Names(Rows), FString(TEXT("B,B,A,C")));
 	return true;
 }
 

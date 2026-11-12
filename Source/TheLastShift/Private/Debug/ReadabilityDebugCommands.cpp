@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: MIT
 
 // Debug console commands for readability (Briefs 5b, 2l): the interactables' scan colour (a lidar colour channel
-// chosen by the custom depth stencil of their meshes) and the Interact prompt.
-// tls.ReadabilityTest [all|scan|colors|prompt|area], tls.Readability.Spawn, tls.Readability.Clear,
-// tls.Readability.Tag, tls.Readability.Channels. Development builds only.
+// chosen by the custom depth stencil of their meshes) and the Interact prompt; and for the controls (Brief 5c): the
+// rows of StdCore's Controls tab, rebinding, swaps, reserved keys and reset, with the prompts following the keys.
+// tls.ReadabilityTest [all|scan|colors|prompt|area], tls.ControlsTest, tls.Readability.Spawn, tls.Readability.Clear,
+// tls.Readability.Tag, tls.Readability.Channels. Tests press the keys bound now, never fixed letters, and put the
+// player's saved keys back when they rebind. Development builds only.
 
 #include "Containers/Ticker.h"
 #include "Debug/TlsDebugCommon.h"
 #include "Area/AreaGenerator.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/Button.h"
+#include "Components/InputKeySelector.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/TextBlock.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/EnergySubsystem.h"
 #include "Energy/PowerTerminal.h"
@@ -20,6 +25,10 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
+#include "EnhancedInputSubsystems.h"
+#include "EnhancedPlayerInput.h"
+#include "UserSettings/EnhancedInputUserSettings.h"
+#include "Framework/StdPlayerController.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -36,7 +45,11 @@
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
 #include "UI/InteractPromptWidget.h"
+#include "Settings/StdProjectSettings.h"
+#include "UI/StdKeyBindingRowWidget.h"
+#include "UI/StdPauseMenuWidget.h"
 #include "UI/StdRadialProgress.h"
+#include "UI/StdSettingsWidget.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 
@@ -1099,6 +1112,9 @@ namespace ReadabilityDebug
 
 	static FString KeyName(const FKey& K) { return K.IsValid() ? K.GetDisplayName(false).ToString() : TEXT("<none>"); }
 
+	/** The key bound to Interact now, following the player's saved rebinding (the prompt phases are built with it). */
+	static FKey InteractKeyNow() { return TimeStateDebug::BoundKey(W(), TEXT("InteractAction")); }
+
 	static void AddPromptPhase(TArray<FStep>& S, const FKey& InteractKey, const FString& Tag)
 	{
 		const FString P = TEXT("prompt") + Tag;
@@ -1260,20 +1276,35 @@ namespace ReadabilityDebug
 
 	static UStdInputSubsystem* InputSubsystem()
 	{
-		const APlayerController* Controller = PC();
-		const ULocalPlayer* LP = Controller ? Controller->GetLocalPlayer() : nullptr;
-		return LP ? LP->GetSubsystem<UStdInputSubsystem>() : nullptr;
+		return TimeStateDebug::StdInputOf(W());
+	}
+
+	/** The player's keys when the run started, put back when it ends (see Finish). */
+	static TArray<FStdKeyBindingRow> GSavedBindings;
+	static bool GBindingsSaved = false;
+
+	static void SaveBindingsOnce()
+	{
+		if (!GBindingsSaved)
+		{
+			GSavedBindings = TimeStateDebug::SaveBindings(W());
+			GBindingsSaved = true;
+		}
 	}
 
 	static void AddRebindPhase(TArray<FStep>& S)
 	{
-		S.Add(Do(TEXT("rebind: Interact to R in StdCore's key settings"), []()
+		SaveBindingsOnce();
+		const FKey OldKey = InteractKeyNow();
+		const FKey NewKey = TimeStateDebug::FreeKey(W(), {});
+		const FString NewName = KeyName(NewKey);
+		S.Add(Do(TEXT("rebind: Interact to a free key in StdCore's key settings"), [NewKey, NewName]()
 		{
 			FText Message;
 			UStdInputSubsystem* Input = InputSubsystem();
-			const EStdRemapResult Result = Input ? Input->RemapKey(TEXT("Interact"), EPlayerMappableKeySlot::First, EKeys::R, Message) : EStdRemapResult::Rejected;
-			Check(Result == EStdRemapResult::Remapped || Result == EStdRemapResult::Swapped,
-				FString::Printf(TEXT("rebind: RemapKey(Interact, R) = %s %s"), *UEnum::GetValueAsString(Result), *Message.ToString()));
+			const EStdRemapResult Result = Input && NewKey.IsValid() ? Input->RemapKey(TEXT("Interact"), EPlayerMappableKeySlot::First, NewKey, Message) : EStdRemapResult::Rejected;
+			Check(Result == EStdRemapResult::Remapped,
+				FString::Printf(TEXT("rebind: RemapKey(Interact, %s) = %s %s"), *NewName, *UEnum::GetValueAsString(Result), *Message.ToString()));
 			if (UEnergySubsystem* E = Energy())
 			{
 				E->RestoreBankedEnergy(2);
@@ -1282,18 +1313,17 @@ namespace ReadabilityDebug
 			GoToTerminal(GTerminal.Get());
 			return 0.3f;
 		}));
-		S.Add(Do(TEXT("rebind: check the terminal prompt"), []()
+		S.Add(Do(TEXT("rebind: check the terminal prompt"), [NewKey, NewName]()
 		{
-			Check(PromptMode() == EInteractPromptMode::Power && PromptKey() == EKeys::R, FString::Printf(TEXT("rebind: the terminal prompt shows R without a restart (%s)"), *PromptState()));
+			Check(PromptMode() == EInteractPromptMode::Power && PromptKey() == NewKey,
+				FString::Printf(TEXT("rebind: the terminal prompt shows %s without a restart (%s)"), *NewName, *PromptState()));
 			return 0.f;
 		}));
-		AddPromptPhase(S, EKeys::R, TEXT("[R]"));
-		S.Add(Do(TEXT("rebind: reset keys to defaults"), []()
+		AddPromptPhase(S, NewKey, FString::Printf(TEXT("[%s]"), *NewName));
+		S.Add(Do(TEXT("rebind: put the player's keys back"), []()
 		{
-			if (UStdInputSubsystem* Input = InputSubsystem())
-			{
-				Input->ResetKeysToDefaults();
-			}
+			Check(TimeStateDebug::RestoreBindings(W(), GSavedBindings), TEXT("rebind: every row has the key it had before the run"));
+			GBindingsSaved = false;
 			PowerOffTargets(GTerminal.Get());
 			if (UEnergySubsystem* E = Energy())
 			{
@@ -1302,13 +1332,594 @@ namespace ReadabilityDebug
 			GoToTerminal(GTerminal.Get());
 			return 0.3f;
 		}));
-		S.Add(Do(TEXT("rebind: check the reset"), []()
+		S.Add(Do(TEXT("rebind: check the prompt after"), [OldKey]()
 		{
-			Check(PromptKey() == EKeys::E, FString::Printf(TEXT("rebind: back to E after the reset (%s)"), *PromptState()));
+			Check(PromptKey() == OldKey, FString::Printf(TEXT("rebind: back to %s (%s)"), *KeyName(OldKey), *PromptState()));
 			if (UEnergySubsystem* E = Energy())
 			{
 				E->RestoreBankedEnergy(0);
 			}
+			return 0.f;
+		}));
+	}
+
+	// --- Controls (Brief 5c): the eight rows of StdCore's Controls tab, rebinding, swaps, reserved keys, reset ---
+
+	/** One row of the Controls tab and what the test plans for it. */
+	struct FControlRow
+	{
+		FName Mapping;
+		FString Label;
+		/** The pawn property holding the action this row drives (MoveAction, ScanAction, ...). */
+		FName ActionProperty;
+		TWeakObjectPtr<const UInputAction> Action;
+		FKey DefaultKey;
+		FKey NewKey;
+		/** What the action reads while the default key is held (Move: the direction). */
+		FVector2D Baseline = FVector2D::ZeroVector;
+	};
+	static TArray<FControlRow> GControls;
+	static FVector GMoveStart = FVector::ZeroVector;
+	static int32 GScanCountBefore = 0;
+	static bool GFlashlightBefore = false;
+
+	static FControlRow* ControlRowFor(FName ActionProperty)
+	{
+		return GControls.FindByPredicate([ActionProperty](const FControlRow& Row) { return Row.ActionProperty == ActionProperty; });
+	}
+
+	/** The value of Action on the local player now (a digital action reads (1, 0) while held). */
+	static FVector2D ActionValue(const UInputAction* Action)
+	{
+		const APlayerController* Controller = PC();
+		const UEnhancedPlayerInput* PlayerInput = Controller ? Cast<UEnhancedPlayerInput>(Controller->PlayerInput) : nullptr;
+		return PlayerInput && Action ? PlayerInput->GetActionValue(Action).Get<FVector2D>() : FVector2D::ZeroVector;
+	}
+
+	static bool FlashlightOn() { return TimeStateDebug::BuildReport(W()).bFlashlightOn; }
+
+	static FKey CurrentKeyOf(FName Mapping)
+	{
+		const UStdInputSubsystem* Input = InputSubsystem();
+		if (!Input)
+		{
+			return FKey();
+		}
+		for (const FStdKeyBindingRow& Row : Input->GetRemappableKeys())
+		{
+			if (Row.MappingName == Mapping)
+			{
+				return Row.CurrentKey;
+			}
+		}
+		return FKey();
+	}
+
+	/** Every row has a key and no key is on two rows. */
+	static void CheckNoGapNoDuplicate(const FString& When)
+	{
+		const UStdInputSubsystem* Input = InputSubsystem();
+		const TArray<FStdKeyBindingRow> Rows = Input ? Input->GetRemappableKeys() : TArray<FStdKeyBindingRow>();
+		TSet<FKey> Keys;
+		int32 Missing = 0, Duplicates = 0;
+		FString Detail;
+		for (const FStdKeyBindingRow& Row : Rows)
+		{
+			Missing += Row.CurrentKey.IsValid() ? 0 : 1;
+			bool bSeen = false;
+			Keys.Add(Row.CurrentKey, &bSeen);
+			Duplicates += bSeen ? 1 : 0;
+			Detail += FString::Printf(TEXT("%s%s=%s"), Detail.IsEmpty() ? TEXT("") : TEXT(", "), *Row.DisplayName.ToString(), *KeyName(Row.CurrentKey));
+		}
+		Check(Rows.Num() == GControls.Num() && Missing == 0 && Duplicates == 0,
+			FString::Printf(TEXT("controls: %s: %d rows, none without a key (%d), no key on two rows (%d): %s"), *When, Rows.Num(), Missing, Duplicates, *Detail));
+	}
+
+	/** Holds Key for a moment and checks what the row's action reads, then releases it. */
+	static void AddHoldCheck(TArray<FStep>& S, int32 Index, bool bNewKey, bool bExpectResponse, const FString& When)
+	{
+		S.Add(Do(TEXT("controls: hold"), [Index, bNewKey]()
+		{
+			const FControlRow& Row = GControls[Index];
+			Key(bNewKey ? Row.NewKey : Row.DefaultKey, IE_Pressed);
+			return 0.15f;
+		}));
+		S.Add(Do(TEXT("controls: check the action"), [Index, bNewKey, bExpectResponse, When]()
+		{
+			FControlRow& Row = GControls[Index];
+			const FKey Held = bNewKey ? Row.NewKey : Row.DefaultKey;
+			const FVector2D Value = ActionValue(Row.Action.Get());
+			if (When == TEXT("baseline"))
+			{
+				Row.Baseline = Value;
+				Check(!Value.IsNearlyZero(), FString::Printf(TEXT("controls: baseline: \"%s\" responds to its default key %s (%s reads %s)"),
+					*Row.Label, *KeyName(Held), *GetNameSafe(Row.Action.Get()), *Value.ToString()));
+			}
+			else if (bExpectResponse)
+			{
+				Check(Value.Equals(Row.Baseline, 0.01), FString::Printf(TEXT("controls: %s: \"%s\" responds to %s like its default key did (%s, expected %s)"),
+					*When, *Row.Label, *KeyName(Held), *Value.ToString(), *Row.Baseline.ToString()));
+			}
+			else
+			{
+				Check(Value.IsNearlyZero(), FString::Printf(TEXT("controls: %s: \"%s\" no longer responds to %s (%s)"),
+					*When, *Row.Label, *KeyName(Held), *Value.ToString()));
+			}
+			Key(Held, IE_Released);
+			// Stop time and the flashlight toggle on a press: undo it, so each check starts the same.
+			if (Row.ActionProperty == TEXT("TimeStopAction"))
+			{
+				ResumeTime();
+			}
+			if (FlashlightOn() != GFlashlightBefore)
+			{
+				const FKey Toggle = CurrentKeyOf(ControlRowFor(TEXT("FlashlightAction")) ? ControlRowFor(TEXT("FlashlightAction"))->Mapping : NAME_None);
+				TimeStateDebug::PressKey(W(), Toggle);
+			}
+			return 0.1f;
+		}));
+	}
+
+	static void AddMoveCheck(TArray<FStep>& S, int32 Index, bool bNewKey)
+	{
+		S.Add(Do(TEXT("controls: move"), [Index, bNewKey]()
+		{
+			const APawn* P = Pawn();
+			GMoveStart = P ? P->GetActorLocation() : FVector::ZeroVector;
+			Key(bNewKey ? GControls[Index].NewKey : GControls[Index].DefaultKey, IE_Pressed);
+			return 0.35f;
+		}));
+		S.Add(Do(TEXT("controls: check the move"), [Index, bNewKey]()
+		{
+			const FControlRow& Row = GControls[Index];
+			const FKey Held = bNewKey ? Row.NewKey : Row.DefaultKey;
+			Key(Held, IE_Released);
+			const APawn* P = Pawn();
+			if (!P)
+			{
+				Check(false, TEXT("controls: move: no pawn"));
+				return 0.f;
+			}
+			const FVector Direction = (P->GetActorForwardVector() * Row.Baseline.Y + P->GetActorRightVector() * Row.Baseline.X).GetSafeNormal2D();
+			const FVector Delta = (P->GetActorLocation() - GMoveStart) * FVector(1.f, 1.f, 0.f);
+			const float Along = FVector::DotProduct(Delta, Direction);
+			if (bNewKey)
+			{
+				Check(Along > 5.f, FString::Printf(TEXT("controls: \"%s\" on %s moves the pawn its way (%.1f cm along, %.1f cm in all)"), *Row.Label, *KeyName(Held), Along, Delta.Size()));
+			}
+			else
+			{
+				Check(Delta.Size() < 2.f, FString::Printf(TEXT("controls: the old key %s no longer moves the pawn (%.1f cm)"), *KeyName(Held), Delta.Size()));
+			}
+			return 0.4f;
+		}));
+	}
+
+	/** The pause menu's settings screen, or null. */
+	static UStdSettingsWidget* SettingsScreen()
+	{
+		const AStdPlayerController* Controller = Cast<AStdPlayerController>(PC());
+		UStdPauseMenuWidget* Menu = Controller ? Controller->GetPauseMenu() : nullptr;
+		return Menu ? Cast<UStdSettingsWidget>(Menu->GetTopScreen()) : nullptr;
+	}
+
+	static void ClickButton(UUserWidget* Widget, FName Name)
+	{
+		UButton* Button = Widget && Widget->WidgetTree ? Cast<UButton>(Widget->WidgetTree->FindWidget(Name)) : nullptr;
+		if (Button)
+		{
+			Button->OnClicked.Broadcast();
+		}
+		else
+		{
+			Note(FString::Printf(TEXT("no %s on %s"), *Name.ToString(), *GetNameSafe(Widget)));
+		}
+	}
+
+	/** The key rows the Controls tab shows, in order: mapping, label, key. */
+	static TArray<UStdKeyBindingRowWidget*> ShownRowWidgets(UStdSettingsWidget* Settings)
+	{
+		TArray<UStdKeyBindingRowWidget*> Rows;
+		if (Settings && Settings->WidgetTree)
+		{
+			Settings->WidgetTree->ForEachWidget([&Rows](UWidget* Widget)
+			{
+				if (UStdKeyBindingRowWidget* Row = Cast<UStdKeyBindingRowWidget>(Widget))
+				{
+					Rows.Add(Row);
+				}
+			});
+		}
+		return Rows;
+	}
+
+	static FString RowWidgetText(UStdKeyBindingRowWidget* Row, FKey& OutKey)
+	{
+		const UTextBlock* Label = Row && Row->WidgetTree ? Cast<UTextBlock>(Row->WidgetTree->FindWidget(TEXT("Text_ActionName"))) : nullptr;
+		const UInputKeySelector* Selector = Row && Row->WidgetTree ? Cast<UInputKeySelector>(Row->WidgetTree->FindWidget(TEXT("KeySelector"))) : nullptr;
+		OutKey = Selector ? Selector->GetSelectedKey().Key : FKey();
+		return Label ? Label->GetText().ToString() : FString();
+	}
+
+	static void AddControlsPhase(TArray<FStep>& S)
+	{
+		SaveBindingsOnce();
+		UStdInputSubsystem* Input = InputSubsystem();
+		const TArray<FStdKeyBindingRowSetting>& Listed = UStdProjectSettings::Get()->KeyBindingRows;
+
+		// The rows and the pawn action each one drives (found through the live mappings, so no name is repeated here).
+		GControls.Reset();
+		const APlayerController* Controller = PC();
+		const UEnhancedInputLocalPlayerSubsystem* EnhancedInput = Controller ? ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(Controller->GetLocalPlayer()) : nullptr;
+		for (const FStdKeyBindingRow& Row : Input ? Input->GetRemappableKeys() : TArray<FStdKeyBindingRow>())
+		{
+			FControlRow& Control = GControls.AddDefaulted_GetRef();
+			Control.Mapping = Row.MappingName;
+			Control.Label = Row.DisplayName.ToString();
+			Control.DefaultKey = Row.DefaultKey;
+			for (const FName Property : { FName(TEXT("MoveAction")), FName(TEXT("TimeStopAction")), FName(TEXT("ScanAction")), FName(TEXT("FlashlightAction")), FName(TEXT("InteractAction")) })
+			{
+				const UInputAction* Action = TimeStateDebug::FindPawnAction(W(), Property);
+				if (Action && EnhancedInput && EnhancedInput->QueryKeysMappedToAction(Action).Contains(Row.CurrentKey))
+				{
+					Control.ActionProperty = Property;
+					Control.Action = Action;
+				}
+			}
+		}
+
+		// New keys: the arrow keys for the four moves (in row order), a mouse button for Scan, free letters for the rest.
+		TArray<FKey> Planned;
+		for (const FControlRow& Control : GControls)
+		{
+			Planned.Add(Control.DefaultKey);
+		}
+		const FKey Arrows[] = { EKeys::Up, EKeys::Down, EKeys::Left, EKeys::Right };
+		int32 MoveIndex = 0;
+		for (FControlRow& Control : GControls)
+		{
+			if (Control.ActionProperty == TEXT("MoveAction") && MoveIndex < 4)
+			{
+				Control.NewKey = Arrows[MoveIndex++];
+			}
+			else if (Control.ActionProperty == TEXT("ScanAction"))
+			{
+				Control.NewKey = EKeys::RightMouseButton;
+			}
+			Planned.Add(Control.NewKey);
+		}
+		for (FControlRow& Control : GControls)
+		{
+			if (!Control.NewKey.IsValid())
+			{
+				Control.NewKey = TimeStateDebug::FreeKey(W(), Planned);
+				Planned.Add(Control.NewKey);
+			}
+		}
+		const FControlRow* InteractRow = ControlRowFor(TEXT("InteractAction"));
+		const FControlRow* ScanRow = ControlRowFor(TEXT("ScanAction"));
+		const FKey InteractNew = InteractRow ? InteractRow->NewKey : FKey();
+		const FKey ScanNew = ScanRow ? ScanRow->NewKey : FKey();
+		const FName InteractMapping = InteractRow ? InteractRow->Mapping : NAME_None;
+		const FName ScanMapping = ScanRow ? ScanRow->Mapping : NAME_None;
+
+		// --- Rows, labels and default keys ---
+		S.Add(Do(TEXT("controls: rows"), [Listed]()
+		{
+			ResumeTime();
+			UStdInputSubsystem* In = InputSubsystem();
+			if (!In)
+			{
+				Check(false, TEXT("controls: StdCore input subsystem"));
+				return -1.f;
+			}
+			In->ResetKeysToDefaults();
+			const TArray<FStdKeyBindingRow> Rows = In->GetRemappableKeys();
+			Check(Listed.Num() == 8 && Rows.Num() == Listed.Num(), FString::Printf(TEXT("controls: the tab lists exactly the %d project rows (%d listed in KeyBindingRows, %d shown)"), Listed.Num(), Listed.Num(), Rows.Num()));
+			FString Defaults;
+			for (int32 I = 0; I < Rows.Num(); ++I)
+			{
+				const bool bMatch = Listed.IsValidIndex(I) && Rows[I].MappingName == Listed[I].MappingName && Rows[I].DisplayName.EqualTo(Listed[I].DisplayName);
+				Check(bMatch, FString::Printf(TEXT("controls: row %d is \"%s\" (%s)"), I + 1, *Rows[I].DisplayName.ToString(), *Rows[I].MappingName.ToString()));
+				Defaults += FString::Printf(TEXT("%s%s=%s"), Defaults.IsEmpty() ? TEXT("") : TEXT(", "), *Rows[I].DisplayName.ToString(), *KeyName(Rows[I].CurrentKey));
+			}
+			for (const FControlRow& Control : GControls)
+			{
+				Check(Control.Action.IsValid(), FString::Printf(TEXT("controls: \"%s\" drives the pawn's %s"), *Control.Label, *Control.ActionProperty.ToString()));
+				Check(Control.NewKey.IsValid(), FString::Printf(TEXT("controls: \"%s\" will be rebound to %s"), *Control.Label, *KeyName(Control.NewKey)));
+			}
+			Note(FString::Printf(TEXT("default keys: %s"), *Defaults));
+			CheckNoGapNoDuplicate(TEXT("defaults"));
+			GFlashlightBefore = FlashlightOn();
+			return 0.2f;
+		}));
+
+		// --- The tab itself, through the pause menu ---
+		S.Add(Do(TEXT("controls: open the pause menu's settings, Controls tab"), []()
+		{
+			AStdPlayerController* Std = Cast<AStdPlayerController>(PC());
+			if (!Std || !Std->PauseGame())
+			{
+				Check(false, TEXT("controls: the pause menu opens"));
+				return 0.f;
+			}
+			ClickButton(Std->GetPauseMenu(), TEXT("Button_Settings"));
+			ClickButton(SettingsScreen(), TEXT("Button_TabControls"));
+			return 0.4f;
+		}));
+		S.Add(Do(TEXT("controls: check the tab"), []()
+		{
+			UStdSettingsWidget* Settings = SettingsScreen();
+			const TArray<UStdKeyBindingRowWidget*> Widgets = ShownRowWidgets(Settings);
+			const UStdInputSubsystem* In = InputSubsystem();
+			const TArray<FStdKeyBindingRow> Rows = In ? In->GetRemappableKeys() : TArray<FStdKeyBindingRow>();
+			Check(Settings && Widgets.Num() == Rows.Num(), FString::Printf(TEXT("controls: the tab shows %d key rows (%d remappable)"), Widgets.Num(), Rows.Num()));
+			FString Shown;
+			for (int32 I = 0; I < Widgets.Num() && I < Rows.Num(); ++I)
+			{
+				FKey ShownKey;
+				const FString Label = RowWidgetText(Widgets[I], ShownKey);
+				Shown += FString::Printf(TEXT("%s%s [%s]"), Shown.IsEmpty() ? TEXT("") : TEXT(", "), *Label, *KeyName(ShownKey));
+				Check(Widgets[I]->GetMappingName() == Rows[I].MappingName && Label == Rows[I].DisplayName.ToString() && ShownKey == Rows[I].CurrentKey,
+					FString::Printf(TEXT("controls: tab row %d shows \"%s\" with %s"), I + 1, *Label, *KeyName(ShownKey)));
+			}
+			Note(FString::Printf(TEXT("tab rows: %s"), *Shown));
+			Shot(TEXT("controls tab"));
+			return 0.5f;
+		}));
+		S.Add(Do(TEXT("controls: the reserved key in the tab"), [InteractMapping]()
+		{
+			UStdSettingsWidget* Settings = SettingsScreen();
+			// The array is kept: FindByPredicate returns a pointer into it.
+			const TArray<UStdKeyBindingRowWidget*> Widgets = ShownRowWidgets(Settings);
+			UStdKeyBindingRowWidget* const* Found = Widgets.FindByPredicate([InteractMapping](const UStdKeyBindingRowWidget* W) { return W->GetMappingName() == InteractMapping; });
+			UStdKeyBindingRowWidget* Row = Found ? *Found : nullptr;
+			const TArray<FStdKeyBindingRow> Before = TimeStateDebug::SaveBindings(W());
+			if (Settings && Row)
+			{
+				Settings->HandleRowKeySelected(Row, EKeys::Escape);
+			}
+			const UTextBlock* Notice = Settings && Settings->WidgetTree ? Cast<UTextBlock>(Settings->WidgetTree->FindWidget(TEXT("Text_KeyBindingMessage"))) : nullptr;
+			FText Reason;
+			const UStdInputSubsystem* In = InputSubsystem();
+			const bool bReserved = In && !In->CanAssignKey(EKeys::Escape, Reason);
+			Check(bReserved && Notice && Notice->GetText().EqualTo(Reason), FString::Printf(TEXT("controls: Escape on Interact in the tab shows the notice \"%s\""), Notice ? *Notice->GetText().ToString() : TEXT("<no notice>")));
+			const TArray<FStdKeyBindingRow> After = TimeStateDebug::SaveBindings(W());
+			bool bSame = Before.Num() == After.Num();
+			for (int32 I = 0; bSame && I < Before.Num(); ++I)
+			{
+				bSame = Before[I].CurrentKey == After[I].CurrentKey;
+			}
+			FKey ShownKey;
+			const FString Label = Row ? RowWidgetText(Row, ShownKey) : FString();
+			Check(bSame && Row && ShownKey == CurrentKeyOf(InteractMapping), FString::Printf(TEXT("controls: nothing changed, the row still shows %s"), *KeyName(ShownKey)));
+			Shot(TEXT("reserved key notice"));
+			return 0.5f;
+		}));
+		S.Add(Do(TEXT("controls: close the pause menu"), []()
+		{
+			if (AStdPlayerController* Std = Cast<AStdPlayerController>(PC()))
+			{
+				Std->ResumeGame();
+			}
+			FaceLongestClearDirection();
+			return 0.3f;
+		}));
+
+		// --- Baseline: what each action reads on its default key ---
+		for (int32 I = 0; I < GControls.Num(); ++I)
+		{
+			AddHoldCheck(S, I, false, true, TEXT("baseline"));
+		}
+
+		// --- Rebind every row to a free key ---
+		S.Add(Do(TEXT("controls: rebind the eight rows"), []()
+		{
+			UStdInputSubsystem* In = InputSubsystem();
+			for (const FControlRow& Control : GControls)
+			{
+				FText Message;
+				const EStdRemapResult Result = In ? In->RemapKey(Control.Mapping, EPlayerMappableKeySlot::First, Control.NewKey, Message) : EStdRemapResult::Rejected;
+				Check(Result == EStdRemapResult::Remapped && CurrentKeyOf(Control.Mapping) == Control.NewKey,
+					FString::Printf(TEXT("controls: \"%s\" %s -> %s: %s %s"), *Control.Label, *KeyName(Control.DefaultKey), *KeyName(Control.NewKey),
+						*UEnum::GetValueAsString(Result), *Message.ToString()));
+			}
+			CheckNoGapNoDuplicate(TEXT("after rebinding"));
+			return 0.2f;
+		}));
+		for (int32 I = 0; I < GControls.Num(); ++I)
+		{
+			AddHoldCheck(S, I, true, true, TEXT("rebound"));
+			AddHoldCheck(S, I, false, false, TEXT("rebound"));
+		}
+
+		// --- What the player sees: moves, Stop and Scan, the flashlight ---
+		for (int32 I = 0; I < GControls.Num(); ++I)
+		{
+			if (GControls[I].ActionProperty == TEXT("MoveAction"))
+			{
+				AddMoveCheck(S, I, true);
+				AddMoveCheck(S, I, false);
+			}
+		}
+		S.Add(Do(TEXT("controls: Stop with the new key"), []()
+		{
+			const FControlRow* Row = ControlRowFor(TEXT("TimeStopAction"));
+			TimeStateDebug::PressKey(W(), Row ? Row->NewKey : FKey());
+			return 0.2f;
+		}));
+		S.Add(Do(TEXT("controls: check Stopped, old key"), []()
+		{
+			const FControlRow* Row = ControlRowFor(TEXT("TimeStopAction"));
+			Check(IsStopped(), FString::Printf(TEXT("controls: %s stops time"), Row ? *KeyName(Row->NewKey) : TEXT("?")));
+			if (UTimeStateSubsystem* T = TS())
+			{
+				T->ResetCumulativeStoppedSeconds();
+			}
+			TimeStateDebug::PressKey(W(), Row ? Row->DefaultKey : FKey());
+			return 0.2f;
+		}));
+		S.Add(WaitFor(TEXT("controls: still Stopped after the old key, and a scan is ready"), []()
+		{
+			const UScanDirectorComponent* D = Director();
+			return IsStopped() && D && D->IsScanReady();
+		}, 9.f, []()
+		{
+			GScanCountBefore = ScanCount();
+			const FControlRow* Row = ControlRowFor(TEXT("ScanAction"));
+			TimeStateDebug::PressKey(W(), Row ? Row->DefaultKey : FKey());
+			return 0.3f;
+		}));
+		S.Add(Do(TEXT("controls: check the old scan key, press the new one"), []()
+		{
+			const FControlRow* Row = ControlRowFor(TEXT("ScanAction"));
+			Check(ScanCount() == GScanCountBefore, FString::Printf(TEXT("controls: the old key %s scans no more"), Row ? *KeyName(Row->DefaultKey) : TEXT("?")));
+			TimeStateDebug::PressKey(W(), Row ? Row->NewKey : FKey());
+			return 0.3f;
+		}));
+		S.Add(Do(TEXT("controls: check the new scan key, Resume with the new key"), []()
+		{
+			const FControlRow* Row = ControlRowFor(TEXT("ScanAction"));
+			Check(ScanCount() == GScanCountBefore + 1, FString::Printf(TEXT("controls: %s scans (%d -> %d)"), Row ? *KeyName(Row->NewKey) : TEXT("?"), GScanCountBefore, ScanCount()));
+			const FControlRow* Stop = ControlRowFor(TEXT("TimeStopAction"));
+			TimeStateDebug::PressKey(W(), Stop ? Stop->NewKey : FKey());
+			return 0.6f;
+		}));
+		S.Add(Do(TEXT("controls: check Resumed, flashlight new key"), []()
+		{
+			Check(!IsStopped(), TEXT("controls: the new key resumes time"));
+			GFlashlightBefore = FlashlightOn();
+			const FControlRow* Row = ControlRowFor(TEXT("FlashlightAction"));
+			TimeStateDebug::PressKey(W(), Row ? Row->NewKey : FKey());
+			return 0.2f;
+		}));
+		S.Add(Do(TEXT("controls: check the flashlight, old key"), []()
+		{
+			const FControlRow* Row = ControlRowFor(TEXT("FlashlightAction"));
+			Check(FlashlightOn() != GFlashlightBefore, FString::Printf(TEXT("controls: %s toggles the flashlight"), Row ? *KeyName(Row->NewKey) : TEXT("?")));
+			TimeStateDebug::PressKey(W(), Row ? Row->DefaultKey : FKey());
+			return 0.2f;
+		}));
+		S.Add(Do(TEXT("controls: check the old flashlight key"), []()
+		{
+			const FControlRow* Row = ControlRowFor(TEXT("FlashlightAction"));
+			Check(FlashlightOn() != GFlashlightBefore, FString::Printf(TEXT("controls: the old key %s no longer toggles it"), Row ? *KeyName(Row->DefaultKey) : TEXT("?")));
+			TimeStateDebug::PressKey(W(), Row ? Row->NewKey : FKey());
+			return 0.2f;
+		}));
+		S.Add(Do(TEXT("controls: flashlight back"), []()
+		{
+			Check(FlashlightOn() == GFlashlightBefore, TEXT("controls: the flashlight is back as it was"));
+			return 0.f;
+		}));
+
+		// --- Interact on its new key: the residue and terminal prompts, collecting and paying ---
+		AddPromptPhase(S, InteractNew, FString::Printf(TEXT("[controls %s]"), *KeyName(InteractNew)));
+
+		// --- Swap: Interact takes Scan's key ---
+		S.Add(Do(TEXT("controls: swap Interact onto Scan's key"), [InteractMapping, ScanMapping, InteractNew, ScanNew]()
+		{
+			FText Message;
+			UStdInputSubsystem* In = InputSubsystem();
+			const EStdRemapResult Result = In ? In->RemapKey(InteractMapping, EPlayerMappableKeySlot::First, ScanNew, Message) : EStdRemapResult::Rejected;
+			Check(Result == EStdRemapResult::Swapped && !Message.IsEmpty(), FString::Printf(TEXT("controls: Interact -> %s swaps: %s \"%s\""), *KeyName(ScanNew), *UEnum::GetValueAsString(Result), *Message.ToString()));
+			Check(CurrentKeyOf(InteractMapping) == ScanNew && CurrentKeyOf(ScanMapping) == InteractNew,
+				FString::Printf(TEXT("controls: both rows show the new keys: Interact %s, Scan %s"), *KeyName(CurrentKeyOf(InteractMapping)), *KeyName(CurrentKeyOf(ScanMapping))));
+			CheckNoGapNoDuplicate(TEXT("after the swap"));
+			for (FControlRow& Control : GControls)
+			{
+				if (Control.Mapping == InteractMapping)
+				{
+					Control.NewKey = ScanNew;
+				}
+				else if (Control.Mapping == ScanMapping)
+				{
+					Control.NewKey = InteractNew;
+				}
+			}
+			return 0.2f;
+		}));
+		for (int32 I = 0; I < GControls.Num(); ++I)
+		{
+			if (GControls[I].Mapping == InteractMapping || GControls[I].Mapping == ScanMapping)
+			{
+				AddHoldCheck(S, I, true, true, TEXT("swapped"));
+			}
+		}
+		AddPromptPhase(S, ScanNew, FString::Printf(TEXT("[swap %s]"), *KeyName(ScanNew)));
+
+		// --- Reserved key through the API, then a long run of rebindings ---
+		S.Add(Do(TEXT("controls: the reserved key, then 40 rebindings"), [InteractMapping]()
+		{
+			UStdInputSubsystem* In = InputSubsystem();
+			if (!In)
+			{
+				return -1.f;
+			}
+			const TArray<FStdKeyBindingRow> Before = In->GetRemappableKeys();
+			FText Message;
+			const EStdRemapResult Result = In->RemapKey(InteractMapping, EPlayerMappableKeySlot::First, EKeys::Escape, Message);
+			const TArray<FStdKeyBindingRow> After = In->GetRemappableKeys();
+			bool bSame = Before.Num() == After.Num();
+			for (int32 I = 0; bSame && I < Before.Num(); ++I)
+			{
+				bSame = Before[I].CurrentKey == After[I].CurrentKey;
+			}
+			Check(Result == EStdRemapResult::Rejected && !Message.IsEmpty() && bSame,
+				FString::Printf(TEXT("controls: Escape is refused (%s \"%s\"), no key changed"), *UEnum::GetValueAsString(Result), *Message.ToString()));
+
+			// Keys from the rows and a few free ones, onto rows in a fixed pseudo-random order.
+			TArray<FKey> Pool;
+			for (const FStdKeyBindingRow& Row : After)
+			{
+				Pool.Add(Row.CurrentKey);
+			}
+			Pool.Append({ EKeys::Escape, EKeys::Z, EKeys::X, EKeys::C, EKeys::V, EKeys::MiddleMouseButton, EKeys::ThumbMouseButton });
+			FRandomStream Random(51);
+			int32 Bad = 0;
+			for (int32 Step = 0; Step < 40; ++Step)
+			{
+				const FStdKeyBindingRow& Row = After[Random.RandRange(0, After.Num() - 1)];
+				In->RemapKey(Row.MappingName, Row.Slot, Pool[Random.RandRange(0, Pool.Num() - 1)], Message);
+				TSet<FKey> Keys;
+				for (const FStdKeyBindingRow& Now : In->GetRemappableKeys())
+				{
+					bool bSeen = false;
+					Keys.Add(Now.CurrentKey, &bSeen);
+					Bad += (bSeen || !Now.CurrentKey.IsValid()) ? 1 : 0;
+				}
+			}
+			Check(Bad == 0, FString::Printf(TEXT("controls: 40 rebindings (swaps and refusals included) never left a row without a key or two rows on one key (%d bad)"), Bad));
+			CheckNoGapNoDuplicate(TEXT("after 40 rebindings"));
+			return 0.1f;
+		}));
+
+		// --- Reset to defaults ---
+		S.Add(Do(TEXT("controls: reset to defaults"), []()
+		{
+			if (UStdInputSubsystem* In = InputSubsystem())
+			{
+				In->ResetKeysToDefaults();
+			}
+			int32 Back = 0;
+			for (const FControlRow& Control : GControls)
+			{
+				Back += CurrentKeyOf(Control.Mapping) == Control.DefaultKey ? 1 : 0;
+			}
+			Check(Back == GControls.Num(), FString::Printf(TEXT("controls: Reset to defaults restores the %d default keys (%d back)"), GControls.Num(), Back));
+			CheckNoGapNoDuplicate(TEXT("after the reset"));
+			return 0.2f;
+		}));
+		for (int32 I = 0; I < GControls.Num(); ++I)
+		{
+			AddHoldCheck(S, I, false, true, TEXT("after the reset"));
+		}
+
+		// --- The player's own keys back ---
+		S.Add(Do(TEXT("controls: put the player's keys back"), []()
+		{
+			Check(TimeStateDebug::RestoreBindings(W(), GSavedBindings), TEXT("controls: every row has the key it had before the run"));
+			GBindingsSaved = false;
 			return 0.f;
 		}));
 	}
@@ -1416,12 +2027,21 @@ namespace ReadabilityDebug
 		{
 			AddAreaItem(S, I);
 		}
-		AddPromptPhase(S, EKeys::E, TEXT(" (area)"));
+		AddPromptPhase(S, InteractKeyNow(), TEXT(" (area)"));
 		S.Add(Do(TEXT("area: done"), []() { ResumeTime(); GScene = FScene(); return 0.f; }));
 	}
 
 	static void Finish(const TCHAR* Why)
 	{
+		if (AStdPlayerController* Std = Cast<AStdPlayerController>(PC()); Std && Std->IsPausedByMenu())
+		{
+			Std->ResumeGame();
+		}
+		if (GBindingsSaved)
+		{
+			TimeStateDebug::RestoreBindings(W(), GSavedBindings);
+			GBindingsSaved = false;
+		}
 		ResumeTime();
 		if (GRun.Name.Contains(TEXT("area")))
 		{
@@ -1436,21 +2056,21 @@ namespace ReadabilityDebug
 			GRun.Failed == 0 && GRun.Next >= GRun.Steps.Num() ? TEXT("PASS") : TEXT("FAIL"), GRun.Passed, GRun.Failed, Why);
 		if (GRun.bQuit)
 		{
-			FPlatformMisc::RequestExit(false, TEXT("tls.ReadabilityTest"));
+			FPlatformMisc::RequestExit(false, *GRun.Name);
 		}
 	}
 
 	static void Start(const FString& Mode, bool bQuit, bool bShots);
 
-	/** Area mode in a packaged run: -ExecCmds runs before the area exists, so wait (up to 120 s) for it to be ready. */
+	/** A packaged run in an area: -ExecCmds runs before the area exists, so wait (up to 120 s) for it to be ready. */
 	static FTSTicker::FDelegateHandle GWaitTicker;
 	static double GWaitUntil = 0.0;
 
-	static void StartWhenAreaReady(bool bQuit, bool bShots)
+	static void StartWhenAreaReady(const FString& Mode, bool bQuit, bool bShots)
 	{
 		GWaitUntil = FPlatformTime::Seconds() + 120.0;
-		UE_LOG(LogTheLastShift, Log, TEXT("tls.ReadabilityTest area: waiting for the area to be ready."));
-		GWaitTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([bQuit, bShots](float)
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.ReadabilityTest %s: waiting for the area to be ready."), *Mode);
+		GWaitTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Mode, bQuit, bShots](float)
 		{
 			UWorld* World = W();
 			const AAreaGenerator* Generator = World ? AAreaGenerator::Find(World) : nullptr;
@@ -1461,13 +2081,13 @@ namespace ReadabilityDebug
 			}
 			// One more second for the travel screen to clear.
 			GWaitUntil = FPlatformTime::Seconds() + 1.0;
-			FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([bQuit, bShots](float)
+			FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Mode, bQuit, bShots](float)
 			{
 				if (FPlatformTime::Seconds() < GWaitUntil)
 				{
 					return true;
 				}
-				Start(TEXT("area"), bQuit, bShots);
+				Start(Mode, bQuit, bShots);
 				return false;
 			}));
 			return false;
@@ -1487,7 +2107,7 @@ namespace ReadabilityDebug
 			return;
 		}
 		GRun = FRun();
-		GRun.Name = FString::Printf(TEXT("tls.ReadabilityTest %s"), *Mode);
+		GRun.Name = Mode == TEXT("controls") ? FString(TEXT("tls.ControlsTest")) : FString::Printf(TEXT("tls.ReadabilityTest %s"), *Mode);
 		GRun.bQuit = bQuit;
 		GRun.bShots = bShots;
 		TArray<FStep> S;
@@ -1495,6 +2115,10 @@ namespace ReadabilityDebug
 		if (Mode == TEXT("area"))
 		{
 			StartArea(S);
+		}
+		else if (Mode == TEXT("controls"))
+		{
+			AddControlsPhase(S);
 		}
 		else
 		{
@@ -1508,7 +2132,7 @@ namespace ReadabilityDebug
 			}
 			if (bAll || Mode == TEXT("prompt"))
 			{
-				AddPromptPhase(S, EKeys::E, TEXT(""));
+				AddPromptPhase(S, InteractKeyNow(), TEXT(""));
 				AddRebindPhase(S);
 			}
 		}
@@ -1534,10 +2158,114 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsReadabilityTestCommand(
 		}
 		if (bWait && Mode == TEXT("area"))
 		{
-			ReadabilityDebug::StartWhenAreaReady(bQuit, bShots);
+			ReadabilityDebug::StartWhenAreaReady(TEXT("area"), bQuit, bShots);
 			return;
 		}
 		ReadabilityDebug::Start(Mode, bQuit, bShots);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsControlsTestCommand(
+	TEXT("tls.ControlsTest"),
+	TEXT("tls.ControlsTest [shots] [quit] [wait]: wait = in a generated area, start once it is ready (for -ExecCmds). StdCore's Controls tab lists exactly the project's rows (KeyBindingRows) with their labels and keys, also as shown in the pause menu's settings; Escape is refused there with the notice and changes nothing. Every row is rebound to a free key (moves to the arrow keys, Scan to the right mouse button) and its action responds to the new key and no longer to the old one; the pawn moves, Stop/Resume, a scan and the flashlight follow the new keys; the residue and terminal prompts show Interact's new key, then Scan's after a swap; 40 rebindings never leave a row without a key or two rows on one key; Reset to defaults restores the default keys. The player's own keys are put back at the end. Needs a residue and a terminal (TestLidar or an area); keeps the entity dormant."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		bool bQuit = false, bShots = false, bWait = false;
+		for (const FString& Arg : Args)
+		{
+			bQuit |= Arg.Equals(TEXT("quit"), ESearchCase::IgnoreCase);
+			bShots |= Arg.Equals(TEXT("shots"), ESearchCase::IgnoreCase);
+			bWait |= Arg.Equals(TEXT("wait"), ESearchCase::IgnoreCase);
+		}
+		if (bWait)
+		{
+			ReadabilityDebug::StartWhenAreaReady(TEXT("controls"), bQuit, bShots);
+			return;
+		}
+		ReadabilityDebug::Start(TEXT("controls"), bQuit, bShots);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsControlsRebindCommand(
+	TEXT("tls.Controls.Rebind"),
+	TEXT("tls.Controls.Rebind <MappingName> <Key> [quit]: rebinds one Controls row through StdCore, as the Controls tab does (swap, refusal and save included), e.g. 'tls.Controls.Rebind Scan RightMouseButton'. quit exits the game afterwards (packaged runs)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UStdInputSubsystem* Input = TimeStateDebug::StdInputOf(TimeStateDebug::ResolveGameWorld(InWorld));
+		if (!Input || Args.Num() < 2)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Controls.Rebind: needs a local player and <MappingName> <Key>."));
+			return;
+		}
+		FText Message;
+		const EStdRemapResult Result = Input->RemapKey(FName(*Args[0]), EPlayerMappableKeySlot::First, FKey(FName(*Args[1])), Message);
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Controls.Rebind %s %s: %s \"%s\"."), *Args[0], *Args[1], *UEnum::GetValueAsString(Result), *Message.ToString());
+		if (Args.Num() > 2 && Args[2].Equals(TEXT("quit"), ESearchCase::IgnoreCase))
+		{
+			FPlatformMisc::RequestExit(false, TEXT("tls.Controls.Rebind"));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsControlsLegacySaveCommand(
+	TEXT("tls.Controls.LegacySave"),
+	TEXT("tls.Controls.LegacySave [write|clear|dump] [quit]: write = saves, straight through Enhanced Input, what a build before Brief 5c saved after rebinding StdCore's rows (MoveForward to Up, Jump to K, Interact to R); start a new PIE or game to load it. clear = every key back to its default, saved. dump = logs the Controls rows and the live key of each pawn action."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);
+		const APlayerController* Controller = World ? World->GetFirstPlayerController() : nullptr;
+		const UEnhancedInputLocalPlayerSubsystem* EnhancedInput = Controller ? ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(Controller->GetLocalPlayer()) : nullptr;
+		UEnhancedInputUserSettings* Settings = EnhancedInput ? EnhancedInput->GetUserSettings() : nullptr;
+		if (!Settings)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Controls.LegacySave: no Enhanced Input user settings."));
+			return;
+		}
+		const FString Mode = Args.Num() > 0 ? Args[0].ToLower() : FString(TEXT("dump"));
+		if (Mode == TEXT("write") || Mode == TEXT("clear"))
+		{
+			FGameplayTagContainer Failure;
+			Settings->ResetKeyProfileIdToDefault(Settings->GetActiveKeyProfileId(), Failure);
+			if (Mode == TEXT("write"))
+			{
+				for (const TPair<const TCHAR*, FKey>& Entry : { TPair<const TCHAR*, FKey>(TEXT("MoveForward"), EKeys::Up), TPair<const TCHAR*, FKey>(TEXT("Jump"), EKeys::K), TPair<const TCHAR*, FKey>(TEXT("Interact"), EKeys::R) })
+				{
+					FMapPlayerKeyArgs MapArgs;
+					MapArgs.MappingName = Entry.Key;
+					MapArgs.Slot = EPlayerMappableKeySlot::First;
+					MapArgs.NewKey = Entry.Value;
+					Settings->MapPlayerKey(MapArgs, Failure);
+				}
+			}
+			Settings->ApplySettings();
+			Settings->SaveSettings();
+			UE_LOG(LogTheLastShift, Log, TEXT("tls.Controls.LegacySave %s: saved (%d failure tags)."), *Mode, Failure.Num());
+			if (Args.Num() > 1 && Args[1].Equals(TEXT("quit"), ESearchCase::IgnoreCase))
+			{
+				FPlatformMisc::RequestExit(false, TEXT("tls.Controls.LegacySave"));
+			}
+			return;
+		}
+		FString Rows;
+		if (const UStdInputSubsystem* Input = TimeStateDebug::StdInputOf(World))
+		{
+			for (const FStdKeyBindingRow& Row : Input->GetRemappableKeys())
+			{
+				Rows += FString::Printf(TEXT("%s%s=%s"), Rows.IsEmpty() ? TEXT("") : TEXT(", "), *Row.DisplayName.ToString(), *Row.CurrentKey.ToString());
+			}
+		}
+		FString Live;
+		for (const TCHAR* Property : { TEXT("MoveAction"), TEXT("TimeStopAction"), TEXT("ScanAction"), TEXT("FlashlightAction"), TEXT("InteractAction") })
+		{
+			TArray<FString> Keys;
+			for (const FKey& Key : EnhancedInput->QueryKeysMappedToAction(TimeStateDebug::FindPawnAction(World, Property)))
+			{
+				Keys.Add(Key.ToString());
+			}
+			Live += FString::Printf(TEXT("%s%s=%s"), Live.IsEmpty() ? TEXT("") : TEXT(", "), Property, *FString::Join(Keys, TEXT("+")));
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("tls.Controls.LegacySave dump: rows %s; live %s."), *Rows, *Live);
+		if (Args.Num() > 1 && Args[1].Equals(TEXT("quit"), ESearchCase::IgnoreCase))
+		{
+			FPlatformMisc::RequestExit(false, TEXT("tls.Controls.LegacySave"));
+		}
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsReadabilitySpawnCommand(
