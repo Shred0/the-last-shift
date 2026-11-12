@@ -191,6 +191,39 @@ if (UStdFlowSubsystem* Flow = GetGameInstance()->GetSubsystem<UStdFlowSubsystem>
 ```
 Blueprint: *Get Game Instance Subsystem (Std Flow Subsystem)* > **Travel To Level** (pick the map in the soft reference pin). Also **Return To Main Menu**, **Start Gameplay** (map from the settings) and **Quit Game**. A request during a transition is ignored and returns false; a map that does not exist logs an error and nothing happens. Do not call `Open Level` directly: it skips the fade and the input block.
 
+### Show loading progress and a marker on the covered screen
+
+Both are off by default; with both off the covered screen is exactly as before. Switch them on and set their look in `DefaultGame.ini`:
+
+```ini
+[/Script/StdCore.StdProjectSettings]
+; A thin bar along the bottom edge, as wide as the screen, filled to the loading progress.
+bTransitionProgressBar=True
+TransitionProgressBarHeight=4
+TransitionProgressBarColor=(R=0.3,G=0.3,B=0.3,A=1.0)
+; Progress the transition reports itself when the new map has arrived (0..1).
+TransitionMapLoadedProgress=0.5
+; A marker on top of the bar that crosses the screen over the travel's MinCoveredSeconds.
+bTransitionMarker=True
+TransitionMarkerSize=(X=12.0,Y=24.0)
+TransitionMarkerColor=(R=0.3,G=0.3,B=0.3,A=1.0)
+; Optional: a texture or a UI material (e.g. a flipbook) instead of the plain rectangle. Make sure it is cooked.
+TransitionMarkerImage=/Game/UI/T_Marker.T_Marker
+```
+
+- **Bar**: shows the largest progress reported in the current covered period; it never goes back and no timer moves it. The transition reports 0 when it covers the screen, *Transition Map Loaded Progress* when the new map has arrived, and 1 as soon as the destination is ready (the map has arrived and no cover hold is left). Content built under a cover hold reports its own steps in between:
+
+  ```cpp
+  Flow->AddCoverHold(TEXT("MyBuilder"));
+  // ... each real step done:
+  Flow->ReportTransitionProgress(0.75f);   // 0..1, clamped; ignored when no transition runs
+  // ... done:
+  Flow->RemoveCoverHold(TEXT("MyBuilder")); // last hold removed: the bar is full
+  ```
+  Blueprint: **Report Transition Progress**; **Get Transition Progress** reads it.
+- **Marker**: its horizontal position is the fraction of the travel's *Min Covered Seconds* (`FStdTravelOptions`) passed since the screen became fully covered: left edge at 0, right edge at 1, then it waits there if loading takes longer. It is shown only when that time is greater than zero. **Get Transition Marker Fraction** reads it.
+- Both run on real time, follow the fade (their alpha is the overlay's) and add no text. Sizes are Slate units, scaled with the UI like the menus. During a blocking map load no frame is drawn, so the marker moves on from where it was once the map has arrived.
+
 ### Start a music track
 
 *Get Game Instance Subsystem (Std Music Subsystem)* > **Play Music** (sound, fade in seconds). Playing another track crossfades; asking for the track already playing does nothing; **Stop Music** fades out. Music continues through map changes and while paused. Typical place: the BeginPlay of the level or of the game mode.
@@ -309,7 +342,7 @@ All menus take their look from one asset, `DA_UITheme` (*Project Settings > Std 
 ## How it works
 
 - **Settings**: `UStdSettingsSubsystem` (game instance). Volumes are stored in `UStdUserSettings` (`[/Script/StdCore.StdUserSettings]` in `Saved/Config/<Platform>/GameUserSettings.ini`), applied with `SetSoundMixClassOverride` + `PushSoundMixModifier` on `SCM_Volumes`: `SC_Music` = Music x Master, `SC_SFX` = SFX x Master, `SC_UI` = Master, `SC_Master` = 1. The mix is pushed again on every new world. Sliders apply immediately; Back (or leaving the pause menu) saves. Window mode and quality use `UGameUserSettings`; at startup the saved scalability is loaded before the settings are read, and a mixed ("Custom") level is reset to Medium.
-- **Transitions**: `UStdFlowSubsystem` draws a Slate overlay on the game viewport client, which survives map loads. Fade out > `OpenLevel` > new world > short delay > fade in, all on real time. Input is blocked by a Slate input pre-processor during the whole transition; travel and pause requests are refused. A map that does not arrive within *Travel Timeout Seconds* (or a travel failure) removes the fade, unblocks input and logs an error.
+- **Transitions**: `UStdFlowSubsystem` draws a Slate overlay on the game viewport client, which survives map loads. Fade out > `OpenLevel` > new world > short delay > fade in, all on real time. Input is blocked by a Slate input pre-processor during the whole transition; travel and pause requests are refused. A map that does not arrive within *Travel Timeout Seconds* (or a travel failure) removes the fade, unblocks input and logs an error. The overlay holds the centred label and `SStdTransitionProgress`, which draws the bar and the marker from `FStdTransitionLayout::Compute` (settings, screen size, progress, fade); `FStdTransitionProgress` holds the progress of one covered period.
 - **Input**: `UStdInputSubsystem` (local player) adds the configured mapping contexts and registers them with the Enhanced Input user settings when the player controller changes, so saved keys apply before the first input. Remapping covers keyboard and mouse entries only; gamepad keys, axes and *Reserved Keys* (Escape) are refused; a key already used by another entry swaps the two. Remapped keys are saved by Enhanced Input in `Saved/SaveGames/EnhancedInputUserSettings.sav`.
 - **Pause**: `AStdPlayerController` pauses on `InputTag.Pause`. While the pause menu is open the input mode is UI only, so an input pre-processor handles the pause keys: Escape and gamepad B go back one screen (Settings saves) or resume from the pause menu itself; Start resumes from anywhere. Without a pause menu widget the game still pauses and Escape resumes.
 - **Menus**: `UStdScreenWidget` handles:
@@ -353,6 +386,11 @@ Automation tests live in the editor-only module `StdCoreTests`, under the `StdCo
 | `StdCore.UI.KeyPrompt` | `UStdKeyPromptWidget` without a player: builds its own tree (`Text_Key`, `Text_Label`), shows no key and reads Unbound, shows a label and collapses an empty one. |
 | `StdCore.UI.ChoiceListBody` | In PIE: the optional body text of a `UStdChoiceListWidget` created for the player: between the title and the entries, wrapped, collapsed while empty, kept when the entries change. |
 | `StdCore.Flow.LabelWrap` | The covered screen's label wraps a 120-character text onto several lines within *Transition Label Max Width*. |
+| `StdCore.Flow.ProgressOff` | With both switches off the covered screen draws no bar and no marker, even with progress and a covered time; each switch alone draws only its own part; nothing at opacity 0. |
+| `StdCore.Flow.ProgressBarShape` | The bar touches the bottom edge and both sides at full progress, has the height of the setting (4 and 7) at 16:9, 4:3, 21:9 and 1280x720, fills half the width at 0.5, is clamped to 64 and follows the fade. |
+| `StdCore.Flow.ProgressReport` | Reports of 0.3, 0.2, 0.7 show 0.3, 0.3, 0.7; ten simulated minutes covered with no report do not move the bar; clamping; a new covered period starts at 0. |
+| `StdCore.Flow.Marker` | Simulated ticks at 60 fps for 4 s and 5.86 s: the marker is at 0.25, 0.5 and 1 of the screen width within one frame at a quarter, half and all of the covered time, never moves back, waits at the right edge, sits on the bar; none with a covered time of 0 or with the switch off. |
+| `StdCore.Flow.Progress` | In PIE: a cover hold starts an empty bar that shows 0.3, 0.3, 0.7 for reports of 0.3, 0.2, 0.7, does not move in 1.5 s without a report and is full when the last hold goes; a travel with 2 s covered is full and has the marker at the right edge as the screen uncovers, neither going back; a hold after the covered time keeps the marker at the right edge; with both switches off nothing is shown. Puts the project's switches back. |
 | `StdCore.Input.RowOrder` | The order of the Controls tab rows: context order grouped by category, hidden rows left out, listed rows first with their labels and categories, hidden wins over listed. |
 | `StdCore.Flow.Play` | In PIE: main menu shown, a missing map refused, Play travels to the gameplay map, pause and resume, back to the main menu. |
 | `StdCore.Input.Remap` | In PIE: reserved, gamepad and axis keys refused, a swap, an unchanged and a rejected remap, the keys after a reset. It leaves the default keys saved. |

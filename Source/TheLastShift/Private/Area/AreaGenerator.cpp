@@ -1998,6 +1998,7 @@ void AAreaGenerator::TryAttempt(int32 InSeed)
 		{
 			State = EAreaGenerationState::BuildingWorld;
 			PhaseStartTime = FPlatformTime::Seconds();
+			ReportLoadStep(EAreaLoadStep::RoutePlanned);
 			return;
 		}
 		LastError = FString::Printf(TEXT("seed %d: %s"), InSeed, *Error);
@@ -2068,6 +2069,7 @@ void AAreaGenerator::Tick(float DeltaSeconds)
 				FailAttempt(FString::Printf(TEXT("PCG did not build the plan: %s"), *Why));
 				return;
 			}
+			ReportLoadStep(EAreaLoadStep::GeometryBuilt);
 			StartNavigationRebuild();
 		}
 		else if (Now - PhaseStartTime > Timeout)
@@ -2108,6 +2110,7 @@ void AAreaGenerator::Tick(float DeltaSeconds)
 			if (++NavigationIdleTicks >= 3)
 			{
 				LastNavigationSeconds = static_cast<float>(Now - PhaseStartTime);
+				ReportLoadStep(EAreaLoadStep::NavigationReady);
 				FinishWithValidation();
 				return;
 			}
@@ -2276,6 +2279,19 @@ void AAreaGenerator::ReleasePlayer()
 	}
 	Pawn->EnableInput(Controller);
 	HeldPawn.Reset();
+}
+
+void AAreaGenerator::ReportLoadStep(EAreaLoadStep Step)
+{
+	// A revalidation keeps the player in the area: no travel screen to fill.
+	if (bRevalidateOnly)
+	{
+		return;
+	}
+	if (URunSubsystem* Run = URunSubsystem::Get(this))
+	{
+		Run->ReportAreaLoadStep(Step);
+	}
 }
 
 void AAreaGenerator::SetCoverHold(bool bHold)

@@ -4,6 +4,7 @@
 #include "Engine/GameInstance.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/World.h"
+#include "Flow/SStdTransitionProgress.h"
 #include "Flow/StdInputBlocker.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Kismet/GameplayStatics.h"
@@ -14,6 +15,7 @@
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SOverlay.h"
 #include "Widgets/Text/STextBlock.h"
 
 namespace StdFlow
@@ -46,6 +48,7 @@ void UStdFlowSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		// Opaque from the start: the overlay is attached as soon as the first world exists, before its first frame.
 		Alpha = 1.f;
 		CoveredSince = FPlatformTime::Seconds();
+		Progress.Reset(0.f);
 		SetState(EStdFlowState::Loading);
 		SetInputBlocked(true);
 	}
@@ -127,6 +130,7 @@ void UStdFlowSubsystem::QuitGame()
 
 void UStdFlowSubsystem::BeginFadeOut()
 {
+	Progress.Reset(MinCoveredSeconds);
 	EnsureOverlay();
 	SetInputBlocked(true);
 	SetState(EStdFlowState::FadingOut);
@@ -136,6 +140,9 @@ bool UStdFlowSubsystem::Tick(float DeltaTime)
 {
 	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
 	const float Step = FMath::Min(DeltaTime, StdFlow::MaxFadeStep);
+
+	// Real time since the screen became fully covered; the same clock decides when the fade in may start.
+	Progress.UpdateCovered(GetCoveredSeconds());
 
 	switch (State)
 	{
@@ -163,9 +170,13 @@ bool UStdFlowSubsystem::Tick(float DeltaTime)
 				*FString::JoinBy(CoverHolds, TEXT(", "), [](const FName& N) { return N.ToString(); }));
 			CoverHolds.Reset();
 		}
+		UpdateReadyProgress();
 		if (CanStartFadeIn())
 		{
-			UE_LOG(LogStdCore, Log, TEXT("Fading in after %.2f s covered."), GetCoveredSeconds());
+			UE_LOG(LogStdCore, Log, TEXT("Fading in after %.2f s covered (progress %.2f)."), GetCoveredSeconds(), Progress.GetBarFraction());
+			// The covered time is over by now (CanStartFadeIn): the marker is at the right edge as the screen uncovers.
+			Progress.Report(1.f);
+			Progress.FinishCovered();
 			SetState(EStdFlowState::FadingIn);
 		}
 		break;
@@ -225,6 +236,7 @@ void UStdFlowSubsystem::HandleWorldInitialized(const FActorsInitializedParams& P
 
 	if (State == EStdFlowState::Loading)
 	{
+		Progress.Report(UStdProjectSettings::Get()->TransitionMapLoadedProgress);
 		PendingLevel.Reset();
 		FadeInDelayRemaining = UStdProjectSettings::Get()->FadeInDelay;
 		SetState(EStdFlowState::WaitingToFadeIn);
@@ -286,7 +298,37 @@ void UStdFlowSubsystem::RemoveCoverHold(FName Reason)
 	if (CoverHolds.Remove(Reason) > 0)
 	{
 		UE_LOG(LogStdCore, Log, TEXT("Cover hold '%s' removed after %.2f s covered (%d active)."), *Reason.ToString(), GetCoveredSeconds(), CoverHolds.Num());
+		UpdateReadyProgress();
 	}
+}
+
+void UStdFlowSubsystem::ReportTransitionProgress(float Fraction)
+{
+	if (!IsTransitioning())
+	{
+		UE_LOG(LogStdCore, Verbose, TEXT("ReportTransitionProgress(%.2f) ignored: no transition is running."), Fraction);
+		return;
+	}
+	Progress.Report(Fraction);
+}
+
+void UStdFlowSubsystem::UpdateReadyProgress()
+{
+	// WaitingToFadeIn: the new map has arrived (or the screen was covered in place); with no hold left nothing is loading.
+	if (State == EStdFlowState::WaitingToFadeIn && CoverHolds.Num() == 0)
+	{
+		Progress.Report(1.f);
+	}
+}
+
+bool UStdFlowSubsystem::IsTransitionProgressBarShown() const
+{
+	return UStdProjectSettings::Get()->bTransitionProgressBar && IsOverlayVisible() && IsTransitioning();
+}
+
+bool UStdFlowSubsystem::IsTransitionMarkerShown() const
+{
+	return UStdProjectSettings::Get()->bTransitionMarker && Progress.HasMarker() && IsOverlayVisible() && IsTransitioning();
 }
 
 float UStdFlowSubsystem::GetCoveredSeconds() const
@@ -306,6 +348,8 @@ void UStdFlowSubsystem::CoverNow()
 	if (Alpha < 1.f || CoveredSince < 0.0)
 	{
 		CoveredSince = FPlatformTime::Seconds();
+		// A new covered period: whatever is held for is still loading.
+		Progress.Reset(State == EStdFlowState::Idle ? 0.f : MinCoveredSeconds);
 	}
 	Alpha = 1.f;
 	FadeInDelayRemaining = UStdProjectSettings::Get()->FadeInDelay;
@@ -327,6 +371,19 @@ void UStdFlowSubsystem::EnsureOverlay()
 
 	RemoveOverlay();
 
+	// The marker image, loaded once per overlay; no image (or one that does not load) draws a plain rectangle.
+	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
+	MarkerBrush = FSlateBrush();
+	if (Settings->bTransitionMarker && !Settings->TransitionMarkerImage.IsNull())
+	{
+		if (UObject* Image = StdSettings::LoadSettingAsset(Settings->TransitionMarkerImage, TEXT("TransitionMarkerImage"), TEXT("(empty: plain rectangle)")))
+		{
+			MarkerBrush.SetResourceObject(Image);
+			MarkerBrush.ImageSize = Settings->TransitionMarkerSize;
+			MarkerBrush.DrawAs = ESlateBrushDrawType::Image;
+		}
+	}
+
 	TWeakObjectPtr<UStdFlowSubsystem> WeakThis(this);
 	Overlay = SNew(SBorder)
 		.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
@@ -334,16 +391,32 @@ void UStdFlowSubsystem::EnsureOverlay()
 		{
 			return FSlateColor(WeakThis.IsValid() ? WeakThis->GetOverlayColor() : FLinearColor::Transparent);
 		})
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Center)
+		.HAlign(HAlign_Fill)
+		.VAlign(VAlign_Fill)
+		.Padding(0.f)
 		.Visibility_Lambda([WeakThis]()
 		{
 			return WeakThis.IsValid() && WeakThis->IsOverlayVisible() ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
 		})
 		[
-			MakeLabelWidget(
-				TAttribute<FText>::CreateLambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->Label : FText::GetEmpty(); }),
-				TAttribute<FSlateColor>::CreateLambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->GetLabelColor() : FSlateColor(FLinearColor::Transparent); }))
+			SNew(SOverlay)
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			[
+				MakeLabelWidget(
+					TAttribute<FText>::CreateLambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->Label : FText::GetEmpty(); }),
+					TAttribute<FSlateColor>::CreateLambda([WeakThis]() { return WeakThis.IsValid() ? WeakThis->GetLabelColor() : FSlateColor(FLinearColor::Transparent); }))
+			]
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Fill)
+			[
+				SNew(SStdTransitionProgress)
+				.Progress_Lambda([WeakThis]() { return WeakThis.IsValid() && WeakThis->IsTransitioning() ? WeakThis->Progress : FStdTransitionProgress(); })
+				.Alpha_Lambda([WeakThis]() { return WeakThis.IsValid() && WeakThis->IsTransitioning() ? WeakThis->Alpha : 0.f; })
+				.MarkerBrush(&MarkerBrush)
+			]
 		];
 
 	ViewportClient->AddViewportWidgetContent(Overlay.ToSharedRef(), StdFlow::OverlayZOrder);

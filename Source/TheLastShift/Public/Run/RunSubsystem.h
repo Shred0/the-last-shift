@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Flow/StdFlowSubsystem.h"
 #include "Run/RunSaveGame.h"
+#include "Run/TheLastShiftSettings.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "RunSubsystem.generated.h"
 
@@ -15,6 +16,28 @@ THELASTSHIFT_API DECLARE_LOG_CATEGORY_EXTERN(LogRun, Log, All);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAreaEntered, int32, ActIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRunSnapshotsChanged);
+
+/** One moment of the last travel started by the run: what happened, when, and where the bar and the marker stood after it. */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FTravelStepRecord
+{
+	GENERATED_BODY()
+
+	/** Covered, MapLoaded, RoutePlanned, GeometryBuilt, NavigationReady, AreaReady, FadeIn. */
+	UPROPERTY(BlueprintReadOnly, Category = "Run")
+	FName Step;
+
+	/** Real-time seconds since the travel request. */
+	UPROPERTY(BlueprintReadOnly, Category = "Run")
+	float Seconds = 0.f;
+
+	/** StdCore's progress bar and marker right after the step (0..1). */
+	UPROPERTY(BlueprintReadOnly, Category = "Run")
+	float Progress = 0.f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Run")
+	float Marker = 0.f;
+};
 
 /**
  * The run across maps: which act the current map is, and the one-way travel to the next area through StdCore's
@@ -31,6 +54,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRunSnapshotsChanged);
  *
  * On UHomeStateSubsystem::OnRunLost it shows the loss screen (URunActListWidget, RunLost): game input off, the pause
  * menu refused, UI input on the screen.
+ *
+ * The travel screen's progress bar: the one place that turns the area generator's steps (EAreaLoadStep) into StdCore
+ * progress, with the fractions of UTheLastShiftSettings::TravelProgress, and keeps a record of every step of the last
+ * travel it started.
  */
 UCLASS()
 class THELASTSHIFT_API URunSubsystem : public UGameInstanceSubsystem
@@ -64,6 +91,14 @@ public:
 
 	/** Called by the area generator when the current area is ready: takes the act's snapshot, saves, broadcasts OnAreaEntered. */
 	void NotifyAreaReady(UWorld* World);
+
+	/** Called by the area generator after each real step of the build: reports its fraction to StdCore's travel screen. */
+	UFUNCTION(BlueprintCallable, Category = "Run")
+	void ReportAreaLoadStep(EAreaLoadStep Step);
+
+	/** The steps of the last travel started through this subsystem, in order (empty before the first). */
+	UFUNCTION(BlueprintPure, Category = "Run")
+	const TArray<FTravelStepRecord>& GetLastTravelSteps() const { return LastTravelSteps; }
 
 	// --- Snapshots and save ---
 
@@ -142,6 +177,11 @@ private:
 
 	void TakeSnapshot(int32 Act);
 	void WriteSave();
+
+	/** Adds Step to LastTravelSteps with StdCore's current bar and marker, while a travel of the run is pending. */
+	void RecordTravelStep(FName Step);
+
+	TArray<FTravelStepRecord> LastTravelSteps;
 
 	TArray<FAreaSnapshot> Snapshots;
 	int32 SaveWrites = 0;

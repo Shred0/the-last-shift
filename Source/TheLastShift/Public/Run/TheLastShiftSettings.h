@@ -56,6 +56,49 @@ struct THELASTSHIFT_API FScanColors
 	FLinearColor Interactable = FLinearColor::White;
 };
 
+/** A real step of building an area behind the travel screen, in the order they happen. */
+UENUM(BlueprintType)
+enum class EAreaLoadStep : uint8
+{
+	/** The route and everything the player interacts with are planned and placed (during the map load). */
+	RoutePlanned,
+	/** The PCG graphs have built the geometry and it matches the plan. */
+	GeometryBuilt,
+	/** The navmesh is built; validation and the player's release follow in the same frame. */
+	NavigationReady
+};
+
+/**
+ * Where the travel screen's progress bar stands after each step of an area build (0..1). The map's arrival is StdCore's
+ * own step (TransitionMapLoadedProgress in [/Script/StdCore.StdProjectSettings]); the bar is full when the area releases
+ * the player. Weights follow the measured time of each step; they move nothing on their own.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FTravelProgressFractions
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float RoutePlanned = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GeometryBuilt = 0.45f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float NavigationReady = 0.9f;
+
+	float GetFraction(EAreaLoadStep Step) const
+	{
+		switch (Step)
+		{
+		case EAreaLoadStep::RoutePlanned: return RoutePlanned;
+		case EAreaLoadStep::GeometryBuilt: return GeometryBuilt;
+		case EAreaLoadStep::NavigationReady: return NavigationReady;
+		}
+		return 0.f;
+	}
+};
+
 /**
  * Project settings of the game (Project Settings > Game > The Last Shift), stored as text in Config/DefaultGame.ini.
  * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning, of the scan colours and of
@@ -117,6 +160,10 @@ public:
 	/** The travel screen stays black at least this long, even when the next area is ready sooner. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float TravelHoldSeconds = 4.f;
+
+	/** The travel screen's progress bar after each step of an area build (reported by the run subsystem). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel")
+	FTravelProgressFractions TravelProgress;
 
 	/**
 	 * The home AI's messages (FAIMessageRow), imported from Narrative/DT_AIMessages.csv. Also the travel screen's label:

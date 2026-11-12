@@ -139,6 +139,7 @@ bool URunSubsystem::TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu
 	{
 		TravelRequestTime = FPlatformTime::Seconds();
 		LastTravelCovered = LastTravelReady = LastTravelFadeIn = -1.f;
+		LastTravelSteps.Reset();
 	}
 	UE_LOG(LogRun, Log, TEXT("Travel (%s): %s."), *What, bStarted ? TEXT("started") : TEXT("refused by the flow"));
 	return bStarted;
@@ -153,6 +154,7 @@ void URunSubsystem::NotifyAreaReady(UWorld* World)
 	}
 	UE_LOG(LogRun, Log, TEXT("Area entered: act %d (%s)%s."), Act, *GetNameSafe(World),
 		LastTravelReady >= 0.f ? *FString::Printf(TEXT(", %.2f s after the travel request"), LastTravelReady) : TEXT(""));
+	RecordTravelStep(TEXT("AreaReady"));
 	if (Act > 0)
 	{
 		TakeSnapshot(Act);
@@ -372,6 +374,36 @@ void URunSubsystem::HandleRunLost()
 	UE_LOG(LogRun, Log, TEXT("Run lost in act %d: loss screen shown with %d acts."), GetActIndexOf(World), Snapshots.Num());
 }
 
+void URunSubsystem::ReportAreaLoadStep(EAreaLoadStep Step)
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	UStdFlowSubsystem* Flow = GameInstance ? GameInstance->GetSubsystem<UStdFlowSubsystem>() : nullptr;
+	if (!Flow)
+	{
+		return;
+	}
+	const float Fraction = UTheLastShiftSettings::Get()->TravelProgress.GetFraction(Step);
+	Flow->ReportTransitionProgress(Fraction);
+	const FName StepName(*StaticEnum<EAreaLoadStep>()->GetNameStringByValue(static_cast<int64>(Step)));
+	UE_LOG(LogRun, Log, TEXT("Travel progress: %s reports %.2f (bar %.2f)."), *StepName.ToString(), Fraction, Flow->GetTransitionProgress());
+	RecordTravelStep(StepName);
+}
+
+void URunSubsystem::RecordTravelStep(FName Step)
+{
+	const UGameInstance* GameInstance = GetGameInstance();
+	const UStdFlowSubsystem* Flow = GameInstance ? GameInstance->GetSubsystem<UStdFlowSubsystem>() : nullptr;
+	if (TravelRequestTime < 0.0 || !Flow)
+	{
+		return;
+	}
+	FTravelStepRecord& Record = LastTravelSteps.AddDefaulted_GetRef();
+	Record.Step = Step;
+	Record.Seconds = static_cast<float>(FPlatformTime::Seconds() - TravelRequestTime);
+	Record.Progress = Flow->GetTransitionProgress();
+	Record.Marker = Flow->GetTransitionMarkerFraction();
+}
+
 void URunSubsystem::HandleFlowStateChanged(EStdFlowState NewState)
 {
 	if (TravelRequestTime < 0.0)
@@ -382,10 +414,16 @@ void URunSubsystem::HandleFlowStateChanged(EStdFlowState NewState)
 	if (NewState == EStdFlowState::Loading)
 	{
 		LastTravelCovered = Since;
+		RecordTravelStep(TEXT("Covered"));
+	}
+	else if (NewState == EStdFlowState::WaitingToFadeIn)
+	{
+		RecordTravelStep(TEXT("MapLoaded"));
 	}
 	else if (NewState == EStdFlowState::FadingIn)
 	{
 		LastTravelFadeIn = Since;
+		RecordTravelStep(TEXT("FadeIn"));
 		UE_LOG(LogRun, Log, TEXT("Travel: black at %.2f s, area ready at %.2f s, fade in at %.2f s after the request (black for %.2f s)."),
 			LastTravelCovered, LastTravelReady, LastTravelFadeIn, LastTravelFadeIn - LastTravelCovered);
 		TravelRequestTime = -1.0;

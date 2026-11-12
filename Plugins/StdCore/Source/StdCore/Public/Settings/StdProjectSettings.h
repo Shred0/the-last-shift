@@ -138,6 +138,53 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (ClampMin = "0.0", ClampMax = "4000.0"))
 	float TransitionLabelMaxWidth = 960.f;
 
+	/**
+	 * A thin bar along the bottom edge of the covered screen, as wide as the screen, filled to the transition's progress:
+	 * the largest fraction reported so far by the transition itself and by UStdFlowSubsystem::ReportTransitionProgress.
+	 * No timer moves it. Off: the covered screen has no bar.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions")
+	bool bTransitionProgressBar = false;
+
+	/** Height of the progress bar (Slate units, scaled with the UI like the menus). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (ClampMin = "1.0", ClampMax = "64.0", EditCondition = "bTransitionProgressBar"))
+	float TransitionProgressBarHeight = 4.f;
+
+	/** Colour of the filled part of the bar (its alpha follows the fade). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (EditCondition = "bTransitionProgressBar"))
+	FLinearColor TransitionProgressBarColor = FLinearColor(0.3f, 0.3f, 0.3f, 1.f);
+
+	/**
+	 * Progress the transition reports when the new map has arrived. The project's own reports (content still being
+	 * built under a cover hold) fill the rest; with no cover hold the bar is full as soon as the map has arrived.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bTransitionProgressBar"))
+	float TransitionMapLoadedProgress = 0.5f;
+
+	/**
+	 * A marker that sits on top of the progress bar and crosses the covered screen from the left edge to the right edge
+	 * over the transition's minimum covered time (FStdTravelOptions::MinCoveredSeconds), then waits at the right edge.
+	 * Shown only when that time is greater than zero. Off: the covered screen has no marker.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions")
+	bool bTransitionMarker = false;
+
+	/** Width and height of the marker (Slate units). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (ClampMin = "1.0", ClampMax = "512.0", EditCondition = "bTransitionMarker"))
+	FVector2D TransitionMarkerSize = FVector2D(12.0, 24.0);
+
+	/** Colour of the plain marker, and the tint of the marker image (its alpha follows the fade). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (EditCondition = "bTransitionMarker"))
+	FLinearColor TransitionMarkerColor = FLinearColor(0.3f, 0.3f, 0.3f, 1.f);
+
+	/**
+	 * Optional image of the marker: a texture or a user interface material (an animated flipbook, for example), drawn
+	 * at TransitionMarkerSize and tinted by TransitionMarkerColor. Empty: a plain rectangle in TransitionMarkerColor.
+	 * Loaded when the overlay is created; the project makes sure it is cooked.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (AllowedClasses = "/Script/Engine.Texture,/Script/Engine.MaterialInterface", EditCondition = "bTransitionMarker"))
+	FSoftObjectPath TransitionMarkerImage;
+
 	// Audio
 
 	/** Sound Mix with one adjuster per Sound Class below. The volume sliders override its adjusters. */

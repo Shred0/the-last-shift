@@ -245,6 +245,209 @@ bool FStdFlowPlayTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace StdPlayTests
+{
+	/** The project's switches of the covered screen's bar and marker, saved by SetTransitionSwitches and put back by RestoreTransitionSwitches. */
+	struct FSavedTransitionSwitches
+	{
+		bool bBar = false;
+		bool bMarker = false;
+	};
+
+	FSavedTransitionSwitches& SavedTransitionSwitches()
+	{
+		static FSavedTransitionSwitches Saved;
+		return Saved;
+	}
+
+	void SetTransitionSwitches(bool bBar, bool bMarker)
+	{
+		UStdProjectSettings* Settings = GetMutableDefault<UStdProjectSettings>();
+		Settings->bTransitionProgressBar = bBar;
+		Settings->bTransitionMarker = bMarker;
+	}
+
+	/** What a transition showed, frame after frame, while a test watched it. */
+	struct FTransitionWatch
+	{
+		float LastBar = 0.f;
+		float LastMarker = 0.f;
+		bool bBarMovedBack = false;
+		bool bMarkerMovedBack = false;
+		bool bBarShown = false;
+		bool bMarkerShown = false;
+		bool bSawFadeIn = false;
+		float BarAtFadeIn = -1.f;
+		float MarkerAtFadeIn = -1.f;
+		float CoveredAtFadeIn = -1.f;
+		int32 Frames = 0;
+	};
+
+	/** Samples the flow once (each frame of a WaitUntil); returns true once the transition is over. */
+	bool WatchTransition(FTransitionWatch& Watch)
+	{
+		const UStdFlowSubsystem* Flow = GetFlow();
+		if (!Flow)
+		{
+			return false;
+		}
+		if (!Flow->IsTransitioning())
+		{
+			return Watch.Frames > 0;
+		}
+		++Watch.Frames;
+		const float Bar = Flow->GetTransitionProgress();
+		const float Marker = Flow->GetTransitionMarkerFraction();
+		Watch.bBarMovedBack |= Bar < Watch.LastBar;
+		Watch.bMarkerMovedBack |= Marker < Watch.LastMarker;
+		Watch.LastBar = Bar;
+		Watch.LastMarker = Marker;
+		Watch.bBarShown |= Flow->IsTransitionProgressBarShown();
+		Watch.bMarkerShown |= Flow->IsTransitionMarkerShown();
+		if (Flow->GetState() == EStdFlowState::FadingIn && !Watch.bSawFadeIn)
+		{
+			Watch.bSawFadeIn = true;
+			Watch.BarAtFadeIn = Bar;
+			Watch.MarkerAtFadeIn = Marker;
+		}
+		if (Flow->GetState() == EStdFlowState::WaitingToFadeIn)
+		{
+			Watch.CoveredAtFadeIn = Flow->GetCoveredSeconds();
+		}
+		return false;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdFlowProgressPlayTest, "StdCore.Flow.Progress", StdPlayTests::Flags)
+
+bool FStdFlowProgressPlayTest::RunTest(const FString& Parameters)
+{
+	using namespace StdPlayTests;
+	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
+	SavedTransitionSwitches() = { Settings->bTransitionProgressBar, Settings->bTransitionMarker };
+
+	const FString MainMenuName = GetMapShortName(Settings->MainMenuMap);
+	const FString GameplayName = GetMapShortName(Settings->GameplayMap);
+	StartPlayOnMap(this, Settings->MainMenuMap, MainMenuName);
+
+	// A cover hold outside a transition: the bar starts at 0 and shows only what is reported.
+	Step([this]()
+	{
+		SetTransitionSwitches(true, true);
+		UStdFlowSubsystem* Flow = GetFlow();
+		if (!TestNotNull(TEXT("Flow subsystem"), Flow))
+		{
+			return;
+		}
+		Flow->ReportTransitionProgress(0.9f);
+		TestEqual(TEXT("A report with no transition is ignored"), Flow->GetTransitionProgress(), 0.f);
+		Flow->AddCoverHold(TEXT("StdCoreProgressTest"));
+		TestTrue(TEXT("The hold covers the screen"), Flow->IsTransitioning() && Flow->GetOverlayAlpha() >= 1.f);
+		TestEqual(TEXT("The covered screen starts with an empty bar"), Flow->GetTransitionProgress(), 0.f);
+		TestTrue(TEXT("The bar is shown"), Flow->IsTransitionProgressBarShown());
+		TestFalse(TEXT("No minimum covered time: no marker"), Flow->IsTransitionMarkerShown());
+		Flow->ReportTransitionProgress(0.3f);
+		TestEqual(TEXT("Report 0.3 shows 0.3"), Flow->GetTransitionProgress(), 0.3f);
+		Flow->ReportTransitionProgress(0.2f);
+		TestEqual(TEXT("Report 0.2 still shows 0.3"), Flow->GetTransitionProgress(), 0.3f);
+		Flow->ReportTransitionProgress(0.7f);
+		TestEqual(TEXT("Report 0.7 shows 0.7"), Flow->GetTransitionProgress(), 0.7f);
+	});
+	ADD_LATENT_AUTOMATION_COMMAND(FWaitLatentCommand(1.5f));
+	Step([this]()
+	{
+		UStdFlowSubsystem* Flow = GetFlow();
+		TestTrue(TEXT("1.5 s with no report: the bar has not moved"), Flow && Flow->GetTransitionProgress() == 0.7f);
+		if (Flow)
+		{
+			Flow->RemoveCoverHold(TEXT("StdCoreProgressTest"));
+			TestEqual(TEXT("The last hold removed: ready, the bar is full"), Flow->GetTransitionProgress(), 1.f);
+		}
+	});
+	WaitUntil(this, TEXT("the hold's cover to go"), 10.0, []() { const UStdFlowSubsystem* F = GetFlow(); return F && !F->IsTransitioning(); });
+
+	// A travel with a minimum covered time: full bar and marker at the right edge as the screen uncovers.
+	TSharedRef<FTransitionWatch> Travel = MakeShared<FTransitionWatch>();
+	Step([this]()
+	{
+		FStdTravelOptions Options;
+		Options.MinCoveredSeconds = 2.f;
+		UStdFlowSubsystem* Flow = GetFlow();
+		TestTrue(TEXT("Travel to the gameplay map with 2 s covered"), Flow && Flow->TravelToLevelWithOptions(UStdProjectSettings::Get()->GameplayMap, Options));
+	});
+	WaitUntil(this, TEXT("the travel to finish"), 30.0, [Travel]() { return WatchTransition(*Travel); });
+	Step([this, Travel]()
+	{
+		TestTrue(TEXT("The bar was shown"), Travel->bBarShown);
+		TestTrue(TEXT("The marker was shown"), Travel->bMarkerShown);
+		TestFalse(TEXT("The bar never went back"), Travel->bBarMovedBack);
+		TestFalse(TEXT("The marker never went back"), Travel->bMarkerMovedBack);
+		TestEqual(TEXT("The bar is full when the screen uncovers"), Travel->BarAtFadeIn, 1.f);
+		TestEqual(TEXT("The marker is at the right edge when the screen uncovers"), Travel->MarkerAtFadeIn, 1.f);
+		AddInfo(FString::Printf(TEXT("Travel: %d frames, covered %.2f s before the fade in."), Travel->Frames, Travel->CoveredAtFadeIn));
+	});
+	WaitUntil(this, GameplayName + TEXT(" to load and fade in"), 20.0, [GameplayName]() { return IsOnMap(GameplayName); });
+
+	// Loading outlasts the covered time: the marker waits at the right edge, the bar stays where it was.
+	Step([this]()
+	{
+		FStdTravelOptions Options;
+		Options.MinCoveredSeconds = 1.f;
+		UStdFlowSubsystem* Flow = GetFlow();
+		TestTrue(TEXT("Travel to the main menu with 1 s covered"), Flow && Flow->TravelToLevelWithOptions(UStdProjectSettings::Get()->MainMenuMap, Options));
+	});
+	WaitUntil(this, TEXT("the main menu map to arrive"), 20.0, [MainMenuName]()
+	{
+		const UWorld* World = GetPlayWorld();
+		const UStdFlowSubsystem* Flow = GetFlow();
+		return World && World->GetMapName().EndsWith(MainMenuName) && Flow && Flow->GetState() == EStdFlowState::WaitingToFadeIn;
+	});
+	Step([this]()
+	{
+		UStdFlowSubsystem* Flow = GetFlow();
+		if (Flow)
+		{
+			Flow->AddCoverHold(TEXT("StdCoreProgressTest"));
+		}
+	});
+	ADD_LATENT_AUTOMATION_COMMAND(FWaitLatentCommand(2.f));
+	Step([this]()
+	{
+		UStdFlowSubsystem* Flow = GetFlow();
+		if (!TestNotNull(TEXT("Flow subsystem"), Flow))
+		{
+			return;
+		}
+		TestTrue(TEXT("Still covered while held"), Flow->GetState() == EStdFlowState::WaitingToFadeIn);
+		TestEqual(TEXT("Loading outlasts the covered time: the marker waits at the right edge"), Flow->GetTransitionMarkerFraction(), 1.f);
+		TestTrue(TEXT("The covered time is over"), Flow->GetCoveredSeconds() > 1.f);
+		Flow->RemoveCoverHold(TEXT("StdCoreProgressTest"));
+	});
+	WaitUntil(this, MainMenuName + TEXT(" to fade in"), 20.0, [MainMenuName]() { return IsOnMap(MainMenuName); });
+
+	// Both switches off: nothing drawn on a travel with a covered time.
+	TSharedRef<FTransitionWatch> Off = MakeShared<FTransitionWatch>();
+	Step([this]()
+	{
+		SetTransitionSwitches(false, false);
+		FStdTravelOptions Options;
+		Options.MinCoveredSeconds = 1.f;
+		UStdFlowSubsystem* Flow = GetFlow();
+		TestTrue(TEXT("Travel to the gameplay map with both switches off"), Flow && Flow->TravelToLevelWithOptions(UStdProjectSettings::Get()->GameplayMap, Options));
+	});
+	WaitUntil(this, TEXT("the travel with the switches off to finish"), 30.0, [Off]() { return WatchTransition(*Off); });
+	Step([this, Off]()
+	{
+		TestFalse(TEXT("Switches off: no bar"), Off->bBarShown);
+		TestFalse(TEXT("Switches off: no marker"), Off->bMarkerShown);
+		const FSavedTransitionSwitches& Saved = SavedTransitionSwitches();
+		SetTransitionSwitches(Saved.bBar, Saved.bMarker);
+	});
+
+	ADD_LATENT_AUTOMATION_COMMAND(FEndPlayMapCommand());
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdInputRemapTest, "StdCore.Input.Remap", StdPlayTests::Flags)
 
 bool FStdInputRemapTest::RunTest(const FString& Parameters)

@@ -8,6 +8,8 @@
 #include "Area/AreaValidator.h"
 #include "AreaGenerator.generated.h"
 
+enum class EAreaLoadStep : uint8;
+
 class ADoorDevice;
 class AEntity;
 class ALightGroupDevice;
@@ -517,6 +519,8 @@ private:
 	void HoldPlayer();
 	void ReleasePlayer();
 	void SetCoverHold(bool bHold);
+	/** Tells the run subsystem that a real step of the build is done (the travel screen's bar). */
+	void ReportLoadStep(EAreaLoadStep Step);
 	void FitNavigationBounds();
 	void HandlePCGGenerated(UPCGComponent* Component);
 

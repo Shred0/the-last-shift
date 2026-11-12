@@ -1,5 +1,6 @@
 // Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress,
-// the key prompt without a player, the order of the Controls tab rows, the wrapping of the covered screen's label.
+// the key prompt without a player, the order of the Controls tab rows, the wrapping of the covered screen's label, the
+// covered screen's progress bar and marker (switched off, shape, progress, marker over simulated ticks).
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -12,6 +13,7 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/TextBlock.h"
 #include "Flow/StdFlowSubsystem.h"
+#include "Flow/StdTransitionProgress.h"
 #include "Settings/StdProjectSettings.h"
 #include "Styling/SlateColor.h"
 #include "Widgets/SWidget.h"
@@ -237,6 +239,201 @@ bool FStdFlowLabelWrapTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("A short label is one line"), ShortSize.Y > 0.f);
 	TestTrue(TEXT("120 characters wrap onto two lines or more"), WrappedSize.Y >= 1.8f * ShortSize.Y);
 	TestTrue(TEXT("The wrapped label stays within the maximum width (and its side padding)"), WrappedSize.X <= MaxWidth + 96.f + 1.f);
+	return true;
+}
+
+namespace StdUnitTests
+{
+	/** A settings object of its own for the layout tests: the project's values, with the bar and the marker as given. */
+	UStdProjectSettings* MakeTransitionSettings(bool bBar, bool bMarker, float BarHeight = 4.f, const FVector2D& MarkerSize = FVector2D(12.0, 24.0))
+	{
+		UStdProjectSettings* Settings = NewObject<UStdProjectSettings>(GetTransientPackage());
+		Settings->bTransitionProgressBar = bBar;
+		Settings->bTransitionMarker = bMarker;
+		Settings->TransitionProgressBarHeight = BarHeight;
+		Settings->TransitionMarkerSize = MarkerSize;
+		Settings->TransitionProgressBarColor = FLinearColor(0.3f, 0.3f, 0.3f, 1.f);
+		Settings->TransitionMarkerColor = FLinearColor(0.3f, 0.3f, 0.3f, 1.f);
+		return Settings;
+	}
+
+	/** Horizontal position of the marker as a fraction of the distance it can travel (0 left edge, 1 right edge). */
+	float MarkerPositionFraction(const FStdTransitionLayout& Layout, float ScreenWidth)
+	{
+		const float Travel = ScreenWidth - Layout.MarkerSize.X;
+		return Travel > 0.f ? Layout.MarkerPosition.X / Travel : 0.f;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdFlowProgressOffTest, "StdCore.Flow.ProgressOff", StdUnitTests::Flags)
+
+bool FStdFlowProgressOffTest::RunTest(const FString& Parameters)
+{
+	using namespace StdUnitTests;
+	// Full bar, marker halfway, fully covered: everything there is to draw, and still nothing with both switches off.
+	FStdTransitionProgress Progress;
+	Progress.Reset(4.f);
+	Progress.Report(1.f);
+	Progress.UpdateCovered(2.f);
+	const FVector2f Screen(1920.f, 1080.f);
+
+	const FStdTransitionLayout Off = FStdTransitionLayout::Compute(*MakeTransitionSettings(false, false), Screen, Progress, 1.f);
+	TestFalse(TEXT("Both switches off: no bar"), Off.bShowBar);
+	TestFalse(TEXT("Both switches off: no marker"), Off.bShowMarker);
+
+	const FStdTransitionLayout BarOnly = FStdTransitionLayout::Compute(*MakeTransitionSettings(true, false), Screen, Progress, 1.f);
+	TestTrue(TEXT("Bar switch alone: a bar"), BarOnly.bShowBar);
+	TestFalse(TEXT("Bar switch alone: no marker"), BarOnly.bShowMarker);
+
+	const FStdTransitionLayout MarkerOnly = FStdTransitionLayout::Compute(*MakeTransitionSettings(false, true), Screen, Progress, 1.f);
+	TestFalse(TEXT("Marker switch alone: no bar"), MarkerOnly.bShowBar);
+	TestTrue(TEXT("Marker switch alone: a marker"), MarkerOnly.bShowMarker);
+	TestEqual(TEXT("Marker switch alone: the marker stands on the bottom edge"), MarkerOnly.MarkerPosition.Y + MarkerOnly.MarkerSize.Y, Screen.Y);
+
+	const FStdTransitionLayout Uncovered = FStdTransitionLayout::Compute(*MakeTransitionSettings(true, true), Screen, Progress, 0.f);
+	TestFalse(TEXT("Overlay at opacity 0: no bar"), Uncovered.bShowBar);
+	TestFalse(TEXT("Overlay at opacity 0: no marker"), Uncovered.bShowMarker);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdFlowProgressBarShapeTest, "StdCore.Flow.ProgressBarShape", StdUnitTests::Flags)
+
+bool FStdFlowProgressBarShapeTest::RunTest(const FString& Parameters)
+{
+	using namespace StdUnitTests;
+	FStdTransitionProgress Full;
+	Full.Reset(0.f);
+	Full.Report(1.f);
+	FStdTransitionProgress Half;
+	Half.Reset(0.f);
+	Half.Report(0.5f);
+
+	for (const float Height : { 4.f, 7.f })
+	{
+		const UStdProjectSettings* Settings = MakeTransitionSettings(true, false, Height);
+		// 16:9, 4:3, 21:9 and a small 16:9 window.
+		for (const FVector2f Screen : { FVector2f(1920.f, 1080.f), FVector2f(1440.f, 1080.f), FVector2f(2560.f, 1080.f), FVector2f(1280.f, 720.f) })
+		{
+			const FString At = FString::Printf(TEXT("%.0fx%.0f, height %.0f"), Screen.X, Screen.Y, Height);
+			const FStdTransitionLayout L = FStdTransitionLayout::Compute(*Settings, Screen, Full, 1.f);
+			TestEqual(At + TEXT(": the full bar starts at the left edge"), L.BarPosition.X, 0.f);
+			TestEqual(At + TEXT(": the full bar reaches the right edge"), L.BarPosition.X + L.BarSize.X, Screen.X);
+			TestEqual(At + TEXT(": the bar touches the bottom edge"), L.BarPosition.Y + L.BarSize.Y, Screen.Y);
+			TestEqual(At + TEXT(": the bar has the height of the setting"), L.BarSize.Y, Height);
+			const FStdTransitionLayout H = FStdTransitionLayout::Compute(*Settings, Screen, Half, 1.f);
+			TestEqual(At + TEXT(": at 0.5 the bar fills half the width from the left edge"), H.BarSize.X, Screen.X * 0.5f);
+		}
+	}
+	TestEqual(TEXT("The bar height is clamped to 64"), FStdTransitionLayout::Compute(*MakeTransitionSettings(true, false, 500.f), FVector2f(1920.f, 1080.f), Full, 1.f).BarSize.Y, 64.f);
+	TestEqual(TEXT("The bar colour's alpha follows the fade"), FStdTransitionLayout::Compute(*MakeTransitionSettings(true, false), FVector2f(1920.f, 1080.f), Full, 0.5f).BarColor.A, 0.5f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdFlowProgressReportTest, "StdCore.Flow.ProgressReport", StdUnitTests::Flags)
+
+bool FStdFlowProgressReportTest::RunTest(const FString& Parameters)
+{
+	FStdTransitionProgress Progress;
+	Progress.Reset(4.f);
+	TestEqual(TEXT("A new covered period starts at 0"), Progress.GetBarFraction(), 0.f);
+	Progress.Report(0.3f);
+	TestEqual(TEXT("Report 0.3 shows 0.3"), Progress.GetBarFraction(), 0.3f);
+	Progress.Report(0.2f);
+	TestEqual(TEXT("Report 0.2 after 0.3 still shows 0.3"), Progress.GetBarFraction(), 0.3f);
+	Progress.Report(0.7f);
+	TestEqual(TEXT("Report 0.7 shows 0.7"), Progress.GetBarFraction(), 0.7f);
+	Progress.Report(-1.f);
+	TestEqual(TEXT("A negative report changes nothing"), Progress.GetBarFraction(), 0.7f);
+
+	// No report: ten simulated minutes of covered time at 60 frames per second do not move it.
+	FStdTransitionProgress Idle;
+	Idle.Reset(4.f);
+	float Covered = 0.f;
+	bool bMoved = false;
+	for (int32 Frame = 0; Frame < 36000; ++Frame)
+	{
+		Covered += 1.f / 60.f;
+		Idle.UpdateCovered(Covered);
+		bMoved |= Idle.GetBarFraction() != 0.f;
+	}
+	TestFalse(TEXT("With no report the bar does not move, however long the screen stays covered"), bMoved);
+	Idle.FinishCovered();
+	TestEqual(TEXT("The end of the covered time does not move the bar either"), Idle.GetBarFraction(), 0.f);
+
+	Progress.Report(3.f);
+	TestEqual(TEXT("Reports are clamped to 1"), Progress.GetBarFraction(), 1.f);
+	Progress.Reset(0.f);
+	TestEqual(TEXT("The next covered period starts at 0 again"), Progress.GetBarFraction(), 0.f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdFlowMarkerTest, "StdCore.Flow.Marker", StdUnitTests::Flags)
+
+bool FStdFlowMarkerTest::RunTest(const FString& Parameters)
+{
+	using namespace StdUnitTests;
+	const UStdProjectSettings* Settings = MakeTransitionSettings(true, true);
+	const FVector2f Screen(1920.f, 1080.f);
+	const float Frame = 1.f / 60.f;
+
+	for (const float Target : { 4.f, 5.86f })
+	{
+		FStdTransitionProgress Progress;
+		Progress.Reset(Target);
+		const FString For = FString::Printf(TEXT("covered time %.2f s"), Target);
+		TestTrue(For + TEXT(": the marker exists"), Progress.HasMarker());
+		TestEqual(For + TEXT(": the marker starts at the left edge"), FStdTransitionLayout::Compute(*Settings, Screen, Progress, 1.f).MarkerPosition.X, 0.f);
+
+		// Simulated ticks: each frame advances the covered time by one frame; check the frame that reaches each mark.
+		const float Marks[] = { 0.25f, 0.5f, 1.f };
+		int32 NextMark = 0;
+		float Covered = 0.f;
+		float Previous = 0.f;
+		bool bMovedBack = false;
+		while (NextMark < UE_ARRAY_COUNT(Marks) && Covered < Target * 2.f)
+		{
+			Covered += Frame;
+			Progress.UpdateCovered(Covered);
+			const FStdTransitionLayout L = FStdTransitionLayout::Compute(*Settings, Screen, Progress, 1.f);
+			const float Position = MarkerPositionFraction(L, Screen.X);
+			bMovedBack |= Position < Previous;
+			Previous = Position;
+			if (Covered >= Marks[NextMark] * Target)
+			{
+				TestTrue(FString::Printf(TEXT("%s: at %.0f%% of the covered time the marker is at %.4f of the screen width (within one frame, %.4f)"), *For,
+					Marks[NextMark] * 100.f, Position, Frame / Target), FMath::Abs(Position - Marks[NextMark]) <= Frame / Target + KINDA_SMALL_NUMBER);
+				++NextMark;
+			}
+		}
+		TestEqual(For + TEXT(": every mark reached"), NextMark, static_cast<int32>(UE_ARRAY_COUNT(Marks)));
+		TestFalse(For + TEXT(": the marker never moves back"), bMovedBack);
+
+		Progress.UpdateCovered(Target * 0.1f);
+		TestEqual(For + TEXT(": an earlier time does not move it back"), Progress.GetMarkerFraction(), 1.f);
+
+		// Loading outlasts the covered time: it waits at the right edge.
+		Progress.UpdateCovered(Target * 3.f);
+		const FStdTransitionLayout Waiting = FStdTransitionLayout::Compute(*Settings, Screen, Progress, 1.f);
+		TestEqual(For + TEXT(": waiting at the right edge"), Waiting.MarkerPosition.X + Waiting.MarkerSize.X, Screen.X);
+		TestEqual(For + TEXT(": the marker stands on top of the bar"), Waiting.MarkerPosition.Y + Waiting.MarkerSize.Y, Screen.Y - Waiting.BarSize.Y);
+	}
+
+	FStdTransitionProgress Zero;
+	Zero.Reset(0.f);
+	Zero.UpdateCovered(3.f);
+	Zero.FinishCovered();
+	TestFalse(TEXT("Covered time 0: no marker"), Zero.HasMarker() || FStdTransitionLayout::Compute(*Settings, Screen, Zero, 1.f).bShowMarker);
+
+	FStdTransitionProgress Timed;
+	Timed.Reset(4.f);
+	Timed.UpdateCovered(2.f);
+	TestFalse(TEXT("Switch off: no marker"), FStdTransitionLayout::Compute(*MakeTransitionSettings(true, false), Screen, Timed, 1.f).bShowMarker);
+
+	FStdTransitionProgress Finished;
+	Finished.Reset(4.f);
+	Finished.UpdateCovered(1.f);
+	Finished.FinishCovered();
+	TestEqual(TEXT("The end of the covered time puts the marker at the right edge"), Finished.GetMarkerFraction(), 1.f);
 	return true;
 }
 
