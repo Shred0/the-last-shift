@@ -20,6 +20,10 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnAnyTerminalActivated, APowerTerminal* /*
  * Normal time), nothing changes and OnInsufficientEnergy fires. Shows in scans in the interactable colour: Mesh renders
  * custom depth with the stencil value InteractableScanChannel of the project settings, the lidar channel the scan
  * director gives ScanColors.Interactable.
+ *
+ * Subclasses (the log terminal, the twin AI's terminal) reuse the payment: AcceptsPayment can refuse it before anything
+ * is spent, HandlePaid runs after a successful payment and before the events, OffersPayment and OffersRead tell the
+ * Interact prompt what to offer.
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API APowerTerminal : public AActor
@@ -47,7 +51,19 @@ public:
 	 * returns false.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Terminal")
-	bool TryActivate(APawn* InstigatorPawn);
+	virtual bool TryActivate(APawn* InstigatorPawn);
+
+	/** False when the terminal takes no payment at all now (nothing is spent and nothing fires). Default: always true. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	virtual bool AcceptsPayment() const { return true; }
+
+	/** True when the Interact prompt offers a payment here (with its cost). Default: a target is not powered. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	virtual bool OffersPayment() const { return HasUnpoweredTarget(); }
+
+	/** True when the Interact prompt offers to read here, for free. Default: false. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	virtual bool OffersRead() const { return false; }
 
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	bool IsInRange(const APawn* InstigatorPawn) const;
@@ -74,6 +90,9 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+
+	/** After a successful payment (energy spent, Targets powered), before OnActivated and OnAnyActivated. */
+	virtual void HandlePaid(APawn* InstigatorPawn) {}
 
 	/** The terminal's body; tagged for the interactable scan channel at BeginPlay. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")

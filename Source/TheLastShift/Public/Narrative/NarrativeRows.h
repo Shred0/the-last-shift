@@ -77,6 +77,44 @@ struct THELASTSHIFT_API FAIMessageRow : public FTableRowBase
 	FText TextScattered;
 };
 
+/**
+ * One log entry of the other humanity (DT_Logs, row name L_<order>). Text is the suit's translation, in plain English;
+ * the barcodes are generated from it. Shown newest first (highest Order first), never shortened, no tokens.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FLogRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	/** Position in the logs' own chronology: the highest is the newest. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (ClampMin = "1", ClampMax = "999"))
+	int32 Order = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (MultiLine = "true"))
+	FText Text;
+};
+
+/**
+ * One message of the twin AI (DT_TwinAI, row name T_<part>_<order>). Each payment at its terminal plays the rows of the
+ * next Part, in ascending Order, on the text channel as the twin voice. Never shortened, no tokens.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FTwinAIRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	/** The part the row belongs to (1 = the first payment). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (ClampMin = "1", ClampMax = "99"))
+	int32 Part = 1;
+
+	/** Position among the rows of the same part (ascending). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (ClampMin = "1", ClampMax = "999"))
+	int32 Order = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (MultiLine = "true"))
+	FText Text;
+};
+
 /** One ending text (DT_Endings: Inject, Open, Loss). Shown in full, never degraded. */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FEndingRow : public FTableRowBase

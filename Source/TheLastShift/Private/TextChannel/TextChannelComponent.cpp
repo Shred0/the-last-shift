@@ -4,6 +4,8 @@
 
 #include "Engine/DataTable.h"
 #include "Engine/World.h"
+#include "Run/TheLastShiftSettings.h"
+#include "TextChannel/TwinWriting.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(TextChannelComponent)
 
@@ -57,6 +59,29 @@ void UTextChannelComponent::SetMessageTable(UDataTable* InTable)
 	}
 	MessageTable = InTable;
 	NextIndex.Reset();
+}
+
+void UTextChannelComponent::SetTwinTable(UDataTable* InTable)
+{
+	if (InTable && (!InTable->GetRowStruct() || !InTable->GetRowStruct()->IsChildOf(FTwinAIRow::StaticStruct())))
+	{
+		UE_LOG(LogTextChannel, Warning, TEXT("%s: table %s does not hold FTwinAIRow rows; ignored."), *GetNameSafe(GetOwner()), *GetNameSafe(InTable));
+		InTable = nullptr;
+	}
+	TwinTable = InTable;
+}
+
+int32 UTextChannelComponent::GetTranslatedCells() const
+{
+	const int32 Shown = GetShownCells();
+	if (!bHasCurrent || Current.Voice != ETextVoice::Twin)
+	{
+		return Shown;
+	}
+	int32 TwinShown = 0;
+	int32 Translated = 0;
+	TwinWriting::GetTwinCounts(Typewriter.GetText().Len(), TwinElapsed * Typewriter.GetCharsPerSecond(), TwinLag, TwinShown, Translated);
+	return FMath::Min(Translated, Shown);
 }
 
 // --- Levels and text ---
@@ -186,6 +211,25 @@ int32 UTextChannelComponent::PushSequence(ETextTrigger Trigger, int32 Act, const
 	return Queued;
 }
 
+int32 UTextChannelComponent::PushTwinPart(int32 Part)
+{
+	const TArray<FName> Rows = TwinWriting::GetTwinPartRows(TwinTable, Part);
+	if (Rows.IsEmpty())
+	{
+		UE_LOG(LogTextChannel, Warning, TEXT("%s: no twin part %d in %s."), *GetNameSafe(GetOwner()), Part, *GetNameSafe(TwinTable));
+		return 0;
+	}
+	int32 Queued = 0;
+	for (const FName& RowName : Rows)
+	{
+		FQueued Item;
+		Item.RowName = RowName;
+		Item.Voice = ETextVoice::Twin;
+		Queued += Enqueue(MoveTemp(Item), *FString::Printf(TEXT("twin row '%s'"), *RowName.ToString())) ? 1 : 0;
+	}
+	return Queued;
+}
+
 bool UTextChannelComponent::PushText(const FString& Text, const FTextChannelContext& Context)
 {
 	FQueued Item;
@@ -203,6 +247,33 @@ void UTextChannelComponent::StartNext()
 	{
 		FQueued Item = Queue[0];
 		Queue.RemoveAt(0);
+
+		if (Item.Voice == ETextVoice::Twin)
+		{
+			// The twin AI: never degraded, never discarded at Silent, typed at its own fixed speed.
+			const FTwinAIRow* TwinRow = TwinTable ? TwinTable->FindRow<FTwinAIRow>(Item.RowName, TEXT("TextChannel"), false) : nullptr;
+			const FString TwinText = TwinRow ? TwinRow->Text.ToString() : FString();
+			if (TwinText.IsEmpty())
+			{
+				UE_LOG(LogTextChannel, Log, TEXT("%s: twin '%s' discarded: no text."), *GetNameSafe(GetOwner()), *Item.RowName.ToString());
+				continue;
+			}
+			const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+			Current = MoveTemp(Item);
+			bHasCurrent = true;
+			CurrentLevel = ETextDegradation::Full;
+			Typewriter.Start(TwinText, Settings->GetTwinCharsPerSecond());
+			TwinElapsed = 0.0;
+			TwinLag = Settings->GetTranslationLagChars();
+			Phase = EPhase::Typing;
+			PhaseLeft = 0.f;
+			UE_LOG(LogTextChannel, Log, TEXT("%s: twin message '%s' started (%.1f chars/s, translation %d behind): \"%s\""), *GetNameSafe(GetOwner()),
+				*Current.RowName.ToString(), Typewriter.GetCharsPerSecond(), TwinLag, *TwinText);
+			OnMessageStarted.Broadcast(Current.RowName, CurrentLevel);
+			SetVisible(true);
+			BroadcastText();
+			return;
+		}
 
 		const ETextDegradation Level = GetLevelForBattery(Item.Context.BatteryFraction);
 		const FString What = Item.bRaw ? FString(TEXT("text")) : FString::Printf(TEXT("'%s'"), *Item.RowName.ToString());
@@ -280,8 +351,9 @@ void UTextChannelComponent::AdvanceSeconds(float DeltaSeconds)
 		break;
 	case EPhase::Typing:
 		Typewriter.Advance(Delta);
+		TwinElapsed += Delta;
 		BroadcastText();
-		if (Typewriter.IsComplete())
+		if (Typewriter.IsComplete() && GetTranslatedCells() >= Typewriter.GetText().Len())
 		{
 			Phase = EPhase::Holding;
 			PhaseLeft = GetHoldSecondsFor(Typewriter.GetText().Len());
@@ -316,6 +388,7 @@ void UTextChannelComponent::SetSuspended(bool bInSuspended)
 	{
 		// The message starts over from its first character, at the level and speed it started with.
 		Typewriter.Restart();
+		TwinElapsed = 0.0;
 		Phase = EPhase::Typing;
 		PhaseLeft = 0.f;
 		SetVisible(true);
@@ -358,5 +431,14 @@ void UTextChannelComponent::BroadcastText()
 	{
 		LastBroadcastText = Now;
 		OnTextUpdated.Broadcast(Now);
+	}
+	const bool bTwin = bHasCurrent && Current.Voice == ETextVoice::Twin;
+	const int32 Shown = bTwin ? GetShownCells() : 0;
+	const int32 Translated = bTwin ? GetTranslatedCells() : 0;
+	if (Shown != LastShownCells || Translated != LastTranslatedCells)
+	{
+		LastShownCells = Shown;
+		LastTranslatedCells = Translated;
+		OnCellsUpdated.Broadcast(Shown, Translated);
 	}
 }

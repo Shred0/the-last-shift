@@ -174,11 +174,13 @@ void URunSubsystem::TakeSnapshot(int32 Act)
 	Snapshot.BatteryFraction = Home ? Home->GetBatteryFraction() : 1.0;
 	Snapshot.HomeSecondsElapsed = Home ? Home->GetHomeSecondsElapsed() : 0.0;
 	Snapshot.BankedEnergy = Energy ? Energy->GetBankedEnergy() : 0;
+	Snapshot.Archive = Archive;
 
 	const int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& Old) { return Old.ActIndex >= Act; });
 	Snapshots.Add(Snapshot);
-	UE_LOG(LogRun, Log, TEXT("Snapshot: act %d, battery %.4f, home %.0f s, banked %d (%d replaced or discarded, %d snapshots)."),
-		Act, Snapshot.BatteryFraction, Snapshot.HomeSecondsElapsed, Snapshot.BankedEnergy, Discarded, Snapshots.Num());
+	UE_LOG(LogRun, Log, TEXT("Snapshot: act %d, battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts (%d replaced or discarded, %d snapshots)."),
+		Act, Snapshot.BatteryFraction, Snapshot.HomeSecondsElapsed, Snapshot.BankedEnergy, Snapshot.Archive.LogOrders.Num(), Snapshot.Archive.TwinPartsPlayed,
+		Discarded, Snapshots.Num());
 	WriteSave();
 	OnSnapshotsChanged.Broadcast();
 }
@@ -191,6 +193,7 @@ void URunSubsystem::WriteSave()
 		bLastSaveOk = false;
 		return;
 	}
+	Save->Version = URunSaveGame::CurrentVersion;
 	Save->Snapshots = Snapshots;
 	bLastSaveOk = UGameplayStatics::SaveGameToSlot(Save, SaveSlotName(), 0);
 	++SaveWrites;
@@ -200,10 +203,13 @@ void URunSubsystem::WriteSave()
 bool URunSubsystem::LoadSave()
 {
 	Snapshots.Reset();
+	LoadedSaveVersion = 0;
 	if (UGameplayStatics::DoesSaveGameExist(SaveSlotName(), 0))
 	{
 		if (const URunSaveGame* Save = Cast<URunSaveGame>(UGameplayStatics::LoadGameFromSlot(SaveSlotName(), 0)))
 		{
+			// Tagged properties: a version 1 file has no archive in its snapshots, which then load with an empty one.
+			LoadedSaveVersion = Save->Version;
 			const int32 ActCount = UTheLastShiftSettings::Get()->AreaMaps.Num();
 			for (const FAreaSnapshot& Snapshot : Save->Snapshots)
 			{
@@ -219,7 +225,7 @@ bool URunSubsystem::LoadSave()
 			UE_LOG(LogRun, Warning, TEXT("Save: slot '%s' exists but does not load as a run save; ignored."), SaveSlotName());
 		}
 	}
-	UE_LOG(LogRun, Log, TEXT("Save: %d snapshots read from slot '%s'."), Snapshots.Num(), SaveSlotName());
+	UE_LOG(LogRun, Log, TEXT("Save: %d snapshots read from slot '%s' (save version %d)."), Snapshots.Num(), SaveSlotName(), LoadedSaveVersion);
 	OnSnapshotsChanged.Broadcast();
 	return Snapshots.Num() > 0;
 }
@@ -233,6 +239,53 @@ void URunSubsystem::ClearSave()
 	}
 	UE_LOG(LogRun, Log, TEXT("Save: slot '%s' cleared."), SaveSlotName());
 	OnSnapshotsChanged.Broadcast();
+}
+
+// --- The suit's archive ---
+
+int32 URunSubsystem::StoreLogEntries(const TArray<int32>& Orders)
+{
+	int32 Added = 0;
+	for (const int32 Order : Orders)
+	{
+		if (!Archive.LogOrders.Contains(Order))
+		{
+			Archive.LogOrders.Add(Order);
+			++Added;
+		}
+	}
+	UE_LOG(LogRun, Log, TEXT("Archive: %d of %d log entries stored (%d log entries, %d twin parts)."), Added, Orders.Num(), Archive.LogOrders.Num(),
+		Archive.TwinPartsPlayed);
+	if (Added > 0)
+	{
+		OnArchiveChanged.Broadcast();
+	}
+	return Added;
+}
+
+bool URunSubsystem::StoreTwinPart(int32 Part)
+{
+	if (Part != Archive.TwinPartsPlayed + 1)
+	{
+		UE_LOG(LogRun, Warning, TEXT("Archive: twin part %d refused, the next one is %d."), Part, Archive.TwinPartsPlayed + 1);
+		return false;
+	}
+	Archive.TwinPartsPlayed = Part;
+	UE_LOG(LogRun, Log, TEXT("Archive: twin part %d stored (%d log entries, %d twin parts)."), Part, Archive.LogOrders.Num(), Archive.TwinPartsPlayed);
+	OnArchiveChanged.Broadcast();
+	return true;
+}
+
+void URunSubsystem::ClearArchive()
+{
+	SetArchive(FSuitArchive(), TEXT("cleared"));
+}
+
+void URunSubsystem::SetArchive(const FSuitArchive& InArchive, const TCHAR* Why)
+{
+	Archive = InArchive;
+	UE_LOG(LogRun, Log, TEXT("Archive (%s): %d log entries, %d twin parts."), Why, Archive.LogOrders.Num(), Archive.TwinPartsPlayed);
+	OnArchiveChanged.Broadcast();
 }
 
 bool URunSubsystem::CanTravelNow(const TCHAR* What) const
@@ -268,8 +321,9 @@ bool URunSubsystem::StartNewRun()
 	{
 		Energy->RestoreBankedEnergy(0);
 	}
+	SetArchive(FSuitArchive(), TEXT("new run"));
 	ClearSave();
-	UE_LOG(LogRun, Log, TEXT("New run: battery 1, home 0 s, banked 0, save cleared."));
+	UE_LOG(LogRun, Log, TEXT("New run: battery 1, home 0 s, banked 0, archive empty, save cleared."));
 	return TravelToArea(1);
 }
 
@@ -299,9 +353,10 @@ bool URunSubsystem::RestartFromAct(int32 Act)
 	{
 		Energy->RestoreBankedEnergy(Restored.BankedEnergy);
 	}
+	SetArchive(Restored.Archive, *FString::Printf(TEXT("restart from act %d"), Act));
 	const int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& S) { return S.ActIndex > Act; });
-	UE_LOG(LogRun, Log, TEXT("Restart from act %d: battery %.4f, home %.0f s, banked %d; %d later snapshots discarded."),
-		Act, Restored.BatteryFraction, Restored.HomeSecondsElapsed, Restored.BankedEnergy, Discarded);
+	UE_LOG(LogRun, Log, TEXT("Restart from act %d: battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts; %d later snapshots discarded."),
+		Act, Restored.BatteryFraction, Restored.HomeSecondsElapsed, Restored.BankedEnergy, Restored.Archive.LogOrders.Num(), Restored.Archive.TwinPartsPlayed, Discarded);
 	WriteSave();
 	OnSnapshotsChanged.Broadcast();
 	return TravelToArea(Act);

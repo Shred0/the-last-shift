@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 // Automation tests of the text channel that need no world (Brief 6, criteria 2 to 7; Brief 7: the structure of the
-// narrative CSV files, never their wording, number or length): TheLastShift.TextChannel.*.
+// narrative CSV files, never their wording, number or length; Brief 8: DT_Logs and DT_TwinAI too, the deal of the logs
+// to the terminals and the twin voice's counts): TheLastShift.TextChannel.*, TheLastShift.TwinWriting.*.
 // Run with: Automation RunTests TheLastShift.TextChannel. Development editor builds only.
 
 #include "CoreMinimal.h"
@@ -18,6 +19,7 @@
 #include "TextChannel/TextChannelComponent.h"
 #include "TextChannel/TextDegradation.h"
 #include "TextChannel/TextTokens.h"
+#include "TextChannel/TwinWriting.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
 
@@ -548,6 +550,111 @@ namespace NarrativeCsv
 		return Problems;
 	}
 
+	/** Every { in Cell, as a problem: the other humanity's writing has no tokens. */
+	static void CheckNoTokens(const TCHAR* File, const FName& RowName, const FString& Cell, TArray<FString>& OutProblems)
+	{
+		const int32 Open = Cell.Find(TEXT("{"));
+		if (Open != INDEX_NONE)
+		{
+			OutProblems.Add(FString::Printf(TEXT("%s, row %s: a token (%s) in a text that takes none"), File, *RowName.ToString(), *Cell.Mid(Open, 12)));
+		}
+	}
+
+	/** Every problem of DT_Logs.csv (empty: the structure is right): rows L_<order>, orders 1-999 matching their names, unique. */
+	static TArray<FString> CheckLogs(const FString& Csv, const TCHAR* File = TEXT("DT_Logs.csv"))
+	{
+		TArray<FString> Problems;
+		UScriptStruct* Struct = FLogRow::StaticStruct();
+		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
+		if (Table->GetRowMap().IsEmpty())
+		{
+			Problems.Add(FString::Printf(TEXT("%s has no rows"), File));
+		}
+		const FRegexPattern NamePattern(TEXT("^L_([0-9]+)$"));
+		TSet<int32> Orders;
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FString Name = Pair.Key.ToString();
+			const FLogRow& Row = *reinterpret_cast<const FLogRow*>(Pair.Value);
+			FRegexMatcher Match(NamePattern, Name);
+			if (!Match.FindNext())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not follow L_<order>"), File, *Name));
+			}
+			else if (FCString::Atoi(*Match.GetCaptureGroup(1)) != Row.Order)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not match its order %d"), File, *Name, Row.Order));
+			}
+			if (Row.Order < 1 || Row.Order > 999)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: order %d is not 1-999"), File, *Name, Row.Order));
+			}
+			if (Orders.Contains(Row.Order))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: order %d appears twice"), File, *Name, Row.Order));
+			}
+			Orders.Add(Row.Order);
+			const FString Text = TextCell(Struct, Pair.Value, TEXT("Text"));
+			CheckLineBreaks(File, Pair.Key, TEXT("Text"), Text, Problems);
+			CheckNoTokens(File, Pair.Key, Text, Problems);
+			if (Text.IsEmpty())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: empty text"), File, *Name));
+			}
+		}
+		return Problems;
+	}
+
+	/** Every problem of DT_TwinAI.csv (empty: the structure is right): rows T_<part>_<order> matching their columns, parts 1..N with none missing. */
+	static TArray<FString> CheckTwinAI(const FString& Csv, const TCHAR* File = TEXT("DT_TwinAI.csv"))
+	{
+		TArray<FString> Problems;
+		UScriptStruct* Struct = FTwinAIRow::StaticStruct();
+		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
+		if (Table->GetRowMap().IsEmpty())
+		{
+			Problems.Add(FString::Printf(TEXT("%s has no rows"), File));
+		}
+		const FRegexPattern NamePattern(TEXT("^T_([0-9]+)_([0-9]+)$"));
+		TSet<int32> Parts;
+		int32 MaxPart = 0;
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FString Name = Pair.Key.ToString();
+			const FTwinAIRow& Row = *reinterpret_cast<const FTwinAIRow*>(Pair.Value);
+			FRegexMatcher Match(NamePattern, Name);
+			if (!Match.FindNext())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not follow T_<part>_<order>"), File, *Name));
+			}
+			else if (FCString::Atoi(*Match.GetCaptureGroup(1)) != Row.Part || FCString::Atoi(*Match.GetCaptureGroup(2)) != Row.Order)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not match its columns (part %d, order %d)"), File, *Name, Row.Part, Row.Order));
+			}
+			if (Row.Part < 1 || Row.Part > 99 || Row.Order < 1 || Row.Order > 999)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: part %d or order %d out of range"), File, *Name, Row.Part, Row.Order));
+			}
+			Parts.Add(Row.Part);
+			MaxPart = FMath::Max(MaxPart, Row.Part);
+			const FString Text = TextCell(Struct, Pair.Value, TEXT("Text"));
+			CheckLineBreaks(File, Pair.Key, TEXT("Text"), Text, Problems);
+			CheckNoTokens(File, Pair.Key, Text, Problems);
+			if (Text.IsEmpty())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: empty text"), File, *Name));
+			}
+		}
+		for (int32 Part = 1; Part <= MaxPart; ++Part)
+		{
+			if (!Parts.Contains(Part))
+			{
+				Problems.Add(FString::Printf(TEXT("%s: part %d has no row (parts are played 1 to %d in order)"), File, Part, MaxPart));
+			}
+		}
+		return Problems;
+	}
+
 	/** Csv with one more data line, on a line of its own. */
 	static FString WithLine(const FString& Csv, const FString& Line)
 	{
@@ -564,8 +671,20 @@ bool FTextChannelCsvTest::RunTest(const FString& Parameters)
 	using namespace NarrativeCsv;
 	const FString Messages = Load(TEXT("DT_AIMessages.csv"));
 	const FString Endings = Load(TEXT("DT_Endings.csv"));
+	const FString Logs = Load(TEXT("DT_Logs.csv"));
+	const FString Twin = Load(TEXT("DT_TwinAI.csv"));
 	TestFalse(TEXT("Narrative/DT_AIMessages.csv is read"), Messages.IsEmpty());
 	TestFalse(TEXT("Narrative/DT_Endings.csv is read"), Endings.IsEmpty());
+	TestFalse(TEXT("Narrative/DT_Logs.csv is read"), Logs.IsEmpty());
+	TestFalse(TEXT("Narrative/DT_TwinAI.csv is read"), Twin.IsEmpty());
+	const TArray<FString> LogProblems = CheckLogs(Logs);
+	const TArray<FString> TwinProblems = CheckTwinAI(Twin);
+	for (const FString& Problem : LogProblems) { AddError(Problem); }
+	for (const FString& Problem : TwinProblems) { AddError(Problem); }
+	AddInfo(FString::Printf(TEXT("DT_Logs.csv: %d data lines, %d problems; DT_TwinAI.csv: %d data lines, %d problems."), CountDataLines(Logs), LogProblems.Num(),
+		CountDataLines(Twin), TwinProblems.Num()));
+	TestEqual(TEXT("DT_Logs.csv: structure right (parse, L_<order> names, orders, line breaks, no token)"), LogProblems.Num(), 0);
+	TestEqual(TEXT("DT_TwinAI.csv: structure right (parse, T_<part>_<order> names, parts in sequence, line breaks, no token)"), TwinProblems.Num(), 0);
 	const TArray<FString> MessageProblems = CheckAIMessages(Messages);
 	const TArray<FString> EndingProblems = CheckEndings(Endings);
 	for (const FString& Problem : MessageProblems) { AddError(Problem); }
@@ -603,10 +722,77 @@ bool FTextChannelCsvCheckTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("%s fails with a clear message (\"%s\" in: %s)"), Case.What, Case.Expected, *All),
 			Problems.Num() > 0 && All.Contains(Case.Expected, ESearchCase::CaseSensitive));
 	}
+	// The two tables of the other humanity's writing.
+	const FCase WritingCases[] = {
+		{ TEXT("a log row with a bad name"), TEXT("Log_901,901,\"A test line.\""), TEXT("does not follow L_<order>") },
+		{ TEXT("a log row with a token"), TEXT("L_902,902,\"A test line with {still} in it.\""), TEXT("a token") },
+		{ TEXT("a log row with a line break"), TEXT("L_903,903,\"A test line,\nbroken in two.\""), TEXT("line break") },
+	};
+	const FString LogBase = Load(TEXT("DT_Logs.csv"));
+	TestEqual(TEXT("The committed DT_Logs.csv has no problem before a bad row is added"), CheckLogs(LogBase).Num(), 0);
+	for (const FCase& Case : WritingCases)
+	{
+		const FString All = FString::Join(CheckLogs(WithLine(LogBase, Case.Line), TEXT("DT_Logs.csv (copy)")), TEXT(" | "));
+		AddInfo(FString::Printf(TEXT("%s: %s"), Case.What, *All));
+		TestTrue(FString::Printf(TEXT("%s fails with a clear message (\"%s\" in: %s)"), Case.What, Case.Expected, *All), All.Contains(Case.Expected, ESearchCase::CaseSensitive));
+	}
+	const FString TwinBase = Load(TEXT("DT_TwinAI.csv"));
+	TestEqual(TEXT("The committed DT_TwinAI.csv has no problem before a bad row is added"), CheckTwinAI(TwinBase).Num(), 0);
+	const FCase TwinCases[] = {
+		{ TEXT("a twin row whose name does not match its part"), TEXT("T_1_901,2,901,\"A test line.\""), TEXT("does not match its columns") },
+		{ TEXT("a twin row with a token"), TEXT("T_1_902,1,902,\"A test line with {home} in it.\""), TEXT("a token") },
+		{ TEXT("a twin part with a gap before it"), TEXT("T_9_1,9,1,\"A test line.\""), TEXT("has no row") },
+	};
+	for (const FCase& Case : TwinCases)
+	{
+		const FString All = FString::Join(CheckTwinAI(WithLine(TwinBase, Case.Line), TEXT("DT_TwinAI.csv (copy)")), TEXT(" | "));
+		AddInfo(FString::Printf(TEXT("%s: %s"), Case.What, *All));
+		TestTrue(FString::Printf(TEXT("%s fails with a clear message (\"%s\" in: %s)"), Case.What, Case.Expected, *All), All.Contains(Case.Expected, ESearchCase::CaseSensitive));
+	}
+
 	const FString NoLoss = Load(TEXT("DT_Endings.csv")).Replace(TEXT("\nLoss,"), TEXT("\nLost,"));
 	TestTrue(TEXT("DT_Endings.csv without the Loss row fails"),
 		FString::Join(CheckEndings(NoLoss, TEXT("DT_Endings.csv (copy)")), TEXT(" | ")).Contains(TEXT("no row Loss")));
 #endif
+	return true;
+}
+
+// --- The other humanity's writing (Brief 8) ---
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTwinWritingDealTest, "TheLastShift.TwinWriting.Deal", TextChannelTests::Flags)
+
+bool FTwinWritingDealTest::RunTest(const FString& Parameters)
+{
+	const auto Join = [](const TArray<int32>& Orders) { return FString::JoinBy(Orders, TEXT(","), [](int32 O) { return FString::FromInt(O); }); };
+	const TArray<int32> Eight = { 8, 7, 6, 5, 4, 3, 2, 1 };
+	TestEqual(TEXT("8 entries, 2 terminals: the first paid gets 8,7,6,5"), Join(TwinWriting::DealLogGroup(Eight, 2, 0)), FString(TEXT("8,7,6,5")));
+	TestEqual(TEXT("8 entries, 2 terminals: the second paid gets 4,3,2,1"), Join(TwinWriting::DealLogGroup(Eight, 2, 1)), FString(TEXT("4,3,2,1")));
+	const TArray<int32> Five = { 5, 4, 3, 2, 1 };
+	TestEqual(TEXT("5 entries, 2 terminals: 5,4,3"), Join(TwinWriting::DealLogGroup(Five, 2, 0)), FString(TEXT("5,4,3")));
+	TestEqual(TEXT("5 entries, 2 terminals: then 2,1"), Join(TwinWriting::DealLogGroup(Five, 2, 1)), FString(TEXT("2,1")));
+	TestEqual(TEXT("8 entries, 3 terminals: 3, 3 and 2 entries"), FString::Printf(TEXT("%d %d %d"), TwinWriting::DealLogGroup(Eight, 3, 0).Num(),
+		TwinWriting::DealLogGroup(Eight, 3, 1).Num(), TwinWriting::DealLogGroup(Eight, 3, 2).Num()), FString(TEXT("3 3 2")));
+	TestEqual(TEXT("Past the last group: nothing"), TwinWriting::DealLogGroup(Eight, 2, 2).Num(), 0);
+	TestEqual(TEXT("One terminal gets every entry"), Join(TwinWriting::DealLogGroup(Five, 1, 0)), FString(TEXT("5,4,3,2,1")));
+
+	// The twin voice: barcodes first, the translation 10 behind, never ahead, catching up after the end.
+	int32 Shown = 0;
+	int32 Translated = 0;
+	TwinWriting::GetTwinCounts(60, 4.0, 10, Shown, Translated);
+	TestTrue(TEXT("Twin counts at 4 typed: 4 shown, 0 translated"), Shown == 4 && Translated == 0);
+	TwinWriting::GetTwinCounts(60, 25.0, 10, Shown, Translated);
+	TestTrue(TEXT("Twin counts at 25 typed: 25 shown, 15 translated"), Shown == 25 && Translated == 15);
+	TwinWriting::GetTwinCounts(60, 64.0, 10, Shown, Translated);
+	TestTrue(TEXT("Twin counts at 64 typed: every barcode shown, 54 translated"), Shown == 60 && Translated == 54);
+	TwinWriting::GetTwinCounts(60, 70.0, 10, Shown, Translated);
+	TestTrue(TEXT("Twin counts at 70 typed: every cell translated"), Shown == 60 && Translated == 60);
+	bool bNeverAhead = true;
+	for (double Units = 0.0; Units < 80.0; Units += 0.37)
+	{
+		TwinWriting::GetTwinCounts(60, Units, 10, Shown, Translated);
+		bNeverAhead &= Translated <= Shown && Translated == FMath::Clamp(static_cast<int32>(FMath::FloorToDouble(Units + 1.e-4)) - 10, 0, Shown);
+	}
+	TestTrue(TEXT("Twin counts: the translation is never ahead of the barcodes"), bNeverAhead);
 	return true;
 }
 

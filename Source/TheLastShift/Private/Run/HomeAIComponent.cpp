@@ -5,6 +5,7 @@
 #include "Area/AreaGenerator.h"
 #include "Energy/EnergySubsystem.h"
 #include "Energy/PowerTerminal.h"
+#include "Energy/TwinAITerminal.h"
 #include "Engine/DataTable.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -54,6 +55,7 @@ void UHomeAIComponent::BeginPlay()
 		return;
 	}
 	Text->SetMessageTable(UTheLastShiftSettings::Get()->LoadAIMessagesTable());
+	Text->SetTwinTable(UTheLastShiftSettings::Get()->LoadTwinAITable());
 
 	if (UTimeStateSubsystem* TimeState = World->GetSubsystem<UTimeStateSubsystem>())
 	{
@@ -75,7 +77,8 @@ void UHomeAIComponent::BeginPlay()
 	TerminalHandle = APowerTerminal::OnAnyActivated.AddUObject(this, &UHomeAIComponent::HandleTerminalActivated);
 
 	UpdateSuspension();
-	UE_LOG(LogTextChannel, Log, TEXT("%s: home AI on %s, act %d, table %s."), *GetName(), *GetNameSafe(Owner), GetAct(), *GetNameSafe(Text->GetMessageTable()));
+	UE_LOG(LogTextChannel, Log, TEXT("%s: home AI on %s, act %d, table %s, twin table %s."), *GetName(), *GetNameSafe(Owner), GetAct(),
+		*GetNameSafe(Text->GetMessageTable()), *GetNameSafe(Text->GetTwinTable()));
 
 	// An area that became ready before this pawn began play has already released the player.
 	if (const AAreaGenerator* Generator = AAreaGenerator::Find(World); Generator && Generator->IsReady())
@@ -230,6 +233,13 @@ void UHomeAIComponent::HandleTerminalActivated(APowerTerminal* Terminal, int32 C
 		return;
 	}
 	Text->PushTrigger(ETextTrigger::Spend, GetAct(), MakeContext());
+	// The twin AI speaks after the home AI's comment on the same payment, in the same queue.
+	if (const ATwinAITerminal* Twin = Cast<ATwinAITerminal>(Terminal))
+	{
+		const int32 Part = Twin->GetLastPlayedPart();
+		const int32 Queued = Part > 0 ? Text->PushTwinPart(Part) : 0;
+		UE_LOG(LogTextChannel, Log, TEXT("%s: twin AI part %d at %s: %d messages queued."), *GetName(), Part, *Terminal->GetName(), Queued);
+	}
 }
 
 // --- Travel label ---

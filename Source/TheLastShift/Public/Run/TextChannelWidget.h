@@ -4,17 +4,22 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "TextChannel/TextDegradation.h"
 #include "TextChannelWidget.generated.h"
 
 class UBorder;
+class UOverlay;
+class UStdBarcodeText;
 class UTextBlock;
 class UTextChannelComponent;
 
 /**
- * Shows the home AI's text channel in the lower left corner of the screen, away from the Interact prompt and the
- * scan-ready ring (both bottom centre). Displays what the channel's OnTextUpdated gives it and hides on
- * OnVisibilityChanged: it holds no copy of any value and decides nothing. Engine font, its own colour (never a scan
- * colour). The tree is built in C++, so the class is used as is; created by the pawn, which owns the HUD.
+ * Shows the suit's text channel in the lower left corner of the screen, away from the Interact prompt and the
+ * scan-ready ring (both bottom centre). A home AI message is the text the channel's OnTextUpdated gives it; a twin AI
+ * message is drawn with StdCore's barcode text, the cells the channel's OnCellsUpdated gives it. Hides on
+ * OnVisibilityChanged: it holds no copy of any value and decides nothing. Engine font; each voice in its colour of
+ * UTheLastShiftSettings::TextColors (never a scan colour). The tree is built in C++, so the class is used as is; created
+ * by the pawn, which owns the HUD.
  */
 UCLASS()
 class THELASTSHIFT_API UTextChannelWidget : public UUserWidget
@@ -41,9 +46,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|UI", meta = (ClampMin = "8", ClampMax = "48"))
 	int32 FontSize = 18;
 
-	/** Colour of the home AI's text: the one owner of it. Not a scan colour. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|UI")
-	FLinearColor TextColor = FLinearColor(0.93f, 0.82f, 0.55f, 0.95f);
 
 	/** Panel behind the text, so it stays readable over a lit surface. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|UI")
@@ -60,6 +62,16 @@ public:
 	/** The box's rectangle in absolute desktop pixels, after the last layout (zero size when hidden). */
 	FBox2D GetShownRect() const;
 
+	/** True while a twin AI message is on screen (drawn as barcode text). */
+	UFUNCTION(BlueprintPure, Category = "TextChannel|UI")
+	bool IsShowingTwin() const;
+
+	/** The barcode text that draws twin AI messages (tests read its counts and colours). */
+	UStdBarcodeText* GetTwinBarcode() const { return Barcode_Message; }
+
+	/** The text block that draws home AI messages. */
+	UTextBlock* GetHomeTextBlock() const { return Text_Message; }
+
 	virtual bool Initialize() override;
 
 protected:
@@ -72,12 +84,21 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "TextChannel|UI")
 	TObjectPtr<UTextBlock> Text_Message;
 
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "TextChannel|UI")
+	TObjectPtr<UStdBarcodeText> Barcode_Message;
+
 private:
 	UFUNCTION()
 	void HandleTextUpdated(const FString& VisibleText);
 
 	UFUNCTION()
 	void HandleVisibilityChanged(bool bVisible);
+
+	UFUNCTION()
+	void HandleCellsUpdated(int32 ShownCells, int32 TranslatedCells);
+
+	UFUNCTION()
+	void HandleMessageStarted(FName RowName, ETextDegradation Level);
 
 	void ApplyStyle();
 	void Bind(UTextChannelComponent* InChannel);
@@ -86,4 +107,9 @@ private:
 	TWeakObjectPtr<UTextChannelComponent> Channel;
 	FString ShownText;
 	bool bChannelVisible = false;
+	/** The current message is the twin voice, its full text and its cells as the channel gave them. */
+	bool bTwin = false;
+	FString TwinText;
+	int32 TwinShown = 0;
+	int32 TwinTranslated = 0;
 };

@@ -110,6 +110,12 @@ bool APowerTerminal::TryActivate(APawn* InstigatorPawn)
 		return false;
 	}
 
+	if (!AcceptsPayment())
+	{
+		UE_LOG(LogEnergy, Log, TEXT("%s: takes no payment now; nothing spent."), *GetName());
+		return false;
+	}
+
 	UEnergySubsystem* Energy = UEnergySubsystem::Get(this);
 	const int32 Price = TerminalTuning::Cost(Cost);
 	const int32 Banked = Energy ? Energy->GetBankedEnergy() : 0;
@@ -133,6 +139,7 @@ bool APowerTerminal::TryActivate(APawn* InstigatorPawn)
 		}
 	}
 	UE_LOG(LogEnergy, Log, TEXT("%s: activated, spent %d, powered %d device(s)."), *GetName(), Price, Powered);
+	HandlePaid(InstigatorPawn);
 	OnActivated.Broadcast(Price);
 	OnAnyActivated.Broadcast(this, Price);
 	return true;

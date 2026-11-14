@@ -18,9 +18,25 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTextMessageStarted, FName, RowNa
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTextUpdated, const FString&, VisibleText);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTextMessageFinished, FName, RowName);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTextVisibilityChanged, bool, bVisible);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnTextCellsUpdated, int32, ShownCells, int32, TranslatedCells);
+
+/** Who speaks a message of the channel. */
+UENUM(BlueprintType)
+enum class ETextVoice : uint8
+{
+	/** The home AI: degraded by the battery, typed at the battery's speed, discarded at Silent. */
+	Home,
+	/** The twin AI: barcode characters typed first and translated a few characters behind; never degraded or discarded. */
+	Twin
+};
 
 /**
- * The home AI's text channel: a queue of messages, each degraded by the battery, filled with its numbers and typed out.
+ * The suit's text channel: one queue for two voices. The home AI's messages are degraded by the battery, filled with
+ * their numbers and typed out. The twin AI's messages (ETextVoice::Twin, rows of the twin table) are never degraded and
+ * never discarded at Silent; they are typed at the fixed TwinCharsPerSecond of the project settings as barcode
+ * characters, and the translation follows TranslationLagChars behind and catches up after the last barcode
+ * (GetShownCells / GetTranslatedCells, OnCellsUpdated). Every other rule (Normal time only, suspensions, restart from
+ * the first character, hold and gap) is the same for both voices.
  *
  * It owns neither the battery nor the time state. Each push carries a context (FTextChannelContext) with the numbers
  * the message shows; the battery fraction in it fixes the level and the typing speed when the message starts, and they
@@ -112,6 +128,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "TextChannel")
 	int32 PushSequence(ETextTrigger Trigger, int32 Act, const FTextChannelContext& Context);
 
+	/** The twin AI's table (FTwinAIRow rows). Given by the owner; null = the twin AI says nothing. */
+	UFUNCTION(BlueprintCallable, Category = "TextChannel")
+	void SetTwinTable(UDataTable* InTable);
+
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	UDataTable* GetTwinTable() const { return TwinTable; }
+
+	/** Queues every row of the twin AI's Part, in ascending Order, as the twin voice. Returns how many were queued. */
+	UFUNCTION(BlueprintCallable, Category = "TextChannel")
+	int32 PushTwinPart(int32 Part);
+
 	/** Queues a text that is no row (debug: tls.Text.Say), degraded automatically. */
 	UFUNCTION(BlueprintCallable, Category = "TextChannel")
 	bool PushText(const FString& Text, const FTextChannelContext& Context);
@@ -153,6 +180,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	ETextDegradation GetCurrentLevel() const { return bHasCurrent ? CurrentLevel : ETextDegradation::Silent; }
 
+	/** Voice of the current message (Home when there is none). */
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	ETextVoice GetCurrentVoice() const { return bHasCurrent ? Current.Voice : ETextVoice::Home; }
+
+	/** Cells of the current message shown so far: its typed characters (as barcodes for the twin voice). 0 when hidden. */
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	int32 GetShownCells() const { return bVisible ? Typewriter.GetVisibleChars() : 0; }
+
+	/** Of the shown cells, how many are translated: all of them for the home voice, the lagging count for the twin voice. */
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	int32 GetTranslatedCells() const;
+
 	/** The full text of the current message, as it is being typed. */
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	FString GetCurrentText() const { return bHasCurrent ? Typewriter.GetText() : FString(); }
@@ -191,6 +230,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "TextChannel")
 	FOnTextVisibilityChanged OnVisibilityChanged;
 
+	/** A twin message's shown or translated cells changed (also to 0 when it restarts or the channel hides). */
+	UPROPERTY(BlueprintAssignable, Category = "TextChannel")
+	FOnTextCellsUpdated OnCellsUpdated;
+
 private:
 	struct FQueued
 	{
@@ -198,6 +241,7 @@ private:
 		/** Set for a pushed text (no row). */
 		FString RawText;
 		bool bRaw = false;
+		ETextVoice Voice = ETextVoice::Home;
 		FTextChannelContext Context;
 	};
 
@@ -218,6 +262,15 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UDataTable> MessageTable;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UDataTable> TwinTable;
+
+	/** Twin voice: seconds typed since the message (re)started, and the lag fixed when it started. */
+	double TwinElapsed = 0.0;
+	int32 TwinLag = 0;
+	int32 LastShownCells = -1;
+	int32 LastTranslatedCells = -1;
 
 	TArray<FQueued> Queue;
 	FQueued Current;

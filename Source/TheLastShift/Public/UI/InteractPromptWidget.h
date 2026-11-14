@@ -24,7 +24,9 @@ enum class EInteractPromptMode : uint8
 	/** Normal time, a terminal within reach with something to power: "[key] Power — cost · energy banked". */
 	Power,
 	/** A terminal refused for lack of energy: "Not enough energy" for RefusalSeconds. */
-	Refusal
+	Refusal,
+	/** Normal time, an unlocked log terminal within reach: "[key] Read" (free). */
+	Read
 };
 
 /**
@@ -33,8 +35,10 @@ enum class EInteractPromptMode : uint8
  *
  * - While Stopped, with an Available residue within its CollectRadius (AResidue::FindCollectable), whether or not it
  *   was scanned: "Hold [key] Collect". Hidden while the collect ring fills and once the residue is taken.
- * - In Normal time, within a terminal's InteractRadius, when one of its targets is not powered:
+ * - In Normal time, within a terminal's InteractRadius, when it offers a payment (APowerTerminal::OffersPayment: one of
+ *   its targets is not powered, a locked log terminal, a twin AI terminal with a part left):
  *   "[key] Power — cost · energy banked", the numbers read every frame.
+ * - In Normal time, within an unlocked log terminal's reach (APowerTerminal::OffersRead): "[key] Read".
  * - A press refused for lack of energy (the terminal's OnInsufficientEnergy in Normal time): "Not enough energy" for
  *   RefusalSeconds of real time.
  *
@@ -81,6 +85,10 @@ public:
 	/** After the key near a terminal: {Cost} and {Energy} (banked) are replaced. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interact Prompt|Labels")
 	FText PowerLabel = NSLOCTEXT("TheLastShift", "PromptPower", "Power — {Cost} · energy {Energy}");
+
+	/** After the key at an unlocked log terminal. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interact Prompt|Labels")
+	FText ReadLabel = NSLOCTEXT("TheLastShift", "PromptRead", "Read");
 
 	/** Shown alone after a refused press. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interact Prompt|Labels")

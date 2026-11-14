@@ -61,6 +61,16 @@ UDataTable* UTheLastShiftSettings::LoadEndingsTable() const
 	return EndingsTable.IsNull() ? nullptr : EndingsTable.LoadSynchronous();
 }
 
+UDataTable* UTheLastShiftSettings::LoadLogsTable() const
+{
+	return LogsTable.IsNull() ? nullptr : LogsTable.LoadSynchronous();
+}
+
+UDataTable* UTheLastShiftSettings::LoadTwinAITable() const
+{
+	return TwinAITable.IsNull() ? nullptr : TwinAITable.LoadSynchronous();
+}
+
 FText UTheLastShiftSettings::GetEndingText(FName RowName) const
 {
 	const UDataTable* Table = LoadEndingsTable();

@@ -56,6 +56,36 @@ struct THELASTSHIFT_API FScanColors
 	FLinearColor Interactable = FLinearColor::White;
 };
 
+/**
+ * Every colour of the suit's text, in one place: the home AI's messages, the twin AI's messages and the translation of
+ * the logs at a terminal. Barcode bars take the colour of their voice. None of them is a scan colour. The values live in
+ * Config/DefaultGame.ini; the C++ defaults are only a fallback for a missing ini entry.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FSuitTextColors
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
+	FLinearColor HomeAI = FLinearColor(0.93f, 0.82f, 0.55f, 0.95f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
+	FLinearColor TwinAI = FLinearColor(1.f, 0.6f, 0.12f, 0.95f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
+	FLinearColor LogTranslation = FLinearColor(0.85f, 0.88f, 0.8f, 0.95f);
+};
+
+/** Where a log terminal shows its entries. */
+UENUM(BlueprintType)
+enum class ELogDisplay : uint8
+{
+	/** On the terminal's surface in the world. */
+	Surface,
+	/** In a panel of the suit on screen, while the player is at the terminal. */
+	Panel
+};
+
 /** A real step of building an area behind the travel screen, in the order they happen. */
 UENUM(BlueprintType)
 enum class EAreaLoadStep : uint8
@@ -101,8 +131,8 @@ struct THELASTSHIFT_API FTravelProgressFractions
 
 /**
  * Project settings of the game (Project Settings > Game > The Last Shift), stored as text in Config/DefaultGame.ini.
- * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning, of the scan colours and of
- * which narrative tables the game reads: the area generator, the run subsystem, the home state subsystem and the home AI
+ * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning, of the scan colours, of
+ * the suit's text colours and log and twin AI typing, and of which narrative tables the game reads: the area generator, the run subsystem, the home state subsystem and the home AI
  * read them from here and copy nothing.
  */
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "The Last Shift"))
@@ -175,6 +205,52 @@ public:
 	/** The ending texts (FEndingRow: Inject, Open, Loss), imported from Narrative/DT_Endings.csv. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
 	TSoftObjectPtr<UDataTable> EndingsTable;
+
+	/** The other humanity's logs (FLogRow), imported from Narrative/DT_Logs.csv. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> LogsTable;
+
+	/** The twin AI's messages (FTwinAIRow), imported from Narrative/DT_TwinAI.csv. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> TwinAITable;
+
+	/** Where log terminals show their entries: on their surface, or in a suit panel on screen. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Twin Writing")
+	ELogDisplay LogDisplay = ELogDisplay::Surface;
+
+	/** Speed at which the suit types the translation of a log entry over its barcodes. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Twin Writing", meta = (ClampMin = "1.0", ClampMax = "500.0"))
+	float LogCharsPerSecond = 40.f;
+
+	/** Fixed typing speed of the twin AI's messages (never slowed by the home battery). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Twin Writing", meta = (ClampMin = "1.0", ClampMax = "500.0"))
+	float TwinCharsPerSecond = 40.f;
+
+	/** In a twin AI message the translation follows this many characters behind the barcodes, and catches up at the end. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Twin Writing", meta = (ClampMin = "0", ClampMax = "200"))
+	int32 TranslationLagChars = 10;
+
+	/** Every colour of the suit's text: the one owner of those colours (see FSuitTextColors). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Twin Writing")
+	FSuitTextColors TextColors;
+
+	/** LogsTable, loaded (null when unset or missing). */
+	UDataTable* LoadLogsTable() const;
+
+	/** TwinAITable, loaded (null when unset or missing). */
+	UDataTable* LoadTwinAITable() const;
+
+	/** TextColors of the project settings. */
+	static const FSuitTextColors& GetTextColors() { return Get()->TextColors; }
+
+	/** LogCharsPerSecond, clamped. */
+	float GetLogCharsPerSecond() const { return FMath::Clamp(LogCharsPerSecond, 1.f, 500.f); }
+
+	/** TwinCharsPerSecond, clamped. */
+	float GetTwinCharsPerSecond() const { return FMath::Clamp(TwinCharsPerSecond, 1.f, 500.f); }
+
+	/** TranslationLagChars, clamped. */
+	int32 GetTranslationLagChars() const { return FMath::Clamp(TranslationLagChars, 0, 200); }
 
 	/** AIMessagesTable, loaded (null when unset or missing). */
 	UDataTable* LoadAIMessagesTable() const;

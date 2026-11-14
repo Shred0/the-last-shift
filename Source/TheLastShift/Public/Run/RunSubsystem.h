@@ -16,6 +16,7 @@ THELASTSHIFT_API DECLARE_LOG_CATEGORY_EXTERN(LogRun, Log, All);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAreaEntered, int32, ActIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRunSnapshotsChanged);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSuitArchiveChanged);
 
 /** One moment of the last travel started by the run: what happened, when, and where the bar and the marker stood after it. */
 USTRUCT(BlueprintType)
@@ -51,6 +52,10 @@ struct THELASTSHIFT_API FTravelStepRecord
  * time from UHomeStateSubsystem, banked energy from UEnergySubsystem) is recorded for that act, the snapshots of that
  * act and later ones are replaced, and the list is written to one save slot (URunSaveGame), which is read at startup.
  * Restarting from act k restores snapshot k, discards the later ones, saves and travels to area k; act 1 is a new run.
+ *
+ * Sole owner of the suit's archive (FSuitArchive: the log entries unlocked at terminals and the twin AI's parts played).
+ * It is run state like battery, home time and banked energy: it survives map changes, every snapshot carries a copy,
+ * restoring a snapshot restores it, a new run empties it. It stores which items, never their text.
  *
  * On UHomeStateSubsystem::OnRunLost it shows the loss screen (URunActListWidget, RunLost): game input off, the pause
  * menu refused, UI input on the screen.
@@ -137,6 +142,34 @@ public:
 	/** Re-reads the save slot into the snapshots (startup; debug). */
 	bool LoadSave();
 
+	// --- The suit's archive ---
+
+	UFUNCTION(BlueprintPure, Category = "Run|Archive")
+	const FSuitArchive& GetArchive() const { return Archive; }
+
+	/** At least one log entry or twin AI part is stored (the pause menu offers the archive only then). */
+	UFUNCTION(BlueprintPure, Category = "Run|Archive")
+	bool HasArchiveItems() const { return !Archive.IsEmpty(); }
+
+	/** Stores the log entries Orders (the ones already stored are skipped). Returns how many were added. */
+	UFUNCTION(BlueprintCallable, Category = "Run|Archive")
+	int32 StoreLogEntries(const TArray<int32>& Orders);
+
+	/** Stores twin AI part Part: only the next one (TwinPartsPlayed + 1) is accepted. */
+	UFUNCTION(BlueprintCallable, Category = "Run|Archive")
+	bool StoreTwinPart(int32 Part);
+
+	/** Empties the archive (debug: tls.Archive.Store clear). The save is not touched. */
+	UFUNCTION(BlueprintCallable, Category = "Run|Archive")
+	void ClearArchive();
+
+	/** The archive changed (a store, a restore, a new run, a clear). */
+	UPROPERTY(BlueprintAssignable, Category = "Run|Archive")
+	FOnSuitArchiveChanged OnArchiveChanged;
+
+	/** Version of the save file read last by LoadSave (0 when there was none). */
+	int32 GetLoadedSaveVersion() const { return LoadedSaveVersion; }
+
 	/** The snapshots changed (area entry, restart, new run, clear, load). */
 	UPROPERTY(BlueprintAssignable, Category = "Run")
 	FOnRunSnapshotsChanged OnSnapshotsChanged;
@@ -177,6 +210,7 @@ private:
 
 	void TakeSnapshot(int32 Act);
 	void WriteSave();
+	void SetArchive(const FSuitArchive& InArchive, const TCHAR* Why);
 
 	/** Adds Step to LastTravelSteps with StdCore's current bar and marker, while a travel of the run is pending. */
 	void RecordTravelStep(FName Step);
@@ -184,6 +218,8 @@ private:
 	TArray<FTravelStepRecord> LastTravelSteps;
 
 	TArray<FAreaSnapshot> Snapshots;
+	FSuitArchive Archive;
+	int32 LoadedSaveVersion = 0;
 	int32 SaveWrites = 0;
 	bool bLastSaveOk = false;
 

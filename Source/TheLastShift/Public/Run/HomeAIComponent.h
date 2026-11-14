@@ -13,8 +13,9 @@ class UTextChannelComponent;
 struct FHomeJump;
 
 /**
- * The one place where the home AI's text channel is driven: it gives the channel its table, pushes every message and
- * suspends the channel. Nothing else pushes to it. Sits next to a UTextChannelComponent on the player's pawn.
+ * The one place where the suit's text channel is driven, for both voices: it gives the channel its tables (the home AI's
+ * messages and the twin AI's), pushes every message and suspends the channel. Nothing else pushes to it. Sits next to a
+ * UTextChannelComponent on the player's pawn.
  *
  * - Suspended while time is Stopped, while StdCore's pause menu is open, while a map transition covers the screen and
  *   once the run is lost.
@@ -22,7 +23,8 @@ struct FHomeJump;
  *   numbers of that jump. A plain Resume or a rewind without a jump says nothing.
  * - The player released in an area that is ready (URunSubsystem::OnAreaEntered): every AreaStart row of the act.
  * - Banked energy rising from zero through a voluntary Resume, once per map load: every FirstEnergy row of the act.
- * - A successful payment at a terminal: one Spend row of the act.
+ * - A successful payment at a terminal: one Spend row of the act; at the twin AI's terminal, then every row of the part
+ *   that payment played (ATwinAITerminal::GetLastPlayedPart), as the twin voice, after the spending comment.
  * - The loss: the channel is cleared and hidden (the loss screen shows the Loss ending, not an AI message).
  * The travel screen's label (an AreaEntry row) is built here too, for the run subsystem: BuildTravelLabel.
  *

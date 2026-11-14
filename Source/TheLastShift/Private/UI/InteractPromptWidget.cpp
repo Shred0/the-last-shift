@@ -197,7 +197,12 @@ void UInteractPromptWidget::Refresh()
 	}
 	RefusalUntil = -1.0;
 
-	if (Terminal && Terminal->HasUnpoweredTarget())
+	if (Terminal && Terminal->OffersRead())
+	{
+		ShowMode(EInteractPromptMode::Read, FText::GetEmpty(), ReadLabel);
+		return;
+	}
+	if (Terminal && Terminal->OffersPayment())
 	{
 		const UEnergySubsystem* Energy = UEnergySubsystem::Get(this);
 		FFormatNamedArguments Args;
@@ -232,7 +237,7 @@ void UInteractPromptWidget::ShowMode(EInteractPromptMode NewMode, const FText& P
 	if (bModeChanged)
 	{
 		Mode = NewMode;
-		const bool bShowKey = NewMode == EInteractPromptMode::Collect || NewMode == EInteractPromptMode::Power;
+		const bool bShowKey = NewMode == EInteractPromptMode::Collect || NewMode == EInteractPromptMode::Power || NewMode == EInteractPromptMode::Read;
 		if (KeyPrompt)
 		{
 			KeyPrompt->SetVisibility(bShowKey ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
@@ -251,7 +256,8 @@ void UInteractPromptWidget::ShowMode(EInteractPromptMode NewMode, const FText& P
 
 FKey UInteractPromptWidget::GetShownKey() const
 {
-	return KeyPrompt && (Mode == EInteractPromptMode::Collect || Mode == EInteractPromptMode::Power) ? KeyPrompt->GetDisplayedKey() : FKey();
+	return KeyPrompt && (Mode == EInteractPromptMode::Collect || Mode == EInteractPromptMode::Power || Mode == EInteractPromptMode::Read)
+		? KeyPrompt->GetDisplayedKey() : FKey();
 }
 
 FString UInteractPromptWidget::GetShownText() const
@@ -265,7 +271,7 @@ FString UInteractPromptWidget::GetShownText() const
 	{
 		Parts.Add(ShownPrefix.ToString());
 	}
-	if (Mode == EInteractPromptMode::Collect || Mode == EInteractPromptMode::Power)
+	if (Mode == EInteractPromptMode::Collect || Mode == EInteractPromptMode::Power || Mode == EInteractPromptMode::Read)
 	{
 		Parts.Add(FString::Printf(TEXT("[%s]"), KeyPrompt ? *KeyPrompt->GetKeyText().ToString() : TEXT("?")));
 	}

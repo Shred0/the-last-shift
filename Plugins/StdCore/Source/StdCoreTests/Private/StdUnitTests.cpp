@@ -1,4 +1,4 @@
-// Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress,
+// Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress, the barcode text,
 // the key prompt without a player, the order of the Controls tab rows, the wrapping of the covered screen's label, the
 // covered screen's progress bar and marker (switched off, shape, progress, marker over simulated ticks).
 
@@ -17,6 +17,7 @@
 #include "Settings/StdProjectSettings.h"
 #include "Styling/SlateColor.h"
 #include "Widgets/SWidget.h"
+#include "UI/StdBarcodeText.h"
 #include "UI/StdKeyPromptWidget.h"
 #include "UI/StdRadialProgress.h"
 #include "UI/StdUITheme.h"
@@ -104,6 +105,111 @@ bool FStdRadialProgressTest::RunTest(const FString& Parameters)
 	const TSharedRef<SWidget> Slate = Ring->TakeWidget();
 	Slate->SlatePrepass(1.f);
 	TestEqual(TEXT("Slate desired size is the outer diameter"), static_cast<float>(Slate->GetDesiredSize().X), Ring->GetOuterDiameter());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdBarcodeTextTest, "StdCore.UI.BarcodeText", StdUnitTests::Flags)
+
+bool FStdBarcodeTextTest::RunTest(const FString& Parameters)
+{
+	using namespace StdBarcode;
+
+	// Patterns: deterministic, never empty for a printable character, distinct between characters, empty for a space.
+	TestTrue(TEXT("The same character always gives the same bars"), GetBarMask(TEXT('k')) == GetBarMask(TEXT('k')));
+	TestTrue(TEXT("Two different letters give different bars (a, b)"), GetBarMask(TEXT('a')) != GetBarMask(TEXT('b')));
+	TestTrue(TEXT("Case matters (A, a)"), GetBarMask(TEXT('A')) != GetBarMask(TEXT('a')));
+	TSet<uint32> Seen;
+	int32 EmptyPrintable = 0;
+	for (TCHAR Character = 33; Character <= 126; ++Character)
+	{
+		Seen.Add(GetBarMask(Character));
+		EmptyPrintable += GetBarMask(Character) == 0 ? 1 : 0;
+	}
+	TestEqual(TEXT("The 94 printable ASCII characters give 94 different patterns"), Seen.Num(), 94);
+	TestEqual(TEXT("No printable character is drawn empty"), EmptyPrintable, 0);
+	TestTrue(TEXT("A space has no bars"), GetBarMask(TEXT(' ')) == 0u);
+	TestTrue(TEXT("A space is a gap"), IsGap(TEXT(' ')));
+
+	// The same character in two places of a text is drawn the same: the pattern does not depend on the position.
+	TestTrue(TEXT("The pattern of a character is a function of the character only"), GetBarMask(FString(TEXT("level"))[0]) == GetBarMask(FString(TEXT("level"))[4]));
+
+	// Counts: N cells shown, the first M of them characters, spaces as gaps.
+	const FString Sample = TEXT("THE QUICK BROWN FOX JUMPS");
+	const auto NonGapIn = [&Sample](int32 From, int32 To)
+	{
+		int32 Count = 0;
+		for (int32 Index = From; Index < To; ++Index)
+		{
+			Count += IsGap(Sample[Index]) ? 0 : 1;
+		}
+		return Count;
+	};
+	for (const FIntPoint& NM : { FIntPoint(10, 4), FIntPoint(25, 0), FIntPoint(25, 25), FIntPoint(0, 0), FIntPoint(17, 11) })
+	{
+		const FDrawCounts Counts = CountDrawn(Sample, 40, NM.X, NM.Y);
+		TestEqual(FString::Printf(TEXT("N=%d M=%d: exactly N cells shown"), NM.X, NM.Y), Counts.Total(), NM.X);
+		TestEqual(FString::Printf(TEXT("N=%d M=%d: the first M are characters"), NM.X, NM.Y), Counts.Characters, NonGapIn(0, NM.Y));
+		TestEqual(FString::Printf(TEXT("N=%d M=%d: the rest are bars"), NM.X, NM.Y), Counts.Bars, NonGapIn(NM.Y, NM.X));
+		TestEqual(FString::Printf(TEXT("N=%d M=%d: spaces are gaps"), NM.X, NM.Y), Counts.Gaps, (NM.X - NonGapIn(0, NM.X)));
+	}
+	TestEqual(TEXT("M above N is clamped to N"), CountDrawn(Sample, 40, 6, 99).Characters, NonGapIn(0, 6));
+	TestEqual(TEXT("N above the length is clamped"), CountDrawn(Sample, 40, 999, 0).Total(), Sample.Len());
+
+	// Wrapping on the grid.
+	const FString Long = TEXT("Every line of this sample wraps on a grid of twenty cells, words move whole to the next line, and nothing ever leaves the grid at all.");
+	TArray<FCellPosition> Cells;
+	int32 Rows = 0;
+	Layout(Long, 20, Cells, Rows);
+	TestTrue(FString::Printf(TEXT("A %d-character text wraps onto several lines at 20 columns (%d lines)"), Long.Len(), Rows), Rows >= FMath::DivideAndRoundUp(Long.Len(), 20));
+	bool bInGrid = true;
+	bool bReadingOrder = true;
+	bool bWordsWhole = true;
+	for (int32 Index = 0; Index < Long.Len(); ++Index)
+	{
+		if (!IsGap(Long[Index]))
+		{
+			bInGrid &= Cells[Index].Column >= 0 && Cells[Index].Column < 20;
+			if (Index > 0 && !IsGap(Long[Index - 1]))
+			{
+				// Inside a word (every word here is shorter than a line): the next cell on the same line.
+				bWordsWhole &= Cells[Index].Row == Cells[Index - 1].Row && Cells[Index].Column == Cells[Index - 1].Column + 1;
+			}
+		}
+		if (Index > 0)
+		{
+			bReadingOrder &= Cells[Index].Row > Cells[Index - 1].Row || (Cells[Index].Row == Cells[Index - 1].Row && Cells[Index].Column > Cells[Index - 1].Column)
+				|| (IsGap(Long[Index]) && Cells[Index].Column == 20);
+		}
+	}
+	TestTrue(TEXT("Every drawn cell lies inside the 20 columns"), bInGrid);
+	TestTrue(TEXT("No word shorter than a line is split"), bWordsWhole);
+	TestTrue(TEXT("Cells follow reading order"), bReadingOrder);
+	Layout(TEXT("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), 10, Cells, Rows);
+	TestEqual(TEXT("A word longer than a line breaks at the line's end (26 letters at 10 columns: 3 lines)"), Rows, 3);
+	TestEqual(TEXT("... the 11th letter starts the second line"), Cells[10].Row * 100 + Cells[10].Column, 100);
+
+	// The widget: counts resolved and clamped, desired size on the grid.
+	UStdBarcodeText* Widget = NewObject<UStdBarcodeText>(GetTransientPackage());
+	Widget->SetText(FText::FromString(Sample));
+	Widget->SetCellSize(FVector2D(10.0, 20.0));
+	Widget->SetLineSpacing(4.f);
+	Widget->SetColumns(10);
+	Widget->SetCounts(-1, 0);
+	TestEqual(TEXT("Widget: shown -1 = every cell"), Widget->GetShownCells(), Sample.Len());
+	TestEqual(TEXT("Widget: translated 0 = all bars"), Widget->GetDrawCounts().Characters, 0);
+	Widget->SetCounts(5, 9);
+	TestEqual(TEXT("Widget: translated clamped to the shown cells"), Widget->GetTranslatedCells(), 5);
+	Widget->SetCounts(-1, -1);
+	TestEqual(TEXT("Widget: translated -1 = every shown cell is a character"), Widget->GetDrawCounts().Bars, 0);
+	const int32 Lines = Widget->GetLineCount();
+	TestEqual(TEXT("Widget: the sample takes 3 lines at 10 columns"), Lines, 3);
+	TestTrue(FString::Printf(TEXT("Widget: content size is the used grid (%s)"), *Widget->GetContentSize().ToString()), Widget->GetContentSize().Equals(FVector2D(10.0 * 10.0, 3 * 20.0 + 2 * 4.0), 0.01));
+	const TSharedRef<SWidget> Slate = Widget->TakeWidget();
+	Slate->SlatePrepass(1.f);
+	TestTrue(TEXT("Widget: Slate desired size is the content size"), FVector2D(Slate->GetDesiredSize()).Equals(Widget->GetContentSize(), 0.01));
+	Widget->SetSizeToShown(true);
+	Widget->SetCounts(3, 0);
+	TestTrue(FString::Printf(TEXT("Widget: sized to the shown cells, one line of 3 cells (%s)"), *Widget->GetContentSize().ToString()), Widget->GetContentSize().Equals(FVector2D(30.0, 20.0), 0.01));
 	return true;
 }
 
