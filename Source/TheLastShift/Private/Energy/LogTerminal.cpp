@@ -14,17 +14,24 @@
 #include "TextChannel/TwinWriting.h"
 #include "Time/TimeStateSubsystem.h"
 #include "UI/LogDisplayWidget.h"
+#include "Engine/StaticMesh.h"
+#include "UObject/ConstructorHelpers.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(LogTerminal)
 
 namespace LogTerminalLayout
 {
-	// The body: 25 cm deep, 1 m wide, 1.8 m tall; the surface on its front face (+X), centred at 1.25 m.
-	static const FVector BodyScale(0.25f, 1.0f, 1.8f);
-	static constexpr float BodyHalfDepth = 12.5f;
+	// The back of the body is at the actor's origin (against the wall); the surface faces +X, centred 1.25 m above the floor.
 	static constexpr float ScreenHeight = 125.f;
 	/** World centimetres per widget pixel: 1000 x 720 px = 90 x 65 cm. */
 	static constexpr float ScreenScale = 0.09f;
+	/** The console: SM_LogConsole's screen backing (the face inside the frame's opening) is 14 cm in front of its back. */
+	static constexpr float ConsoleScreenFace = 14.f;
+	/** Without the console, the Brief 8 slab: 25 cm deep, 1 m wide, 1.8 m tall, an engine cube scaled. */
+	static const FVector SlabScale(0.25f, 1.0f, 1.8f);
+	static constexpr float SlabDepth = 25.f;
+	/** The surface stands this far in front of the face it is drawn on. */
+	static constexpr float ScreenGap = 0.5f;
 }
 
 ALogTerminal::ALogTerminal()
@@ -32,8 +39,11 @@ ALogTerminal::ALogTerminal()
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = true;
 
-	Mesh->SetRelativeLocation(FVector(0.f, 0.f, 90.f));
-	Mesh->SetRelativeScale3D(LogTerminalLayout::BodyScale);
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> ConsoleMesh(TEXT("/Game/TheLastShift/Art/Props/SM_LogConsole.SM_LogConsole"));
+	if (ConsoleMesh.Succeeded())
+	{
+		BodyMesh = ConsoleMesh.Object;
+	}
 
 	Screen = CreateDefaultSubobject<UWidgetComponent>(TEXT("Screen"));
 	Screen->SetupAttachment(GetRootComponent());
@@ -47,15 +57,56 @@ ALogTerminal::ALogTerminal()
 	Screen->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Screen->SetCastShadow(false);
 	// The widget is drawn in the component's YZ plane, its front towards the component's +X: out of the terminal's front.
-	Screen->SetRelativeLocation(FVector(LogTerminalLayout::BodyHalfDepth + 0.5f, 0.f, LogTerminalLayout::ScreenHeight));
 	Screen->SetRelativeRotation(FRotator(0.f, 0.f, 0.f));
 	Screen->SetRelativeScale3D(FVector(LogTerminalLayout::ScreenScale));
 	Screen->SetVisibility(false);
+	ApplyBodyLayout();
+}
+
+void ALogTerminal::ApplyBodyLayout()
+{
+	using namespace LogTerminalLayout;
+	float Face = SlabDepth;
+	if (BodyMesh)
+	{
+		Mesh->SetStaticMesh(BodyMesh);
+		Mesh->SetRelativeLocation(FVector::ZeroVector);
+		Mesh->SetRelativeScale3D(FVector::OneVector);
+		Face = ConsoleScreenFace;
+	}
+	else
+	{
+		// APowerTerminal's engine cube, scaled into the slab, its back at the origin.
+		Mesh->SetRelativeLocation(FVector(SlabDepth * 0.5f, 0.f, SlabScale.Z * 50.f));
+		Mesh->SetRelativeScale3D(SlabScale);
+	}
+	Screen->SetRelativeLocation(FVector(Face + ScreenGap, 0.f, ScreenHeight));
+}
+
+void ALogTerminal::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	ApplyBodyLayout();
+}
+
+FVector ALogTerminal::GetScreenCentre() const
+{
+	return Screen ? Screen->GetComponentLocation() : GetActorLocation();
+}
+
+float ALogTerminal::GetScreenOffset() const
+{
+	return Screen ? static_cast<float>(Screen->GetRelativeLocation().X) : 0.f;
 }
 
 void ALogTerminal::BeginPlay()
 {
 	Super::BeginPlay();
+	const FBox Body = GetLocalBodyBox();
+	if (Body.IsValid && (Body.Min.X < -1.0 || Body.Max.X > Footprint.X + 1.0 || Body.GetSize().Y > Footprint.Y + 1.0 || Body.Max.Z > Footprint.Z + 1.0))
+	{
+		UE_LOG(LogEnergy, Warning, TEXT("%s: the body %s does not fit the footprint %s the planner keeps free."), *GetName(), *Body.ToString(), *Footprint.ToCompactString());
+	}
 	Screen->SetDrawSize(FVector2D(FMath::Clamp(SurfaceDrawSize.X, 100.0, 4000.0), FMath::Clamp(SurfaceDrawSize.Y, 100.0, 4000.0)));
 	Screen->InitWidget();
 	if (ULogDisplayWidget* Surface = GetSurfaceWidget())

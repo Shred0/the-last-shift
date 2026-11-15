@@ -66,6 +66,21 @@ int32 APowerTerminal::GetCost() const
 	return TerminalTuning::Cost(Cost);
 }
 
+float APowerTerminal::GetInteractRadius() const
+{
+	return TerminalTuning::Radius(InteractRadius);
+}
+
+FBox APowerTerminal::GetLocalBodyBox() const
+{
+	const UStaticMesh* StaticMesh = Mesh ? Mesh->GetStaticMesh() : nullptr;
+	if (!StaticMesh)
+	{
+		return FBox(ForceInit);
+	}
+	return StaticMesh->GetBoundingBox().TransformBy(Mesh->GetRelativeTransform());
+}
+
 bool APowerTerminal::IsInRange(const APawn* InstigatorPawn) const
 {
 	if (!InstigatorPawn)

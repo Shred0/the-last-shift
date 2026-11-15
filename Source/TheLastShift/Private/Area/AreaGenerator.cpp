@@ -12,7 +12,9 @@
 #include "Components/PointLightComponent.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/LightGroupDevice.h"
+#include "Energy/LogTerminal.h"
 #include "Energy/PowerTerminal.h"
+#include "Energy/TwinAITerminal.h"
 #include "Engine/GameInstance.h"
 #include "Engine/PointLight.h"
 #include "Engine/World.h"
@@ -89,6 +91,8 @@ AAreaGenerator::AAreaGenerator()
 	TerminalClass = APowerTerminal::StaticClass();
 	DoorClass = ADoorDevice::StaticClass();
 	LightGroupClass = ALightGroupDevice::StaticClass();
+	LogTerminalClass = ALogTerminal::StaticClass();
+	TwinAITerminalClass = ATwinAITerminal::StaticClass();
 }
 
 AAreaGenerator* AAreaGenerator::Find(const UWorld* World)
@@ -1401,6 +1405,293 @@ namespace AreaGen
 			}
 			return true;
 		}
+
+	public:
+		// --- Terminals against a wall (log terminals, the twin AI's terminal), Brief 8b ---
+		//
+		// Placed after the layout is chosen and everything else is placed, from the finished plan, with no random draw:
+		// they move nothing that exists and change no draw of the stream. A rule that cannot be met leaves the terminal out
+		// (the validator then fails the seed); there is no fallback position.
+
+		/** What a wall terminal needs, in centimetres from the wall face, into the segment. */
+		struct FWallSpec
+		{
+			/** The actor's origin from the wall face. */
+			float BackOffset = 0.f;
+			/** Half the body's width along the wall. */
+			float HalfWidth = 50.f;
+			/** The body's depth from the wall face. */
+			float Depth = 50.f;
+			/** The free place to stand (log terminals: to read) from the wall face. */
+			float StandDistance = 120.f;
+			/** The terminal's InteractRadius. */
+			float Reach = 150.f;
+		};
+
+		struct FWallPlacement
+		{
+			int32 Segment = -1;
+			FVector2D Pos = FVector2D::ZeroVector;
+			FVector2D Facing = FVector2D(1.0, 0.0);
+			FVector2D Stand = FVector2D::ZeroVector;
+			float RouteDistance = 0.f;
+		};
+
+		TArray<FWallPlacement> LogPlacements;
+		TArray<FWallPlacement> TwinPlacements;
+		/** Why a wall terminal of the recipe was left out (empty when all were placed). */
+		FString WallError;
+
+		/**
+		 * Places Recipe.LogTerminalCount log terminals and Recipe.TwinAITerminalCount twin AI terminals. Others: the
+		 * terminals already placed (gates, light groups) with their InteractRadius. LineClear: the distance from the route
+		 * centreline the front of a body keeps, as the other terminals keep it. Doors: the gates' doors.
+		 */
+		bool PlaceWallTerminals(const FWallSpec& Log, const FWallSpec& Twin, float OthersReach, float LineClear)
+		{
+			TArray<TPair<FVector2D, float>> Others;
+			for (const FVector2D& P : UsedSideSpots)
+			{
+				Others.Emplace(P, OthersReach);
+			}
+			const float L = Plan.RouteLength();
+			bool bAll = true;
+
+			// Log terminals: one per equal part of the route, each in its own closed corridor or room, in route order.
+			const int32 Logs = FMath::Clamp(R.LogTerminalCount, 0, 4);
+			TSet<int32> UsedSegments;
+			for (int32 Part = 0; Part < Logs; ++Part)
+			{
+				const float PartStart = Part * L / Logs;
+				const float PartEnd = (Part + 1) * L / Logs;
+				FString Why = TEXT("no closed corridor or room in this part of the route");
+				bool bPlaced = false;
+				for (int32 Index = 0; Index < Plan.Segs.Num() && !bPlaced; ++Index)
+				{
+					const FSeg& S = Plan.Segs[Index];
+					if ((S.Type != EAreaSegmentType::Corridor && S.Type != EAreaSegmentType::Room) || UsedSegments.Contains(Index))
+					{
+						continue;
+					}
+					const float S0 = FMath::Max(S.RouteStart + 200.f, PartStart);
+					const float S1 = FMath::Min(S.RouteEnd - 200.f, PartEnd - 1.f);
+					if (S1 < S0)
+					{
+						continue;
+					}
+					FWallPlacement Spot;
+					FString SegmentWhy;
+					if (FindWallSpot(Index, S0, S1, PartStart, PartEnd, Log, Others, LineClear, Spot, SegmentWhy))
+					{
+						LogPlacements.Add(Spot);
+						Others.Emplace(Spot.Pos, Log.Reach);
+						UsedSegments.Add(Index);
+						bPlaced = true;
+					}
+					else
+					{
+						Why = FString::Printf(TEXT("segment %d (%s): %s"), Index, LexToString(S.Type), *SegmentWhy);
+					}
+				}
+				if (!bPlaced)
+				{
+					WallError += FString::Printf(TEXT("%slog terminal %d (route %.0f-%.0f m): %s"), WallError.IsEmpty() ? TEXT("") : TEXT("; "), Part, PartStart / 100.f, PartEnd / 100.f, *Why);
+					bAll = false;
+				}
+			}
+
+			// The twin AI's terminal: the last closed segment of the route.
+			const int32 Twins = FMath::Clamp(R.TwinAITerminalCount, 0, 1);
+			for (int32 K = 0; K < Twins; ++K)
+			{
+				int32 Last = -1;
+				for (int32 Index = Plan.Segs.Num() - 1; Index >= 0 && Last < 0; --Index)
+				{
+					Last = Plan.Segs[Index].bClosed ? Index : -1;
+				}
+				FString Why = TEXT("the route has no closed segment");
+				FWallPlacement Spot;
+				bool bPlaced = false;
+				if (Last >= 0)
+				{
+					const FSeg& S = Plan.Segs[Last];
+					const float S0 = S.RouteStart + 200.f;
+					const float S1 = FMath::Min(S.RouteEnd - 200.f, L - 600.f);
+					bPlaced = S1 >= S0 && FindWallSpot(Last, S0, S1, 0.f, L, Twin, Others, LineClear, Spot, Why);
+					if (S1 < S0)
+					{
+						Why = TEXT("too short");
+					}
+					Why = FString::Printf(TEXT("segment %d (%s): %s"), Last, LexToString(S.Type), *Why);
+				}
+				if (bPlaced)
+				{
+					TwinPlacements.Add(Spot);
+					Others.Emplace(Spot.Pos, Twin.Reach);
+				}
+				else
+				{
+					WallError += FString::Printf(TEXT("%stwin AI terminal: %s"), WallError.IsEmpty() ? TEXT("") : TEXT("; "), *Why);
+					bAll = false;
+				}
+			}
+			return bAll;
+		}
+
+	private:
+		static FIntPoint CellAt(const FVector2D& P) { return FIntPoint(FMath::FloorToInt(P.X / Cell), FMath::FloorToInt(P.Y / Cell)); }
+
+		bool IsFloorOf(const FVector2D& P, int32 Segment) const
+		{
+			const FCell* E = Plan.Cells.Find(CellAt(P));
+			return E && E->Kind == EKind::Floor && E->Segment == Segment;
+		}
+
+		/**
+		 * A wall spot in Segment between route distances S0 and S1, tried from the middle outwards every cell, left side
+		 * first: the wall face straight and solid over the body's width and a margin (no niche, passage, opening or
+		 * corner), the body's footprint and the way to the standing place on the segment's own floor (no pillar), the
+		 * standing place clear for a pawn, the body's front LineClear from the centreline, the route distance inside
+		 * [MinS, MaxS) and 3 m from the start, 6 m before the exit, and no point within reach of this and another terminal.
+		 */
+		bool FindWallSpot(int32 Segment, float S0, float S1, float MinS, float MaxS, const FWallSpec& Spec, const TArray<TPair<FVector2D, float>>& Others,
+			float LineClear, FWallPlacement& Out, FString& OutWhy)
+		{
+			const float Mid = 0.5f * (S0 + S1);
+			const int32 Steps = FMath::CeilToInt(0.5f * (S1 - S0) / Cell) + 1;
+			const float MaxWall = FMath::Clamp(G.WallTerminalSearchDistance, 200.f, 5000.f);
+			const float Edge = 25.f;
+			int32 Tried = 0;
+			int32 NoWall = 0, NearLine = 0, NotStraight = 0, NoRoom = 0, NoStand = 0, TooClose = 0, OffRange = 0;
+			for (int32 K = 0; K <= 2 * Steps; ++K)
+			{
+				const float At = Mid + (K % 2 == 1 ? 1.f : -1.f) * ((K + 1) / 2) * Cell;
+				if (At < S0 || At > S1)
+				{
+					continue;
+				}
+				int32 PointSegment = -1;
+				FVector2D Dir;
+				const FVector2D P = Plan.PointAt(At, &PointSegment, &Dir);
+				if (PointSegment != Segment)
+				{
+					continue;
+				}
+				Dir = DirV(DirOf(Dir));
+				const FVector2D Lv(-Dir.Y, Dir.X);
+				for (const int32 Side : { 1, -1 })
+				{
+					++Tried;
+					const FVector2D OutDir = Lv * Side;
+					// Walk to the wall across the segment's own floor.
+					bool bWall = false;
+					FIntPoint LastCell(0, 0);
+					bool bHasLast = false;
+					for (float D = Cell * 0.25f; D <= MaxWall; D += Cell * 0.5f)
+					{
+						const FIntPoint C = CellAt(P + OutDir * D);
+						const FCell* E = Plan.Cells.Find(C);
+						if (!E)
+						{
+							bWall = bHasLast;
+							break;
+						}
+						if (E->Kind != EKind::Floor || E->Segment != Segment)
+						{
+							break;
+						}
+						LastCell = C;
+						bHasLast = true;
+					}
+					if (!bWall)
+					{
+						++NoWall;
+						continue;
+					}
+					FVector2D Face = P;
+					switch (DirOf(OutDir))
+					{
+					case 0: Face.X = (LastCell.X + 1) * Cell; break;
+					case 2: Face.X = LastCell.X * Cell; break;
+					case 1: Face.Y = (LastCell.Y + 1) * Cell; break;
+					default: Face.Y = LastCell.Y * Cell; break;
+					}
+					const float Wall = static_cast<float>(FVector2D::Distance(P, Face));
+					if (Wall - Spec.Depth < LineClear)
+					{
+						++NearLine;
+						continue;
+					}
+					bool bStraight = true;
+					for (float A = -Spec.HalfWidth - Edge; A <= Spec.HalfWidth + Edge + 1.f && bStraight; A += Edge)
+					{
+						bStraight = IsFloorOf(Face + Dir * A - OutDir * (Cell * 0.5f), Segment) && !Plan.Cells.Contains(CellAt(Face + Dir * A + OutDir * (Cell * 0.5f)));
+					}
+					if (!bStraight)
+					{
+						++NotStraight;
+						continue;
+					}
+					// The body's footprint and the way to the standing place, on this segment's floor.
+					bool bRoom = true;
+					for (float D = Cell * 0.5f; D <= Spec.Depth + Edge + 1.f && bRoom; D += Edge)
+					{
+						for (float A = -Spec.HalfWidth - Edge; A <= Spec.HalfWidth + Edge + 1.f && bRoom; A += Edge)
+						{
+							bRoom = IsFloorOf(Face - OutDir * D + Dir * A, Segment);
+						}
+					}
+					for (float D = Spec.Depth; D <= Spec.StandDistance + 1.f && bRoom; D += Edge)
+					{
+						for (const float A : { -45.f, 0.f, 45.f })
+						{
+							bRoom &= IsFloorOf(Face - OutDir * D + Dir * A, Segment);
+						}
+					}
+					if (!bRoom)
+					{
+						++NoRoom;
+						continue;
+					}
+					const FVector2D Pos = Face - OutDir * Spec.BackOffset;
+					const FVector2D Stand = Face - OutDir * Spec.StandDistance;
+					if (!Plan.IsClear(Stand, 60.0) || FVector2D::Distance(Pos, Stand) > Spec.Reach - 10.f)
+					{
+						++NoStand;
+						continue;
+					}
+					const float RouteS = Plan.Project(Pos);
+					if (RouteS < MinS || RouteS >= MaxS || RouteS < 300.f || RouteS > Plan.RouteLength() - 600.f || Plan.Project(Stand) > Plan.RouteLength() - 600.f)
+					{
+						++OffRange;
+						continue;
+					}
+					bool bFar = true;
+					for (const TPair<FVector2D, float>& Other : Others)
+					{
+						bFar &= FVector2D::Distance(Pos, Other.Key) >= Spec.Reach + Other.Value + 50.f;
+					}
+					for (const FGatePlacement& Gate : GatePlacements)
+					{
+						bFar &= FVector2D::Distance(Pos, Gate.Door) >= 400.f;
+					}
+					if (!bFar)
+					{
+						++TooClose;
+						continue;
+					}
+					Out.Segment = Segment;
+					Out.Pos = Pos;
+					Out.Facing = -OutDir;
+					Out.Stand = Stand;
+					Out.RouteDistance = RouteS;
+					return true;
+				}
+			}
+			OutWhy = FString::Printf(TEXT("%d spots tried: no wall %d, too near the route %d, wall not straight %d, no room %d, no standing place %d, out of range %d, within reach of another terminal %d"),
+				Tried, NoWall, NearLine, NotStraight, NoRoom, NoStand, OffRange, TooClose);
+			return false;
+		}
 	};
 
 	// --- Geometry from the plan ---
@@ -2424,6 +2715,45 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	FGeometryPlan Geometry;
 	BuildGeometry(*this, Plan, Builder.Rng, Geometry);
 
+	// Terminals against a wall, on top of the finished plan (no random draw, nothing else moves). Their sizes come from
+	// their classes: the log terminal's footprint and screen, the twin AI terminal's standard body.
+	{
+		const ALogTerminal* LogDefaults = LogTerminalClass ? LogTerminalClass->GetDefaultObject<ALogTerminal>() : nullptr;
+		const ATwinAITerminal* TwinDefaults = TwinAITerminalClass ? TwinAITerminalClass->GetDefaultObject<ATwinAITerminal>() : nullptr;
+		const FBox StandardBody = TerminalDefaults->GetLocalBodyBox();
+		const float StandardHalfDepth = StandardBody.IsValid ? static_cast<float>(StandardBody.Max.X) : 20.f;
+		const float LineClear = FMath::Max(50.f, TerminalSideOffset - StandardHalfDepth);
+		const float Stand = FMath::Clamp(TerminalStandDistance, 50.f, 140.f);
+		FBuilder::FWallSpec Log;
+		if (LogDefaults)
+		{
+			Log.BackOffset = 0.5f;
+			Log.HalfWidth = static_cast<float>(LogDefaults->Footprint.Y) * 0.5f;
+			Log.Depth = static_cast<float>(LogDefaults->Footprint.X);
+			Log.StandDistance = Log.BackOffset + LogDefaults->GetScreenOffset() + FMath::Clamp(LogReadingDistance, 100.f, 150.f);
+			Log.Reach = LogDefaults->GetInteractRadius();
+		}
+		FBuilder::FWallSpec Twin;
+		if (TwinDefaults)
+		{
+			const FBox Body = TwinDefaults->GetLocalBodyBox();
+			const float HalfDepth = Body.IsValid ? static_cast<float>(Body.Max.X) : 20.f;
+			Twin.BackOffset = 5.f + HalfDepth;
+			Twin.HalfWidth = Body.IsValid ? static_cast<float>(Body.GetExtent().Y) : 30.f;
+			Twin.Depth = 5.f + 2.f * HalfDepth;
+			Twin.StandDistance = Twin.BackOffset + Stand;
+			Twin.Reach = TwinDefaults->GetInteractRadius();
+		}
+		if ((Recipe->LogTerminalCount > 0 && !LogDefaults) || (Recipe->TwinAITerminalCount > 0 && !TwinDefaults))
+		{
+			Builder.WallError = TEXT("the log or twin AI terminal class is not set");
+		}
+		else if (!Builder.PlaceWallTerminals(Log, Twin, TerminalDefaults->GetInteractRadius(), LineClear))
+		{
+			UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d: %s; the validator fails this seed."), *GetName(), Act, Seed, *Builder.WallError);
+		}
+	}
+
 	// --- Publish the plan to the PCG graphs ---
 	PublishedPieces.SetNum(6);
 	PublishedPieces[static_cast<int32>(EAreaPieceKind::Floors)].Boxes = Geometry.Floors;
@@ -2589,6 +2919,22 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		Spawn(ResidueClass, At(Builder.NormalResidues[I], ResidueHeight), FRotator::ZeroRotator, FString::Printf(TEXT("Area_Residue%02d"), I), TEXT("Residues"));
 	}
 
+	// Log terminals and the twin AI's terminal (optional: they power nothing)
+	for (int32 I = 0; I < Builder.LogPlacements.Num(); ++I)
+	{
+		const FBuilder::FWallPlacement& P = Builder.LogPlacements[I];
+		Spawn(LogTerminalClass, At(P.Pos, 0.f), YawOf(P.Facing), FString::Printf(TEXT("Area_LogTerminal%d"), I), TEXT("Twin"));
+		UE_LOG(LogArea, Log, TEXT("%s: log terminal %d in segment %d (%s) at (%.0f, %.0f), facing yaw %.0f, route %.1f m of %.1f m, reading place (%.0f, %.0f)."), *GetName(), I, P.Segment,
+			LexToString(Plan.Segs[P.Segment].Type), P.Pos.X, P.Pos.Y, YawOf(P.Facing).Yaw, P.RouteDistance / 100.f, Plan.RouteLength() / 100.f, P.Stand.X, P.Stand.Y);
+	}
+	for (int32 I = 0; I < Builder.TwinPlacements.Num(); ++I)
+	{
+		const FBuilder::FWallPlacement& P = Builder.TwinPlacements[I];
+		Spawn(TwinAITerminalClass, At(P.Pos, 0.f), YawOf(P.Facing), FString::Printf(TEXT("Area_TwinAITerminal%d"), I), TEXT("Twin"));
+		UE_LOG(LogArea, Log, TEXT("%s: twin AI terminal in segment %d (%s) at (%.0f, %.0f), facing yaw %.0f, route %.1f m of %.1f m, standing place (%.0f, %.0f)."), *GetName(), P.Segment,
+			LexToString(Plan.Segs[P.Segment].Type), P.Pos.X, P.Pos.Y, YawOf(P.Facing).Yaw, P.RouteDistance / 100.f, Plan.RouteLength() / 100.f, P.Stand.X, P.Stand.Y);
+	}
+
 	// Navigation bounds fitted to the walkable route (applied to the map's NavMeshBoundsVolume in game worlds).
 	FBox2D Walkable(ForceInit);
 	for (const FAreaFloorRect& R : Geometry.FloorRects)
@@ -2609,9 +2955,10 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	RunPCG(StructurePCG, StructureGraph);
 	RunPCG(BackdropPCG, BackdropGraph);
 
-	UE_LOG(LogArea, Log, TEXT("%s: act %d seed %d planned in %.3f s: %d segments, route %.1f m, boxes (floors %d, walls %d, curbs %d, pillars %d, ceilings %d, backdrop %d), %d residues, %d gates, %d light groups; PCG started."),
+	UE_LOG(LogArea, Log, TEXT("%s: act %d seed %d planned in %.3f s: %d segments, route %.1f m, boxes (floors %d, walls %d, curbs %d, pillars %d, ceilings %d, backdrop %d), %d residues, %d gates, %d light groups, %d log terminals, %d twin AI terminals; PCG started."),
 		*GetName(), Act, Seed, LastGenerationSeconds, Plan.Segs.Num(), Plan.RouteLength() / 100.f,
 		Geometry.Floors.Num(), Geometry.Walls.Num(), Geometry.Curbs.Num(), Geometry.Pillars.Num(), Geometry.Ceilings.Num(), Geometry.Backdrop.Num(),
-		Builder.NormalResidues.Num() + Builder.GatePlacements.Num(), Builder.GatePlacements.Num(), Builder.LightPlacements.Num());
+		Builder.NormalResidues.Num() + Builder.GatePlacements.Num(), Builder.GatePlacements.Num(), Builder.LightPlacements.Num(),
+		Builder.LogPlacements.Num(), Builder.TwinPlacements.Num());
 	return true;
 }

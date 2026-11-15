@@ -5,8 +5,6 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
 #include "Components/Button.h"
-#include "Components/Overlay.h"
-#include "Components/OverlaySlot.h"
 #include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
@@ -17,6 +15,19 @@
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunPauseMenuWidget)
 
 #define LOCTEXT_NAMESPACE "TheLastShift"
+
+namespace RunPauseMenuLayout
+{
+	// StdCore's WBP_PauseMenu, as its widget tree holds them (StdCore exposes no title or metrics in code): a change to
+	// StdCore's panel is repeated here (AGENTS.md, StdCore plugin).
+	static const FLinearColor BackgroundColor(0.f, 0.f, 0.f, 0.5f);
+	static const FLinearColor PanelColor(0.01f, 0.012f, 0.016f, 0.92f);
+	static constexpr float PanelPadding = 32.f;
+	static constexpr float ColumnWidth = 376.f;
+	static constexpr float TitleGap = 24.f;
+	static constexpr float EntryGap = 12.f;
+	static const FLinearColor EntryTextColor(0.02f, 0.02f, 0.02f, 1.f);
+}
 
 void URunPauseMenuWidget::NativeOnInitialized()
 {
@@ -39,38 +50,44 @@ UButton* URunPauseMenuWidget::AddButton(UVerticalBox* Box, const TCHAR* Name, co
 	UTextBlock* Text = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), *(FString(Name).Replace(TEXT("Button_"), TEXT("Text_"))));
 	Text->SetText(Label);
 	Text->SetJustification(ETextJustify::Center);
+	Text->SetColorAndOpacity(FSlateColor(RunPauseMenuLayout::EntryTextColor));
 	Button->SetContent(Text);
 	if (UVerticalBoxSlot* ButtonSlot = Box->AddChildToVerticalBox(Button))
 	{
-		ButtonSlot->SetPadding(FMargin(0.f, 0.f, 0.f, bLast ? 0.f : 12.f));
+		ButtonSlot->SetPadding(FMargin(0.f, 0.f, 0.f, bLast ? 0.f : RunPauseMenuLayout::EntryGap));
 	}
 	return Button;
 }
 
 void URunPauseMenuWidget::BuildTree()
 {
-	// StdCore's WBP_PauseMenu layout: a dim backdrop and a centred panel holding the entries.
+	using namespace RunPauseMenuLayout;
+	// StdCore's WBP_PauseMenu layout: a dim backdrop, a centred panel, the title, then the entries.
 	UBorder* Background = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("Border_Background"));
-	Background->SetBrushColor(FLinearColor(0.f, 0.f, 0.f, 0.5f));
+	Background->SetBrushColor(BackgroundColor);
+	Background->SetHorizontalAlignment(HAlign_Center);
+	Background->SetVerticalAlignment(VAlign_Center);
 	WidgetTree->RootWidget = Background;
 
-	UOverlay* Root = WidgetTree->ConstructWidget<UOverlay>(UOverlay::StaticClass(), TEXT("Overlay_Root"));
-	Background->SetContent(Root);
-
 	UBorder* Panel = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("Border_Panel"));
-	Panel->SetPadding(FMargin(40.f));
-	if (UOverlaySlot* PanelSlot = Root->AddChildToOverlay(Panel))
-	{
-		PanelSlot->SetHorizontalAlignment(HAlign_Center);
-		PanelSlot->SetVerticalAlignment(VAlign_Center);
-	}
+	Panel->SetBrushColor(PanelColor);
+	Panel->SetPadding(FMargin(PanelPadding));
+	Background->SetContent(Panel);
 
-	USizeBox* Column = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("SizeBox_Column"));
-	Column->SetWidthOverride(320.f);
+	USizeBox* Column = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("SizeBox_Main"));
+	Column->SetWidthOverride(ColumnWidth);
 	Panel->SetContent(Column);
 
 	UVerticalBox* Main = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("Box_Main"));
 	Column->SetContent(Main);
+
+	Text_Title = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("Text_Title"));
+	Text_Title->SetText(TitleLabel);
+	Text_Title->SetJustification(ETextJustify::Center);
+	if (UVerticalBoxSlot* TitleSlot = Main->AddChildToVerticalBox(Text_Title))
+	{
+		TitleSlot->SetPadding(FMargin(0.f, 0.f, 0.f, TitleGap));
+	}
 
 	Button_Resume = AddButton(Main, TEXT("Button_Resume"), LOCTEXT("PauseResume", "Resume"));
 	Button_Archive = AddButton(Main, TEXT("Button_Archive"), ArchiveLabel);

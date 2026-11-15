@@ -76,6 +76,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	int32 GetCost() const;
 
+	/** InteractRadius, clamped as IsInRange reads it. */
+	UFUNCTION(BlueprintPure, Category = "Terminal", meta = (Units = "cm"))
+	float GetInteractRadius() const;
+
+	/** The body's box in the actor's space (the mesh's bounds through its relative transform); an empty box without a mesh. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	FBox GetLocalBodyBox() const;
+
 	/** The terminal nearest to Pawn within its InteractRadius, or null. */
 	static APowerTerminal* FindNearestInRange(const APawn* Pawn);
 

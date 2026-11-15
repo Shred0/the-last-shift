@@ -43,6 +43,11 @@ struct THELASTSHIFT_API FAreaValidationResult
  * 5. Open segments: every floor edge is closed by a curb above the pawn's step height, or continues into floor.
  * 6. No walkable navmesh outside the generated route: every navmesh polygon lies on a generated floor and is
  *    connected to the start.
+ * 7. Log and twin AI terminals: their counts match the recipe; each has a standing place on the navmesh within its
+ *    reach, free for the pawn (a log terminal: its reading place 1 to 1.5 m in front of the screen, nothing between the
+ *    eye and the screen, in a closed corridor or room of its own, one per equal part of the route; the twin AI's
+ *    terminal: in the last closed segment); no place is within reach of two terminals of any kind; the exit is reached
+ *    without paying any of them.
  */
 namespace AreaValidator
 {

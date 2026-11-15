@@ -88,6 +88,18 @@ struct THELASTSHIFT_API FAreaRecipe
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0", ClampMax = "4"))
 	int32 LightGroupCount = 1;
 
+	/**
+	 * Log terminals (optional, paid once each), against a wall in closed corridors or rooms: the route is split into this
+	 * many equal parts and each part gets one, each in its own segment. Placed on top of everything else (no other
+	 * placement moves); a seed where one cannot be placed fails validation.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 LogTerminalCount = 0;
+
+	/** Twin AI terminals (optional), against a wall in the last closed segment of the route. 0 or 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0", ClampMax = "1"))
+	int32 TwinAITerminalCount = 0;
+
 	/** Navigation path length from the PlayerStart to the exit that the validator accepts (rule 1). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0.0", ClampMax = "500000.0", Units = "cm"))
 	float RouteLengthMin = 25000.f;

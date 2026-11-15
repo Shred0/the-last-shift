@@ -4,12 +4,13 @@
 // shots), tls.TwinTest (the twin AI's terminal and voice, the battery, one queue, the suit's text colours, the home
 // messages' timing), tls.ArchiveTest local|chain (the suit's archive: content, pause-menu entry and input; run state across
 // maps, restarts, Continue and a save written before this brief) and tls.Archive.Store (stores log entries and twin AI parts
-// without a terminal). The tests read their own fixture rows (Debug/NarrativeFixture), never the rows of Narrative/.
+// without a terminal); Brief 8b: tls.TwinAreaTest (the generated log terminals of area 2 and twin AI terminal of area 3). The tests read their own fixture rows (Debug/NarrativeFixture), never the rows of Narrative/.
 // Development builds only.
 
 #include "Debug/NarrativeFixture.h"
 #include "Debug/TlsDebugCommon.h"
 #include "Area/AreaGenerator.h"
+#include "Area/AreaInfo.h"
 #include "Blueprint/WidgetTree.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SpotLightComponent.h"
@@ -283,7 +284,8 @@ namespace TwinWritingDebug
 			Finish(TEXT(""));
 			return false;
 		}
-		FStep& Step = GRun.Steps[GRun.Next];
+		// A copy: a step may insert steps after itself (tls.TwinAreaTest), which can move the array.
+		const FStep Step = GRun.Steps[GRun.Next];
 		if (Step.Until)
 		{
 			if (GRun.ConditionStartReal < 0.0)
@@ -807,19 +809,45 @@ namespace TwinWritingDebug
 
 	static void AddReadabilityPhase(TArray<FStep>& S)
 	{
+		// Distances from the screen (the terminal's origin is the back of its body, against the wall).
 		S.Add(Do(TEXT("readability: flashlight on, 1 m"), []()
 		{
 			ALogTerminal* A = G.A.Get();
 			MutableSettings()->LogDisplay = ELogDisplay::Surface;
 			SetFlashlight(true);
-			StandBefore(A, 100.f);
+			StandBefore(A, A->GetScreenOffset() + 100.f);
 			return 0.2f;
 		}));
 		S.Add(WaitFor(TEXT("readability: entry translated"), []() { const ALogTerminal* A = G.A.Get(); return A && A->GetTranslatedCells() >= A->GetCurrentLength(); }, 15.f,
 			[]() { Shot(TEXT("logs_readability_1m_flashlight")); return 0.4f; }));
-		S.Add(Do(TEXT("readability: 2 m"), []() { StandBefore(G.A.Get(), 200.f); return 0.4f; }));
+		S.Add(Do(TEXT("readability: 2 m"), []() { StandBefore(G.A.Get(), G.A->GetScreenOffset() + 200.f); return 0.4f; }));
 		S.Add(Do(TEXT("readability: shot at 2 m"), []() { Shot(TEXT("logs_readability_2m_flashlight")); return 0.4f; }));
-		S.Add(Do(TEXT("readability: flashlight off, 1 m"), []() { SetFlashlight(false); StandBefore(G.A.Get(), 100.f); return 0.4f; }));
+		S.Add(Do(TEXT("readability: from the side"), []()
+		{
+			// 1.5 m in front of the screen and 1.5 m to its side, looking at the screen.
+			ALogTerminal* A = G.A.Get();
+			APawn* P = Pawn();
+			const FVector Forward = A->GetActorForwardVector().GetSafeNormal2D();
+			const FVector Right = FVector::CrossProduct(FVector::UpVector, Forward);
+			const FVector Target = A->GetActorLocation() + Forward * (A->GetScreenOffset() + 150.f) + Right * 150.f;
+			P->SetActorLocation(FVector(Target.X, Target.Y, P->GetActorLocation().Z), false, nullptr, ETeleportType::TeleportPhysics);
+			const UCameraComponent* Camera = P->FindComponentByClass<UCameraComponent>();
+			const FVector Eye = Camera ? Camera->GetComponentLocation() : P->GetActorLocation() + FVector(0.f, 0.f, 62.f);
+			PC()->SetControlRotation((A->GetScreenCentre() - FVector(0.f, 0.f, 30.f) - Eye).Rotation());
+			return 0.4f;
+		}));
+		S.Add(Do(TEXT("readability: shot from the side"), []() { Shot(TEXT("logs_readability_side_flashlight")); return 0.4f; }));
+		S.Add(Do(TEXT("readability: 3 m, stop time"), []()
+		{
+			StandBefore(G.A.Get(), G.A->GetScreenOffset() + 300.f);
+			TS()->Toggle();
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("readability: the first scan"), []() { const UScanDirectorComponent* D = Director(); return IsStopped() && D && D->GetScansThisStop() >= 1; }, 5.f,
+			[]() { return 0.6f; }));
+		S.Add(Do(TEXT("readability: shot in the scan"), []() { Shot(TEXT("logs_readability_scan")); return 0.5f; }));
+		S.Add(Do(TEXT("readability: resume"), []() { if (IsStopped()) { TS()->Toggle(); } return 0.5f; }));
+		S.Add(Do(TEXT("readability: flashlight off, 1 m"), []() { SetFlashlight(false); StandBefore(G.A.Get(), G.A->GetScreenOffset() + 100.f); return 0.4f; }));
 		S.Add(Do(TEXT("readability: shot at 1 m without the flashlight"), []() { Shot(TEXT("logs_readability_1m_dark")); return 0.4f; }));
 		S.Add(Do(TEXT("readability: restore the flashlight"), []() { SetFlashlight(G.bFlashlight); return 0.f; }));
 	}
@@ -912,11 +940,11 @@ namespace TwinWritingDebug
 		return FString::JoinBy(TwinWriting::GetTwinPartRows(UTheLastShiftSettings::Get()->LoadTwinAITable(), Part), TEXT(" "), [](const FName& N) { return N.ToString(); });
 	}
 
-	static void AddPartsPhase(TArray<FStep>& S)
+	static void AddPartsPhase(TArray<FStep>& S, const FString& SpendRow = TEXT("A0_Spend_1"), bool bShots = true)
 	{
 		for (int32 Part = 1; Part <= 3; ++Part)
 		{
-			S.Add(Do(FString::Printf(TEXT("parts: payment %d"), Part), [Part]()
+			S.Add(Do(FString::Printf(TEXT("parts: payment %d"), Part), [Part, bShots]()
 			{
 				ATwinAITerminal* T = TwinTerminal();
 				StandBefore(T, 100.f);
@@ -926,7 +954,7 @@ namespace TwinWritingDebug
 				Check(bPaid && Banked() == G.Banked - 1 && T->GetLastPlayedPart() == Part, FString::Printf(TEXT("parts: payment %d plays part %d (banked %d -> %d)"), Part, T->GetLastPlayedPart(), G.Banked, Banked()));
 				Check(Run()->GetArchive().TwinPartsPlayed == Part && Channel()->IsBusy(),
 					FString::Printf(TEXT("parts: part %d stored in the archive at the payment, while its messages are still to be typed"), Part));
-				if (Part == 1)
+				if (Part == 1 && bShots)
 				{
 					Shot(TEXT("twin_0_payment"));
 				}
@@ -938,7 +966,7 @@ namespace TwinWritingDebug
 				{
 					const UTextChannelComponent* C = Channel();
 					return C && C->GetCurrentVoice() == ETextVoice::Twin && C->GetShownCells() * 2 >= C->GetCurrentText().Len();
-				}, 15.f, []()
+				}, 15.f, [bShots]()
 				{
 					const UTextChannelWidget* Widget = ChannelWidget();
 					const UStdBarcodeText* Barcode = Widget ? Widget->GetTwinBarcode() : nullptr;
@@ -948,18 +976,21 @@ namespace TwinWritingDebug
 					const UTextChannelComponent* C = Channel();
 					Check(Barcode && Barcode->GetShownCells() == C->GetShownCells() && Barcode->GetTranslatedCells() == C->GetTranslatedCells(),
 						FString::Printf(TEXT("voice: the widget draws the channel's counts (%d shown, %d translated)"), C->GetShownCells(), C->GetTranslatedCells()));
-					Shot(TEXT("twin_1_mid"));
+					if (bShots)
+					{
+						Shot(TEXT("twin_1_mid"));
+					}
 					return 0.f;
 				}));
 				S.Add(WaitFor(TEXT("voice: the twin message fully translated"), []()
 				{
 					const UTextChannelComponent* C = Channel();
 					return C && C->GetCurrentVoice() == ETextVoice::Twin && C->GetTranslatedCells() >= C->GetCurrentText().Len();
-				}, 15.f, []() { Shot(TEXT("twin_2_done")); return 0.f; }));
+				}, 15.f, [bShots]() { if (bShots) { Shot(TEXT("twin_2_done")); } return 0.f; }));
 			}
-			S.Add(WaitFor(FString::Printf(TEXT("parts: part %d said"), Part), []() { return ChannelIdle(); }, 30.f, [Part]()
+			S.Add(WaitFor(FString::Printf(TEXT("parts: part %d said"), Part), []() { return ChannelIdle(); }, 30.f, [Part, SpendRow]()
 			{
-				const FString Expected = FString::Printf(TEXT("A0_Spend_1 %s"), *TwinRows(Part));
+				const FString Expected = FString::Printf(TEXT("%s %s"), *SpendRow, *TwinRows(Part));
 				const FString Got = FString::Join(SequenceRows(), TEXT(" "));
 				Check(Got == Expected, FString::Printf(TEXT("parts: the spending comment, then part %d's rows in order, one at a time (%s; sequence %s)"), Part, *Got, *SequenceString()));
 				Check(G.bTwinNeverAhead && G.TwinSamples > 0, FString::Printf(TEXT("voice: the translation never ahead of the barcodes (%d samples)"), G.TwinSamples));
@@ -1675,6 +1706,296 @@ namespace TwinWritingDebug
 		}));
 		Start();
 	}
+
+	// =====================================================================================================
+	// tls.TwinAreaTest (Brief 8b): the generated terminals of area 2 (log terminals) and area 3 (the twin AI's terminal)
+	// =====================================================================================================
+
+	struct FAreaState
+	{
+		int32 Act = 0;
+		int32 Logs = 0;
+		int32 Twins = 0;
+		float ReadingDistance = 110.f;
+		TArray<TWeakObjectPtr<ALogTerminal>> Ordered;
+	};
+	static FAreaState GArea;
+
+	/** The log terminals of the area in route order (the first one stands in the first part of the route). */
+	static TArray<ALogTerminal*> LogTerminalsInRouteOrder()
+	{
+		TArray<ALogTerminal*> Out;
+		for (const TWeakObjectPtr<ALogTerminal>& T : GArea.Ordered)
+		{
+			if (T.IsValid())
+			{
+				Out.Add(T.Get());
+			}
+		}
+		return Out;
+	}
+
+	/** In front of a log terminal's screen, at the generator's reading distance. */
+	static void StandToRead(const ALogTerminal* T)
+	{
+		if (T)
+		{
+			StandBefore(T, T->GetScreenOffset() + GArea.ReadingDistance);
+		}
+	}
+
+	static FString AreaShotName(const FString& What) { return FString::Printf(TEXT("area%d_%s"), GArea.Act, *What); }
+
+	/** Normal time with the flashlight on, at Distance, once the entry is translated (log terminals); then the same terminal in a scan. */
+	static void AddTerminalShots(TArray<FStep>& S, const FString& Name, TFunction<APowerTerminal*()> Terminal, float Distance, float ScanDistance)
+	{
+		S.Add(Do(Name + TEXT(": stand before it, flashlight on"), [Terminal, Distance]()
+		{
+			SetFlashlight(true);
+			const ALogTerminal* Log = Cast<ALogTerminal>(Terminal());
+			if (Log && Distance <= 0.f)
+			{
+				StandToRead(Log);
+			}
+			else
+			{
+				StandBefore(Terminal(), Distance);
+			}
+			return 0.3f;
+		}));
+		S.Add(WaitFor(Name + TEXT(": its entry translated (log terminals)"), [Terminal]()
+		{
+			const ALogTerminal* Log = Cast<ALogTerminal>(Terminal());
+			return !Log || (Log->IsEntryShown() && Log->GetTranslatedCells() >= Log->GetCurrentLength());
+		}, 20.f, [Name]() { Shot(AreaShotName(Name + TEXT("_normal"))); return 0.5f; }));
+		S.Add(Do(Name + TEXT(": step back and stop time"), [Terminal, ScanDistance]()
+		{
+			StandBefore(Terminal(), ScanDistance);
+			TS()->Toggle();
+			return 0.f;
+		}));
+		S.Add(WaitFor(Name + TEXT(": the first scan of the Stop"), []()
+		{
+			const UScanDirectorComponent* D = Director();
+			return IsStopped() && D && D->GetScansThisStop() >= 1;
+		}, 5.f, []() { return 0.6f; }));
+		S.Add(Do(Name + TEXT(": shot in the scan"), [Name]() { Shot(AreaShotName(Name + TEXT("_scan"))); return 0.5f; }));
+		S.Add(Do(Name + TEXT(": resume"), []()
+		{
+			if (IsStopped())
+			{
+				TS()->Toggle();
+			}
+			return 0.5f;
+		}));
+	}
+
+	static void AddAreaLogsPhase(TArray<FStep>& S)
+	{
+		S.Add(Do(TEXT("logs: refused with no energy"), []()
+		{
+			const TArray<ALogTerminal*> T = LogTerminalsInRouteOrder();
+			RelockAll();
+			Run()->ClearArchive();
+			Energy()->RestoreBankedEnergy(0);
+			StandToRead(T[0]);
+			const bool bPaid = T[0]->TryActivate(Pawn());
+			Check(!bPaid && !T[0]->IsUnlocked() && Banked() == 0 && !T[0]->IsEntryShown(), TEXT("logs: with no energy a payment is refused (still locked, nothing shown, banked 0)"));
+			return 0.2f;
+		}));
+		for (const bool bReverse : { false, true })
+		{
+			const FString Order = bReverse ? TEXT("second terminal paid first") : TEXT("first terminal paid first");
+			S.Add(Do(Order + TEXT(": the first payment"), [bReverse, Order]()
+			{
+				const TArray<ALogTerminal*> T = LogTerminalsInRouteOrder();
+				RelockAll();
+				Run()->ClearArchive();
+				Energy()->RestoreBankedEnergy(2);
+				ALogTerminal* First = bReverse ? T[1] : T[0];
+				StandToRead(First);
+				Check(First->IsInRange(Pawn()), FString::Printf(TEXT("%s: the reading place is within reach of %s"), *Order, *First->GetName()));
+				const bool bPaid = First->TryActivate(Pawn());
+				Check(bPaid && Banked() == 1 && Join(First->GetEntries()) == TEXT("8,7,6,5"),
+					FString::Printf(TEXT("%s: %s takes 1 (banked 2 -> %d) and shows 8,7,6,5 (got %s)"), *Order, *First->GetName(), Banked(), *Join(First->GetEntries())));
+				return 0.3f;
+			}));
+			S.Add(Do(Order + TEXT(": the first terminal's screen"), [bReverse, Order]()
+			{
+				const TArray<ALogTerminal*> T = LogTerminalsInRouteOrder();
+				ALogTerminal* First = bReverse ? T[1] : T[0];
+				const UWidgetComponent* Screen = First->FindComponentByClass<UWidgetComponent>();
+				Check(First->IsEntryShown() && First->GetCurrentOrder() == 8 && Screen && Screen->IsVisible(),
+					FString::Printf(TEXT("%s: its screen shows log %d"), *Order, First->GetCurrentOrder()));
+				Check(Run()->GetArchive().LogOrders.Num() == 4, FString::Printf(TEXT("%s: the archive holds its 4 entries (%d)"), *Order, Run()->GetArchive().LogOrders.Num()));
+				return 0.f;
+			}));
+			S.Add(Do(Order + TEXT(": the second payment"), [bReverse, Order]()
+			{
+				const TArray<ALogTerminal*> T = LogTerminalsInRouteOrder();
+				ALogTerminal* Second = bReverse ? T[0] : T[1];
+				StandToRead(Second);
+				const bool bPaid = Second->TryActivate(Pawn());
+				Check(bPaid && Banked() == 0 && Join(Second->GetEntries()) == TEXT("4,3,2,1"),
+					FString::Printf(TEXT("%s: %s takes 1 (banked 1 -> %d) and shows 4,3,2,1 (got %s)"), *Order, *Second->GetName(), Banked(), *Join(Second->GetEntries())));
+				return 0.3f;
+			}));
+			S.Add(Do(Order + TEXT(": the second terminal's screen, the archive"), [bReverse, Order]()
+			{
+				const TArray<ALogTerminal*> T = LogTerminalsInRouteOrder();
+				ALogTerminal* Second = bReverse ? T[0] : T[1];
+				const UWidgetComponent* Screen = Second->FindComponentByClass<UWidgetComponent>();
+				Check(Second->IsEntryShown() && Second->GetCurrentOrder() == 4 && Screen && Screen->IsVisible(),
+					FString::Printf(TEXT("%s: its screen shows log %d"), *Order, Second->GetCurrentOrder()));
+				Check(Join(ArchiveLogsNewestFirst()) == TEXT("8,7,6,5,4,3,2,1"), FString::Printf(TEXT("%s: the archive holds 8,7,6,5,4,3,2,1 (%s)"), *Order, *Join(ArchiveLogsNewestFirst())));
+				// Reading again is free.
+				const bool bRead = Second->TryActivate(Pawn());
+				Check(bRead && Banked() == 0 && Second->GetCurrentOrder() == 3, FString::Printf(TEXT("%s: Interact shows the next entry for free (log %d, banked %d)"), *Order, Second->GetCurrentOrder(), Banked()));
+				return 0.2f;
+			}));
+		}
+		AddListCheck(S, TEXT("logs archive"), []() { return ExpectedLabels({ 8, 7, 6, 5, 4, 3, 2, 1 }, 0); });
+		S.Add(Do(TEXT("logs: the pause menu's title"), []()
+		{
+			const bool bOpen = OpenMenu();
+			const URunPauseMenuWidget* Menu = GamePauseMenu();
+			const UTextBlock* Title = Menu ? Menu->GetTitleText() : nullptr;
+			Check(bOpen && Title && Title->GetText().ToString() == TEXT("Paused") && Title->IsVisible(), FString::Printf(TEXT("pause menu: the title reads \"%s\""), Title ? *Title->GetText().ToString() : TEXT("-")));
+			CloseMenu();
+			return 0.2f;
+		}));
+		for (int32 Index = 0; Index < 2; ++Index)
+		{
+			AddTerminalShots(S, FString::Printf(TEXT("log%d"), Index), [Index]() -> APowerTerminal* { const TArray<ALogTerminal*> T = LogTerminalsInRouteOrder(); return T.IsValidIndex(Index) ? T[Index] : nullptr; },
+				0.f, 400.f);
+		}
+	}
+
+	static void StartTwinAreaTest(bool bQuit)
+	{
+		if (!Begin(TEXT("TwinAreaTest"), bQuit))
+		{
+			return;
+		}
+		G = FState();
+		GArea = FAreaState();
+		GRun.ShotFolder = TEXT("Brief8b");
+		GRun.Watch = &WatchChannel;
+		GRun.Cleanup = []()
+		{
+			if (UTextChannelComponent* C = Channel())
+			{
+				C->ClearAll();
+			}
+			SetFlashlight(G.bFlashlight);
+			NarrativeFixture::Restore(W());
+		};
+		TArray<FStep>& S = GRun.Steps;
+		S.Add(WaitFor(TEXT("the area is generated and playable"), []() { return IsReady() && AAreaGenerator::Find(W()) && AAreaGenerator::Find(W())->IsReady(); }, 90.f, []()
+		{
+			const AAreaGenerator* Gen = AAreaGenerator::Find(W());
+			const FAreaRecipe* Recipe = Gen ? Gen->GetRecipe() : nullptr;
+			if (!Recipe)
+			{
+				Check(false, TEXT("the map has a generated area with a recipe"));
+				return -1.f;
+			}
+			GArea.Act = Gen->GetAct();
+			GArea.Logs = Recipe->LogTerminalCount;
+			GArea.Twins = Recipe->TwinAITerminalCount;
+			GArea.ReadingDistance = FMath::Clamp(Gen->LogReadingDistance, 100.f, 150.f);
+			if (const APawn* P = Pawn())
+			{
+				TArray<USpotLightComponent*> Lights;
+				P->GetComponents(Lights);
+				G.bFlashlight = Lights.Num() > 0 && Lights[0]->IsVisible();
+			}
+			Check(Gen->bLastValidationPassed, FString::Printf(TEXT("act %d seed %d: the area passed every validator rule"), GArea.Act, Gen->GetSeed()));
+			NarrativeFixture::Install(W());
+			NarrativeFixture::SetLogCount(8);
+			MutableSettings()->LogDisplay = ELogDisplay::Surface;
+			Channel()->ClearAll();
+			Run()->ClearArchive();
+
+			const AAreaInfo* Info = AAreaInfo::Find(W());
+			TArray<TPair<float, ALogTerminal*>> Sorted;
+			for (ALogTerminal* T : LogTerminals())
+			{
+				int32 Segment = -1;
+				float Offset = 0.f;
+				const float RouteS = Info ? Info->ProjectToRoute(T->GetActorLocation(), Segment, Offset) : 0.f;
+				Sorted.Emplace(RouteS, T);
+				Note(FString::Printf(TEXT("log terminal %s: segment %d (%s), at %s, yaw %.0f, route %.1f m of %.1f m"), *T->GetName(), Segment,
+					Info && Info->Segments.IsValidIndex(Segment) ? LexToString(Info->Segments[Segment].Type) : TEXT("-"), *T->GetActorLocation().ToCompactString(),
+					T->GetActorRotation().Yaw, RouteS / 100.f, Info ? Info->GetRouteLength() / 100.f : 0.f));
+			}
+			Sorted.Sort([](const TPair<float, ALogTerminal*>& A, const TPair<float, ALogTerminal*>& B) { return A.Key < B.Key; });
+			for (const TPair<float, ALogTerminal*>& P : Sorted)
+			{
+				GArea.Ordered.Add(P.Value);
+			}
+			if (ATwinAITerminal* T = TwinTerminal())
+			{
+				int32 Segment = -1;
+				float Offset = 0.f;
+				const float RouteS = Info ? Info->ProjectToRoute(T->GetActorLocation(), Segment, Offset) : 0.f;
+				Note(FString::Printf(TEXT("twin AI terminal %s: segment %d (%s), at %s, yaw %.0f, route %.1f m of %.1f m"), *T->GetName(), Segment,
+					Info && Info->Segments.IsValidIndex(Segment) ? LexToString(Info->Segments[Segment].Type) : TEXT("-"), *T->GetActorLocation().ToCompactString(),
+					T->GetActorRotation().Yaw, RouteS / 100.f, Info ? Info->GetRouteLength() / 100.f : 0.f));
+			}
+			int32 Twins = 0;
+			for (TActorIterator<ATwinAITerminal> It(W()); It; ++It) { ++Twins; }
+			Check(Sorted.Num() == GArea.Logs && Twins == GArea.Twins, FString::Printf(TEXT("act %d: %d log terminals (recipe %d), %d twin AI terminals (recipe %d)"),
+				GArea.Act, Sorted.Num(), GArea.Logs, Twins, GArea.Twins));
+			if ((GArea.Logs != 2 && GArea.Twins != 1) || Sorted.Num() != GArea.Logs || Twins != GArea.Twins || IsStopped())
+			{
+				Note(TEXT("this test runs in area 2 (two log terminals) or area 3 (the twin AI's terminal)"));
+				return -1.f;
+			}
+			// No terminal of either kind powers a device: the exit never needs them.
+			bool bNoTargets = true;
+			for (TActorIterator<APowerTerminal> It(W()); It; ++It)
+			{
+				bNoTargets &= !(It->IsA<ALogTerminal>() || It->IsA<ATwinAITerminal>()) || It->Targets.IsEmpty();
+			}
+			Check(bNoTargets, TEXT("the log and twin AI terminals power nothing (the exit is reached without paying them)"));
+			return 0.3f;
+		}));
+		// The phases depend on the area: added once the first step knows it, before the run goes past it.
+		S.Add(Do(TEXT("phases of this area"), []()
+		{
+			TArray<FStep> More;
+			if (GArea.Logs == 2)
+			{
+				AddAreaLogsPhase(More);
+			}
+			if (GArea.Twins == 1)
+			{
+				More.Add(Do(TEXT("twin: the fixture, energy"), []()
+				{
+					ATwinAITerminal* T = TwinTerminal();
+					Check(T->GetPartCount() == 3, FString::Printf(TEXT("the fixture's twin AI has 3 parts (%d)"), T->GetPartCount()));
+					Energy()->RestoreBankedEnergy(0);
+					StandBefore(T, 100.f);
+					const bool bPaid = T->TryActivate(Pawn());
+					Check(!bPaid && Banked() == 0 && Run()->GetArchive().TwinPartsPlayed == 0, TEXT("twin: with no energy a payment is refused (no part played, banked 0)"));
+					Energy()->RestoreBankedEnergy(3);
+					return 0.3f;
+				}));
+				AddPartsPhase(More, FString::Printf(TEXT("A%d_Spend_1"), GArea.Act), false);
+				More.Add(Do(TEXT("twin: all energy spent"), []()
+				{
+					Check(Banked() == 0, FString::Printf(TEXT("twin: three payments took 3 (banked %d)"), Banked()));
+					return 0.f;
+				}));
+				AddListCheck(More, TEXT("twin archive"), []() { return ExpectedLabels({}, 3); });
+				AddTerminalShots(More, TEXT("twin"), []() -> APowerTerminal* { return TwinTerminal(); }, 150.f, 400.f);
+			}
+			GRun.Steps.Insert(More, GRun.Next);
+			return 0.f;
+		}));
+		Start();
+	}
 }
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLogsTestCommand(
@@ -1715,6 +2036,18 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsArchiveTestCommand(
 		{
 			TwinWritingDebug::StartArchiveLocal(bQuit);
 		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsTwinAreaTestCommand(
+	TEXT("tls.TwinAreaTest"),
+	TEXT("tls.TwinAreaTest [Quit=0]: (fresh PIE or a package, in Area2_ServerHalls or Area3_Core) the generated terminals. Area 2: its two log terminals "
+		"in route order, a payment refused with no energy, both orders of payment (8,7,6,5 at the first paid, 4,3,2,1 at the second, 1 energy each), "
+		"their screens, the archive's eight entries in the pause menu (titled \"Paused\"), a shot of each in Normal time and in a scan. Area 3: the twin AI's "
+		"terminal, three parts after the act's spending comment, a fourth payment refused with no prompt, the archive's three transmissions, shots. "
+		"Fixture rows only; shots in Saved/Screenshots/Brief8b."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		TwinWritingDebug::StartTwinAreaTest(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsArchiveStoreCommand(

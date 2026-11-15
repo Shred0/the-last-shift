@@ -8,7 +8,10 @@
 #include "Area/AreaTypes.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/LightGroupDevice.h"
+#include "Energy/LogTerminal.h"
+#include "Energy/TwinAITerminal.h"
 #include "Energy/PowerTerminal.h"
+#include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
@@ -147,9 +150,12 @@ namespace AreaValidation
 		}
 	};
 
+	/** The generator's TerminalStandDistance (one owner), read at the start of each validation. */
+	static float GStandDistance = 90.f;
+
 	static FVector TerminalFront(const APowerTerminal* Terminal)
 	{
-		return Terminal->GetActorLocation() + Terminal->GetActorForwardVector() * 90.f + FVector(0.f, 0.f, 50.f);
+		return Terminal->GetActorLocation() + Terminal->GetActorForwardVector() * GStandDistance + FVector(0.f, 0.f, 50.f);
 	}
 
 	static APowerTerminal* TerminalOf(UWorld* World, const APoweredDevice* Device)
@@ -229,13 +235,15 @@ namespace AreaValidation
 		const int32 Entities = All<AEntity>(World).Num();
 		const int32 Starts = All<APlayerStart>(World).Num();
 		const int32 Exits = All<AAreaExit>(World).Num();
+		// The optional terminals against a wall (rule 7 checks their own counts) are terminals too.
+		const int32 Optional = C.Recipe->LogTerminalCount + C.Recipe->TwinAITerminalCount;
 		const bool bCounts = Residues == C.Recipe->ResidueCount && Regenerating == Gates && Doors.Num() == Gates
-			&& Terminals.Num() == Gates + C.Recipe->LightGroupCount && LightGroups == C.Recipe->LightGroupCount
+			&& Terminals.Num() == Gates + C.Recipe->LightGroupCount + Optional && LightGroups == C.Recipe->LightGroupCount
 			&& Entities == 1 && Starts == 1 && Exits == 1;
 		if (!bCounts)
 		{
 			AddDetail(R, FString::Printf(TEXT("counts: residues %d/%d (regenerating %d/%d), doors %d/%d, terminals %d/%d, light groups %d/%d, entities %d/1, starts %d/1, exits %d/1"),
-				Residues, C.Recipe->ResidueCount, Regenerating, Gates, Doors.Num(), Gates, Terminals.Num(), Gates + C.Recipe->LightGroupCount,
+				Residues, C.Recipe->ResidueCount, Regenerating, Gates, Doors.Num(), Gates, Terminals.Num(), Gates + C.Recipe->LightGroupCount + Optional,
 				LightGroups, C.Recipe->LightGroupCount, Entities, Starts, Exits));
 		}
 		R.bPass = Unreachable == 0 && bCounts;
@@ -525,6 +533,228 @@ namespace AreaValidation
 		R.Summary = FString::Printf(TEXT("%d polygons in %d tiles: off the floor %d, disconnected %d"), Polys, Tiles.Num(), OffFloor, Disconnected);
 		return R;
 	}
+
+	/** A free place for the pawn at the navmesh point OnNav: its capsule overlaps nothing that blocks a pawn. */
+	static bool IsFreeForPawn(const FContext& C, const FVector& OnNav, FString* OutBlocker = nullptr)
+	{
+		const float Radius = C.Pawn.CapsuleRadius * 0.9f;
+		const float HalfHeight = FMath::Max(Radius, C.Pawn.CapsuleHalfHeight * 0.9f);
+		const FVector Centre = OnNav + FVector(0.f, 0.f, C.Pawn.CapsuleHalfHeight + 5.f);
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(AreaStandFree), false);
+		TArray<FOverlapResult> Overlaps;
+		C.World->OverlapMultiByChannel(Overlaps, Centre, FQuat::Identity, ECC_Pawn, FCollisionShape::MakeCapsule(Radius, HalfHeight), Params);
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			if (Overlap.bBlockingHit)
+			{
+				if (OutBlocker)
+				{
+					*OutBlocker = FString::Printf(TEXT("%s.%s"), *GetNameSafe(Overlap.GetActor()), *GetNameSafe(Overlap.GetComponent()));
+				}
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * A place to stand for Terminal at Wanted: on the navmesh within 30 cm, connected to the start, within the terminal's
+	 * reach and free for the pawn. OutWhere is the navmesh point.
+	 */
+	static bool HasStandingPlace(const FContext& C, const APowerTerminal* Terminal, const FVector& Wanted, FVector& OutWhere, FString& OutWhy)
+	{
+		FNavLocation Location;
+		if (!C.NavSys->ProjectPointToNavigation(Wanted, Location, FVector(30.f, 30.f, 150.f), C.Nav))
+		{
+			OutWhy = FString::Printf(TEXT("no navmesh at %s"), *Where(Wanted));
+			return false;
+		}
+		OutWhere = Location.Location;
+		if (!C.Reach.Contains(C.PolyAt(OutWhere)))
+		{
+			OutWhy = FString::Printf(TEXT("%s not connected to the start"), *Where(OutWhere));
+			return false;
+		}
+		const float Distance = static_cast<float>(FVector::Dist2D(OutWhere, Terminal->GetActorLocation()));
+		if (Distance > Terminal->GetInteractRadius())
+		{
+			OutWhy = FString::Printf(TEXT("%s out of reach (%.0f > %.0f cm)"), *Where(OutWhere), Distance, Terminal->GetInteractRadius());
+			return false;
+		}
+		FString Blocker;
+		if (!IsFreeForPawn(C, OutWhere, &Blocker))
+		{
+			OutWhy = FString::Printf(TEXT("%s not free for the pawn (%s)"), *Where(OutWhere), *Blocker);
+			return false;
+		}
+		return true;
+	}
+
+	static int32 SegmentAt(const FContext& C, const FVector& P, float& OutRouteDistance)
+	{
+		int32 Segment = -1;
+		float Offset = 0.f;
+		OutRouteDistance = C.Info->ProjectToRoute(P, Segment, Offset);
+		return Segment;
+	}
+
+	/**
+	 * Rule 7 (Brief 8b): the recipe's log terminals and twin AI terminal. Counts match; each terminal has a standing place
+	 * on the navmesh within its reach, free for the pawn; a log terminal's is its reading place, 1 to 1.5 m in front of the
+	 * screen with nothing between the eye and the screen, in a closed corridor or room of its own, one per equal part of
+	 * the route; the twin AI's terminal stands in the last closed segment; no place is within reach of two terminals (any
+	 * kind); and the exit is reached without paying any of them (they power nothing and no door depends on them).
+	 */
+	static FAreaRuleResult RuleOptionalTerminals(FContext& C)
+	{
+		FAreaRuleResult R;
+		R.Rule = 7;
+		R.Name = TEXT("log and twin AI terminals");
+		UWorld* World = C.World;
+		const TArray<ALogTerminal*> Logs = All<ALogTerminal>(World);
+		const TArray<ATwinAITerminal*> Twins = All<ATwinAITerminal>(World);
+		const TArray<APowerTerminal*> Terminals = All<APowerTerminal>(World);
+		const TArray<ADoorDevice*> Doors = All<ADoorDevice>(World);
+		int32 Failures = 0;
+		TArray<FString> Lines;
+
+		const bool bCounts = Logs.Num() == C.Recipe->LogTerminalCount && Twins.Num() == C.Recipe->TwinAITerminalCount;
+		if (!bCounts)
+		{
+			++Failures;
+			AddDetail(R, FString::Printf(TEXT("counts: log terminals %d/%d, twin AI terminals %d/%d"), Logs.Num(), C.Recipe->LogTerminalCount, Twins.Num(), C.Recipe->TwinAITerminalCount));
+		}
+
+		const float RouteLength = C.Info->GetRouteLength();
+		const float Reading = FMath::Clamp(C.Generator->LogReadingDistance, 100.f, 150.f);
+		// Log terminals in route order, so that the first stands in the first part of the route.
+		TArray<TPair<float, ALogTerminal*>> Ordered;
+		for (ALogTerminal* Log : Logs)
+		{
+			float RouteS = 0.f;
+			SegmentAt(C, Log->GetActorLocation(), RouteS);
+			Ordered.Emplace(RouteS, Log);
+		}
+		Ordered.Sort([](const TPair<float, ALogTerminal*>& A, const TPair<float, ALogTerminal*>& B) { return A.Key < B.Key; });
+		TSet<int32> LogSegments;
+		for (int32 Index = 0; Index < Ordered.Num(); ++Index)
+		{
+			const ALogTerminal* Log = Ordered[Index].Value;
+			const FString Name = Label(Log);
+			float RouteS = 0.f;
+			const int32 Segment = SegmentAt(C, Log->GetActorLocation(), RouteS);
+			FVector Stand = FVector::ZeroVector;
+			FString Why;
+			const FVector Forward = Log->GetActorForwardVector().GetSafeNormal2D();
+			const FVector Screen = Log->GetScreenCentre();
+			const FVector Wanted = FVector(Screen.X, Screen.Y, Log->GetActorLocation().Z + 50.f) + Forward * Reading;
+			const bool bStand = HasStandingPlace(C, Log, Wanted, Stand, Why);
+			bool bView = false;
+			float ReadDistance = 0.f;
+			if (bStand)
+			{
+				ReadDistance = static_cast<float>(FVector::DotProduct(Stand - Screen, Forward));
+				const FVector Eye = Stand + FVector(0.f, 0.f, C.Pawn.GetEyeAboveFloor());
+				// Against the triangles (complex): the console's simple collision fills its frame's opening.
+				FCollisionQueryParams Params(SCENE_QUERY_STAT(AreaReadingView), true);
+				FHitResult Hit;
+				bView = !World->LineTraceSingleByChannel(Hit, Eye, Screen + Forward * 3.f, ECC_Visibility, Params);
+				if (!bView)
+				{
+					Why = FString::Printf(TEXT("the view from %s to the screen is blocked by %s"), *Where(Eye), *GetNameSafe(Hit.GetActor()));
+				}
+				else if (ReadDistance < 99.f || ReadDistance > 151.f)
+				{
+					bView = false;
+					Why = FString::Printf(TEXT("the reading place is %.0f cm from the screen (100-150)"), ReadDistance);
+				}
+			}
+			const bool bSegmentOk = C.Info->Segments.IsValidIndex(Segment) && C.Info->Segments[Segment].bClosed && C.Info->Segments[Segment].Type != EAreaSegmentType::Gate
+				&& !LogSegments.Contains(Segment);
+			const int32 Parts = FMath::Max(1, Ordered.Num());
+			const int32 Part = RouteLength > 0.f ? FMath::Clamp(FMath::FloorToInt(RouteS / RouteLength * Parts), 0, Parts - 1) : 0;
+			const bool bPartOk = Part == Index;
+			LogSegments.Add(Segment);
+			const bool bTargets = Log->Targets.IsEmpty();
+			if (!bStand || !bView || !bSegmentOk || !bPartOk || !bTargets)
+			{
+				++Failures;
+				FString Text = Name + TEXT(":");
+				if (!bStand || !bView) { Text += FString::Printf(TEXT(" reading place: %s;"), *Why); }
+				if (!bSegmentOk) { Text += FString::Printf(TEXT(" segment %d is not a closed corridor or room of its own;"), Segment); }
+				if (!bPartOk) { Text += FString::Printf(TEXT(" route %.1f m is in part %d of the route, expected part %d;"), RouteS / 100.f, Part, Index); }
+				if (!bTargets) { Text += TEXT(" it powers a device;"); }
+				AddDetail(R, Text);
+			}
+			Lines.Add(FString::Printf(TEXT("%s segment %d at %.1f m, reading place %.0f cm from the screen"), *Name, Segment, RouteS / 100.f, ReadDistance));
+		}
+
+		int32 LastClosed = -1;
+		for (int32 Index = C.Info->Segments.Num() - 1; Index >= 0 && LastClosed < 0; --Index)
+		{
+			LastClosed = C.Info->Segments[Index].bClosed ? Index : -1;
+		}
+		for (const ATwinAITerminal* Twin : Twins)
+		{
+			const FString Name = Label(Twin);
+			float RouteS = 0.f;
+			const int32 Segment = SegmentAt(C, Twin->GetActorLocation(), RouteS);
+			FVector Stand = FVector::ZeroVector;
+			FString Why;
+			const FVector Wanted = Twin->GetActorLocation() + Twin->GetActorForwardVector().GetSafeNormal2D() * GStandDistance + FVector(0.f, 0.f, 50.f);
+			const bool bStand = HasStandingPlace(C, Twin, Wanted, Stand, Why);
+			const bool bSegmentOk = Segment == LastClosed;
+			const bool bTargets = Twin->Targets.IsEmpty();
+			if (!bStand || !bSegmentOk || !bTargets)
+			{
+				++Failures;
+				FString Text = Name + TEXT(":");
+				if (!bStand) { Text += FString::Printf(TEXT(" standing place: %s;"), *Why); }
+				if (!bSegmentOk) { Text += FString::Printf(TEXT(" segment %d is not the last closed segment %d;"), Segment, LastClosed); }
+				if (!bTargets) { Text += TEXT(" it powers a device;"); }
+				AddDetail(R, Text);
+			}
+			Lines.Add(FString::Printf(TEXT("%s segment %d at %.1f m"), *Name, Segment, RouteS / 100.f));
+		}
+
+		// No place within reach of two terminals (any kind): their reach circles do not meet.
+		int32 Overlaps = 0;
+		for (int32 I = 0; I < Terminals.Num(); ++I)
+		{
+			for (int32 J = I + 1; J < Terminals.Num(); ++J)
+			{
+				const float Distance = static_cast<float>(FVector::Dist2D(Terminals[I]->GetActorLocation(), Terminals[J]->GetActorLocation()));
+				if (Distance <= Terminals[I]->GetInteractRadius() + Terminals[J]->GetInteractRadius())
+				{
+					++Overlaps;
+					AddDetail(R, FString::Printf(TEXT("%s and %s are %.0f cm apart: a place is within reach of both"), *Label(Terminals[I]), *Label(Terminals[J]), Distance));
+				}
+			}
+		}
+		Failures += Overlaps;
+
+		// The exit without paying any of them: they power nothing and no door depends on them, so the start-to-exit path
+		// (rule 1) and the gates' energy (rule 3 counts only the doors' terminals) hold whether they are paid or not.
+		bool bExitFree = true;
+		for (const ADoorDevice* Door : Doors)
+		{
+			const APowerTerminal* Terminal = TerminalOf(World, Door);
+			bExitFree &= !Terminal || (!Terminal->IsA<ALogTerminal>() && !Terminal->IsA<ATwinAITerminal>());
+		}
+		double PathLength = 0.0;
+		bExitFree &= C.PathLength(C.Start, C.Exit, PathLength);
+		if (!bExitFree)
+		{
+			++Failures;
+			AddDetail(R, TEXT("the exit cannot be reached without paying a log or twin AI terminal"));
+		}
+
+		R.bPass = Failures == 0;
+		R.Summary = FString::Printf(TEXT("%d log terminals (recipe %d), %d twin AI terminals (recipe %d), reach overlaps %d, exit without paying them %s%s%s"),
+			Logs.Num(), C.Recipe->LogTerminalCount, Twins.Num(), C.Recipe->TwinAITerminalCount, Overlaps, bExitFree ? TEXT("yes") : TEXT("NO"),
+			Lines.Num() > 0 ? TEXT("; ") : TEXT(""), *FString::Join(Lines, TEXT("; ")));
+		return R;
+	}
 }
 
 bool FAreaValidationResult::AllPassed() const
@@ -590,6 +820,7 @@ FAreaValidationResult AreaValidator::Validate(UWorld* World)
 		return Result;
 	}
 	C.Pawn = GetAreaPawnMetrics(World);
+	GStandDistance = FMath::Clamp(C.Generator->TerminalStandDistance, 50.f, 140.f);
 	if (!C.Project(Starts[0]->GetActorLocation(), C.Start) || !C.Project(Exits[0]->GetActorLocation(), C.Exit))
 	{
 		Result.FatalError = FString::Printf(TEXT("the PlayerStart %s or the exit %s is not on the navmesh"),
@@ -614,6 +845,7 @@ FAreaValidationResult AreaValidator::Validate(UWorld* World)
 	Result.Rules.Add(RuleHiding(C));
 	Result.Rules.Add(RuleCurbs(C));
 	Result.Rules.Add(RuleNavmesh(C));
+	Result.Rules.Add(RuleOptionalTerminals(C));
 	Result.Seconds = FPlatformTime::Seconds() - T0;
 	return Result;
 }

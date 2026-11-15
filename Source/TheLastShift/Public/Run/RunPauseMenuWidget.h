@@ -7,6 +7,7 @@
 #include "RunPauseMenuWidget.generated.h"
 
 class UButton;
+class UTextBlock;
 class UVerticalBox;
 
 /**
@@ -29,6 +30,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Run|UI")
 	FText ArchiveLabel = NSLOCTEXT("TheLastShift", "PauseArchive", "Archive");
 
+	/** The menu's title, StdCore's pause menu title (a short UI label: StdCore keeps it only in its widget asset). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Run|UI")
+	FText TitleLabel = NSLOCTEXT("TheLastShift", "PauseTitle", "Paused");
+
+	/** The title (Text_Title, styled by StdCore's theme like StdCore's own). */
+	UTextBlock* GetTitleText() const { return Text_Title; }
+
 protected:
 	virtual void NativeOnInitialized() override;
 	virtual void NativeConstruct() override;
@@ -36,6 +44,9 @@ protected:
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Run|UI")
 	TObjectPtr<UButton> Button_Archive;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Run|UI")
+	TObjectPtr<UTextBlock> Text_Title;
 
 private:
 	void BuildTree();

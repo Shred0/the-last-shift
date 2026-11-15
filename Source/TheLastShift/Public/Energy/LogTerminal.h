@@ -7,6 +7,7 @@
 #include "LogTerminal.generated.h"
 
 class ULogDisplayWidget;
+class UStaticMesh;
 class UWidgetComponent;
 
 /**
@@ -85,9 +86,33 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terminal|Logs", meta = (ClampMin = "100.0", ClampMax = "4000.0"))
 	FVector2D SurfaceDrawSize = FVector2D(1000.0, 720.0);
 
+	/**
+	 * The body: the log console (SM_LogConsole, Assets zone), its back at the actor's origin, standing against a wall and
+	 * facing +X, the surface in its frame's opening. Without it the body is the Brief 8 slab (1 x 1.8 m), also with its
+	 * back at the origin.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Terminal|Logs")
+	TObjectPtr<UStaticMesh> BodyMesh;
+
+	/**
+	 * The space the body takes in front of its wall, from the actor's origin: depth along +X, width, height. The area
+	 * planner keeps it free; the body must fit in it (BeginPlay warns otherwise).
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Terminal|Logs", meta = (ClampMin = "10.0", ClampMax = "300.0", Units = "cm"))
+	FVector Footprint = FVector(50.0, 110.0, 190.0);
+
+	/** Centre of the surface, in world space. */
+	UFUNCTION(BlueprintPure, Category = "Terminal|Logs")
+	FVector GetScreenCentre() const;
+
+	/** Distance of the surface in front of the actor's origin (the wall), along +X. */
+	UFUNCTION(BlueprintPure, Category = "Terminal|Logs", meta = (Units = "cm"))
+	float GetScreenOffset() const;
+
 	virtual void Tick(float DeltaSeconds) override;
 
 protected:
+	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void HandlePaid(APawn* InstigatorPawn) override;
@@ -97,6 +122,8 @@ protected:
 	TObjectPtr<UWidgetComponent> Screen;
 
 private:
+	/** Puts the body (BodyMesh, or the slab without it) and the surface in place, the back at the actor's origin. */
+	void ApplyBodyLayout();
 	void StartEntry();
 	void UpdateDisplays(bool bShowSurface, bool bShowPanel);
 	ULogDisplayWidget* EnsurePanel();

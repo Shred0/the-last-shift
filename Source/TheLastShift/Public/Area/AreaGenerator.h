@@ -13,7 +13,9 @@ enum class EAreaLoadStep : uint8;
 class ADoorDevice;
 class AEntity;
 class ALightGroupDevice;
+class ALogTerminal;
 class ANavMeshBoundsVolume;
+class ATwinAITerminal;
 class APawn;
 class APowerTerminal;
 class AResidue;
@@ -291,6 +293,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "50.0", ClampMax = "500.0", Units = "cm"))
 	float TerminalSideOffset = 120.f;
 
+	/** A terminal's standing place is this far in front of it (gate and light-group terminals, the twin AI's terminal). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "50.0", ClampMax = "140.0", Units = "cm"))
+	float TerminalStandDistance = 90.f;
+
+	/**
+	 * Log terminals: the reading place is this far in front of the screen (1 to 1.5 m), free, with nothing between it and
+	 * the screen. The planner keeps it free and the validator checks it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "100.0", ClampMax = "150.0", Units = "cm"))
+	float LogReadingDistance = 110.f;
+
+	/** Terminals against a wall (log, twin AI) look for their wall up to this far from the route centreline. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "200.0", ClampMax = "5000.0", Units = "cm"))
+	float WallTerminalSearchDistance = 3000.f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "1", ClampMax = "12"))
 	int32 LightsPerGroup = 3;
 
@@ -324,6 +341,14 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
 	TSubclassOf<ALightGroupDevice> LightGroupClass;
+
+	/** The recipe's log terminals (FAreaRecipe::LogTerminalCount). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
+	TSubclassOf<ALogTerminal> LogTerminalClass;
+
+	/** The recipe's twin AI terminal (FAreaRecipe::TwinAITerminalCount). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
+	TSubclassOf<ATwinAITerminal> TwinAITerminalClass;
 
 	// --- Validation (tls.AreaValidate) ---
 
