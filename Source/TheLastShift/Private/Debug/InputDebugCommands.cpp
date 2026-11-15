@@ -32,6 +32,7 @@
 #include "Components/TextBlock.h"
 #include "Run/RunActListWidget.h"
 #include "Run/RunSubsystem.h"
+#include "Run/RunTextSceneWidget.h"
 #include "UI/StdChoiceListWidget.h"
 #include "UI/StdMainMenuWidget.h"
 #include "UI/StdPauseMenuWidget.h"
@@ -287,7 +288,12 @@ namespace TimeStateDebug
 			Prefix, *FString::Join(R.MappingContexts, TEXT(", ")), R.bPawnContextApplied ? 1 : 0, *FString::Join(R.PawnActionKeys, TEXT(", ")));
 	}
 
-	bool ClickMainMenuButton(UWorld* World, FName Name)
+	UStdScreenWidget* TopScreen(UWorld* World)
+	{
+		return FindTopScreen(World ? World->GetFirstPlayerController() : nullptr);
+	}
+
+	bool ClickMainMenuButton(UWorld* World, FName Name, bool bSkipPrologue)
 	{
 		const AStdMenuPlayerController* MenuPC = Cast<AStdMenuPlayerController>(World ? World->GetFirstPlayerController() : nullptr);
 		UStdMainMenuWidget* Menu = MenuPC ? MenuPC->GetMainMenu() : nullptr;
@@ -298,6 +304,14 @@ namespace TimeStateDebug
 			return false;
 		}
 		Button->OnClicked.Broadcast();
+		if (bSkipPrologue && Name == TEXT("Button_NewGame"))
+		{
+			if (URunTextSceneWidget* Prologue = Cast<URunTextSceneWidget>(TopScreen(World)); Prologue && Prologue->GetKind() == ERunSceneKind::Prologue)
+			{
+				UE_LOG(LogTheLastShift, Display, TEXT("New game clicked: the prologue (%d lines) is skipped at once, as back would."), Prologue->GetEntryCount());
+				Prologue->Skip();
+			}
+		}
 		return true;
 	}
 

@@ -45,7 +45,8 @@ struct THELASTSHIFT_API FTravelStepRecord
  * level transition (black screen with the destination act's AreaEntry line as its label, built by
  * UHomeAIComponent::BuildTravelLabel, held until the next area is ready and for at least TravelHoldSeconds and the
  * line's reading time; no label to the main menu). The act is the current map's position in UTheLastShiftSettings::AreaMaps; this
- * subsystem reads the settings and copies nothing. After the last area, travel goes back to the main menu. A run
+ * subsystem reads the settings and copies nothing. After the last area, travel goes to the main menu, which opens the
+ * ending there (URunSceneSubsystem); no other travel opens it. A run
  * starts in the first entry of AreaMaps (StartNewRun), never in StdCore's Gameplay Map.
  *
  * Sole owner of the run snapshots: on every area entry, before the player can act, the run state (battery and home
@@ -84,11 +85,18 @@ public:
 	static int32 GetActIndexOf(const UWorld* World);
 
 	/**
-	 * Travels to the map after the current one (outside the list: to the first area); after the last area, to the main
-	 * menu. Refused (false) while time is Stopped or while a transition is already running.
+	 * Travels to the map after the current one (outside the list: to the first area); after the last area, to the ending
+	 * (TravelToEnding). Refused (false) while time is Stopped or while a transition is already running.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Run")
 	bool TravelToNextArea();
+
+	/**
+	 * Travels to the main menu, which opens the ending on arrival with the run's state as it is (what the last area's
+	 * exit does). The save is not touched. Refused while time is Stopped or while a transition is already running.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Run")
+	bool TravelToEnding();
 
 	/** Travels to the area of Act (1-4). Refused while time is Stopped or while a transition is already running. */
 	UFUNCTION(BlueprintCallable, Category = "Run")

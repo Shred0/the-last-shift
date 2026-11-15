@@ -11,6 +11,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Run/HomeAIComponent.h"
+#include "Run/RunSceneSubsystem.h"
 #include "Run/RunActListWidget.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
@@ -72,7 +73,7 @@ bool URunSubsystem::TravelToNextArea()
 	const int32 Act = GetActIndex();
 	if (Act >= Settings->AreaMaps.Num() && Act > 0)
 	{
-		return TravelTo(TSoftObjectPtr<UWorld>(), true, FString::Printf(TEXT("act %d is the last: main menu"), Act));
+		return TravelToEnding();
 	}
 	const int32 Next = Act + 1;
 	if (!Settings->AreaMaps.IsValidIndex(Next - 1))
@@ -92,6 +93,20 @@ bool URunSubsystem::TravelToArea(int32 Act)
 		return false;
 	}
 	return TravelTo(Settings->AreaMaps[Act - 1], false, FString::Printf(TEXT("act %d -> act %d"), GetActIndex(), Act));
+}
+
+bool URunSubsystem::TravelToEnding()
+{
+	const int32 Act = GetActIndex();
+	if (!TravelTo(TSoftObjectPtr<UWorld>(), true, FString::Printf(TEXT("act %d: the ending, in the main menu"), Act)))
+	{
+		return false;
+	}
+	if (URunSceneSubsystem* Scenes = GetGameInstance()->GetSubsystem<URunSceneSubsystem>())
+	{
+		Scenes->SetEndingPending(true);
+	}
+	return true;
 }
 
 bool URunSubsystem::TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FString& What)
@@ -137,6 +152,11 @@ bool URunSubsystem::TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu
 	}
 	if (bStarted)
 	{
+		// Only the travel out of the last area opens the ending (TravelToEnding sets it again after this).
+		if (URunSceneSubsystem* Scenes = GameInstance->GetSubsystem<URunSceneSubsystem>())
+		{
+			Scenes->SetEndingPending(false);
+		}
 		TravelRequestTime = FPlatformTime::Seconds();
 		LastTravelCovered = LastTravelReady = LastTravelFadeIn = -1.f;
 		LastTravelSteps.Reset();

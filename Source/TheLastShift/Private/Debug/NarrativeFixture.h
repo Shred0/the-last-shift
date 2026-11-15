@@ -33,11 +33,24 @@ namespace NarrativeFixture
 	/** A new transient DT_TwinAI-shaped table: three parts of two rows each, T_<part>_<order>, neutral texts of about 70 characters. */
 	UDataTable* BuildTwinAI();
 
+	/**
+	 * A new transient DT_Scenes-shaped table. With bPrologue: Prologue_1..6 (Paradise, Paradise, then HomeAI; line 3 is
+	 * three sentences long, line 4 carries the cue FixtureCue). Always Ending_1 (HomeAI, with articles and long words so
+	 * that every level differs).
+	 */
+	UDataTable* BuildScenes(bool bPrologue = true);
+
+	/** The text of the fixture's Ending_1 row, in full. */
+	FString GetEndingMessageText();
+
+	/** Replaces the installed scenes fixture with one with or without its Prologue rows. No-op when not installed. */
+	void SetPrologueRows(bool bPrologue);
+
 	/** Replaces the installed logs fixture with one of LogCount rows (the settings point at it). No-op when not installed. */
 	void SetLogCount(int32 LogCount);
 
 	/**
-	 * Points the project settings' AIMessagesTable, EndingsTable, LogsTable and TwinAITable at fixture tables (kept alive
+	 * Points the project settings' AIMessagesTable, EndingsTable, LogsTable, TwinAITable and ScenesTable at fixture tables (kept alive
 	 * until Restore) and gives every text channel already in World the fixture messages and twin rows. Everything that
 	 * loads a narrative table after this (the home AI of a new map, the travel label, the loss text, the terminals, the
 	 * archive) reads the fixtures. No-op when installed.

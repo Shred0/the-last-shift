@@ -88,15 +88,12 @@ int32 UTextChannelComponent::GetTranslatedCells() const
 
 ETextDegradation UTextChannelComponent::GetLevelForBattery(double Fraction) const
 {
-	return UTextDegradationLibrary::LevelFromBattery(Fraction, FMath::Clamp(NoArticlesBelow, 0.f, 1.f), FMath::Clamp(AbbreviatedBelow, 0.f, 1.f),
-		FMath::Clamp(ScatteredBelow, 0.f, 1.f), FMath::Clamp(SilentBelow, 0.f, 1.f));
+	return UTheLastShiftSettings::Get()->GetTextLevel(Fraction);
 }
 
 float UTextChannelComponent::GetCharsPerSecond(double Fraction) const
 {
-	const float Empty = FMath::Clamp(CharsPerSecondEmpty, 1.f, 500.f);
-	const float Full = FMath::Clamp(CharsPerSecondFull, 1.f, 500.f);
-	return FMath::Lerp(Empty, Full, static_cast<float>(FMath::Clamp(Fraction, 0.0, 1.0)));
+	return UTheLastShiftSettings::Get()->GetTextCharsPerSecond(Fraction);
 }
 
 float UTextChannelComponent::GetHoldSecondsFor(int32 CharCount) const

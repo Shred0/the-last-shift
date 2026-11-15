@@ -13,7 +13,9 @@ class UButton;
  * "Continue" and "Select act" when a saved run exists, "New game" always, then StdCore's own entries (Settings,
  * Credits, Quit); StdCore's Play entry is not built. The widget tree is built in C++ in the layout of StdCore's menu
  * and with the names its theme styles; StdCore's base class binds its own entries. Continue / Select act follow
- * URunSubsystem::OnSnapshotsChanged.
+ * URunSubsystem::OnSnapshotsChanged. "New game" opens the prologue over the menu (URunSceneSubsystem), which starts the
+ * new run when it ends; without a prologue line it starts the run at once. On its first tick after the run's travel out
+ * of the last area, the menu opens the ending over itself.
  */
 UCLASS()
 class THELASTSHIFT_API URunMainMenuWidget : public UStdMainMenuWidget
@@ -28,6 +30,7 @@ protected:
 	virtual void NativeOnInitialized() override;
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 	virtual UWidget* GetDefaultFocusWidget() const override;
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Run|UI")

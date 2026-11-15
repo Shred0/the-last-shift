@@ -25,6 +25,9 @@
 #include "Tests/AutomationEditorCommon.h"
 #include "UI/StdChoiceListWidget.h"
 #include "UI/StdMainMenuWidget.h"
+#include "UI/StdTextSceneWidget.h"
+#include "Components/Border.h"
+#include "StdTextSceneTestListener.h"
 
 namespace StdPlayTests
 {
@@ -670,6 +673,119 @@ bool FStdChoiceListBodyTest::RunTest(const FString& Parameters)
 
 		Screen->SetBody(FText::GetEmpty());
 		TestEqual(TEXT("An empty body is collapsed"), Body->GetVisibility(), ESlateVisibility::Collapsed);
+	});
+
+	ADD_LATENT_AUTOMATION_COMMAND(FEndPlayMapCommand());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdTextScenePlayTest, "StdCore.UI.TextScene", StdPlayTests::Flags)
+
+bool FStdTextScenePlayTest::RunTest(const FString& Parameters)
+{
+	using namespace StdPlayTests;
+	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
+	const FString MainMenuName = GetMapShortName(Settings->MainMenuMap);
+	StartPlayOnMap(this, Settings->MainMenuMap, MainMenuName);
+
+	Step([this]()
+	{
+		APlayerController* PlayerController = GetPlayerController();
+		UStdTextSceneWidget* Screen = PlayerController ? CreateWidget<UStdTextSceneWidget>(PlayerController, UStdTextSceneWidget::StaticClass()) : nullptr;
+		if (!TestNotNull(TEXT("A text scene is created for the player"), Screen) || !Screen->WidgetTree)
+		{
+			return;
+		}
+		TestNotNull(TEXT("Has Border_Background"), Screen->WidgetTree->FindWidget(TEXT("Border_Background")));
+		TestNotNull(TEXT("Has SizeBox_Line"), Screen->WidgetTree->FindWidget(TEXT("SizeBox_Line")));
+		UTextBlock* Line = Cast<UTextBlock>(Screen->WidgetTree->FindWidget(TEXT("Text_Line")));
+		if (!TestNotNull(TEXT("Has Text_Line"), Line))
+		{
+			return;
+		}
+		UStdTextSceneTestListener* Listener = NewObject<UStdTextSceneTestListener>();
+		Listener->AddToRoot();
+		Screen->OnEntryStarted.AddDynamic(Listener, &UStdTextSceneTestListener::HandleEntryStarted);
+		Screen->OnSceneFinished.AddDynamic(Listener, &UStdTextSceneTestListener::HandleFinished);
+		Screen->ShowAsRoot(50);
+
+		const FString Short = TEXT("A short first entry of forty characters.");
+		const FString Long = TEXT("A second entry that is much longer than one line of the column. It has three sentences so that it has to wrap. ")
+			TEXT("The third sentence makes sure that the block holds more than two lines at the default width of the column.");
+		TArray<FStdTextSceneEntry> Entries;
+		Entries.Add({ FText::FromString(Short), FLinearColor(0.9f, 0.8f, 0.5f, 1.f), FLinearColor::Black });
+		Entries.Add({ FText::FromString(Long), FLinearColor(0.1f, 0.1f, 0.1f, 1.f), FLinearColor::White });
+		Entries.Add({ FText::FromString(TEXT("The last entry.")), FLinearColor(0.95f, 0.95f, 0.95f, 1.f), FLinearColor::Black });
+		Screen->CharsPerSecond = 40.f;
+		Screen->SetEntries(Entries);
+		TestEqual(TEXT("Nothing starts before StartScene"), Listener->Started.Num(), 0);
+		Screen->StartScene();
+		TestEqual(TEXT("StartScene shows entry 0"), Screen->GetCurrentIndex(), 0);
+		TestTrue(TEXT("Entry 0 is reported as it starts"), Listener->Started.Num() == 1 && Listener->Started[0] == 0);
+		TestTrue(TEXT("Entry 0 starts with nothing typed"), Screen->GetVisibleText().IsEmpty() && Screen->IsTyping());
+		TestTrue(TEXT("Entry 0 takes its own text colour"), Screen->GetShownTextColor().Equals(Entries[0].TextColor));
+		TestTrue(TEXT("Entry 0 takes its own background colour"), Screen->GetShownBackgroundColor().Equals(Entries[0].BackgroundColor));
+
+		Screen->AdvanceSeconds(0.25f);
+		TestEqual(TEXT("At 40 characters per second, 0.25 s types 10 characters"), Screen->GetVisibleText().Len(), 10);
+		Screen->AdvanceSeconds(0.25f);
+		TestEqual(TEXT("0.5 s types 20 characters"), Screen->GetVisibleText().Len(), 20);
+		TestEqual(TEXT("The visible text is the start of the entry"), Screen->GetVisibleText(), Short.Left(20));
+		TestEqual(TEXT("Text_Line shows the visible text"), Line->GetText().ToString(), Short.Left(20));
+
+		Screen->Confirm();
+		TestEqual(TEXT("Confirm on an entry being typed shows it whole"), Screen->GetVisibleText(), Short);
+		TestEqual(TEXT("... and stays on it"), Screen->GetCurrentIndex(), 0);
+		TestFalse(TEXT("... which is no longer typing"), Screen->IsTyping());
+		TestEqual(TEXT("... and starts no entry"), Listener->Started.Num(), 1);
+
+		Screen->Confirm();
+		TestEqual(TEXT("Confirm on a whole entry shows the next"), Screen->GetCurrentIndex(), 1);
+		TestTrue(TEXT("Entry 1 is reported as it starts"), Listener->Started.Num() == 2 && Listener->Started[1] == 1);
+		TestTrue(TEXT("Entry 1 takes its own text colour"), Screen->GetShownTextColor().Equals(Entries[1].TextColor));
+		TestTrue(TEXT("Entry 1 takes its own background colour (white)"), Screen->GetShownBackgroundColor().Equals(FLinearColor::White));
+		AddInfo(FString::Printf(TEXT("Entry 1: %d lines, block %.0f x %.0f in a column of %.0f."), Screen->GetLineCount(), Screen->GetBlockSize().X,
+			Screen->GetBlockSize().Y, Screen->ColumnWidth));
+		TestTrue(TEXT("A long entry wraps onto several lines"), Screen->GetLineCount() >= 2);
+		TestTrue(TEXT("... no wider than the column"), Screen->GetBlockSize().X <= Screen->ColumnWidth + 0.5f);
+		TestEqual(TEXT("... with every word kept, the breaks in place of spaces"), Screen->GetLaidOutText().Replace(TEXT("\n"), TEXT(" ")), Long);
+		const FString LaidOut = Screen->GetLaidOutText();
+		Screen->AdvanceSeconds(1.f);
+		TestEqual(TEXT("Typing fills the laid-out lines: the visible text is their start"), Screen->GetVisibleText(), LaidOut.Left(40));
+
+		Screen->Confirm();
+		Screen->Confirm();
+		TestEqual(TEXT("Entry 2 after two confirms"), Screen->GetCurrentIndex(), 2);
+		Screen->Confirm();
+		Screen->Confirm();
+		TestTrue(TEXT("Confirm on the last whole entry finishes the scene, not skipped"), Screen->IsFinished() && !Screen->WasSkipped());
+		TestTrue(TEXT("The end is reported once, not skipped"), Listener->Finished.Num() == 1 && !Listener->Finished[0]);
+		TestTrue(TEXT("A finished scene shows no text"), Line->GetText().IsEmpty());
+		TestTrue(TEXT("A finished scene stays on screen until its owner closes it"), Screen->IsInViewport());
+		Screen->Confirm();
+		TestEqual(TEXT("A finished scene ignores confirm"), Listener->Started.Num(), 3);
+
+		Screen->SetEntries(Entries);
+		Screen->StartScene();
+		Screen->Confirm();
+		Screen->Confirm();
+		TestTrue(TEXT("Back is handled"), Screen->HandleBackAction());
+		TestTrue(TEXT("Back on entry 1 ends the scene as skipped"), Screen->IsFinished() && Screen->WasSkipped());
+		TestTrue(TEXT("The skip is reported"), Listener->Finished.Num() == 2 && Listener->Finished[1]);
+		TestTrue(TEXT("A skipped scene stays on screen until its owner closes it"), Screen->IsInViewport());
+		TestTrue(TEXT("Each entry of the second play is reported (0, 1)"), Listener->Started.Num() == 5 && Listener->Started[3] == 0 && Listener->Started[4] == 1);
+
+		Screen->SetEntries({});
+		Screen->StartScene();
+		TestTrue(TEXT("A scene with no entry finishes at once, not skipped"), Screen->IsFinished() && !Screen->WasSkipped() && Listener->Finished.Num() == 3);
+
+		TestTrue(TEXT("Enter, Space and the gamepad's bottom face button confirm"), StdTextScene::IsConfirmKey(EKeys::Enter) && StdTextScene::IsConfirmKey(EKeys::SpaceBar)
+			&& StdTextScene::IsConfirmKey(EKeys::Gamepad_FaceButton_Bottom));
+		TestTrue(TEXT("Escape and the gamepad's right face button are back keys, not confirm keys"), UStdScreenWidget::IsBackKey(EKeys::Escape)
+			&& UStdScreenWidget::IsBackKey(EKeys::Gamepad_FaceButton_Right) && !StdTextScene::IsConfirmKey(EKeys::Escape));
+
+		Screen->CloseScreen();
+		Listener->RemoveFromRoot();
 	});
 
 	ADD_LATENT_AUTOMATION_COMMAND(FEndPlayMapCommand());

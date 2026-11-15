@@ -2,8 +2,8 @@
 
 // Debug console commands for the run across maps: tls.TravelTest (state across a travel, the player held until the
 // next area is ready, black-screen timings), tls.ExitTest (the exit volume in Normal and in Stopped time),
-// tls.RunChainTest (the whole run, map after map, to the main menu) and tls.Settings.Reload (recipes, seeds, jump tuning and scan colours re-read
-// from Config/DefaultGame.ini while tuning). They drive a core ticker that survives the map change. Compiled out of Shipping.
+// tls.RunChainTest (the whole run, map after map, to the ending in the main menu) and tls.Settings.Reload (recipes, seeds, jump tuning, scan
+// colours, text degradation and the scenes' settings re-read from Config/DefaultGame.ini while tuning). They drive a core ticker that survives the map change. Compiled out of Shipping.
 
 #include "Area/AreaExit.h"
 #include "Area/AreaGenerator.h"
@@ -16,6 +16,7 @@
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
 #include "Flow/StdFlowSubsystem.h"
+#include "Framework/StdMenuPlayerController.h"
 #include "Framework/StdPlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
@@ -24,9 +25,12 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Run/RunEndingWidget.h"
 #include "Run/RunSubsystem.h"
+#include "Run/RunTextSceneWidget.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Settings/StdProjectSettings.h"
+#include "UI/StdMainMenuWidget.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
 
@@ -300,6 +304,8 @@ namespace RunDebug
 		double PhaseReal = 0.0;
 		/** Arrivals in the main menu that press Play again instead of ending the test. */
 		int32 ReplaysLeft = 0;
+		/** The pending travel leaves the last area: the main menu must open the ending (Brief 9). */
+		bool bFromLastArea = false;
 	};
 	static FChain GChain;
 
@@ -354,6 +360,30 @@ namespace RunDebug
 			ChainCheck(GChain.ExpectedAct == 0 && Act == 0 && Map == Menu,
 				FString::Printf(TEXT("arrival %d: %s, act %d (expected the main menu %s)"), GChain.Arrivals, *Map, Act, *Menu));
 			CheckInput(World, false, FString::Printf(TEXT("arrival %d (%s)"), GChain.Arrivals, *Map));
+			// Brief 9: after the last area the main menu opens the ending over itself; the test chooses the first entry and
+			// skips its text, which brings the main menu back.
+			if (GChain.bFromLastArea)
+			{
+				URunEndingWidget* Ending = Cast<URunEndingWidget>(TimeStateDebug::TopScreen(World));
+				ChainCheck(Ending != nullptr, FString::Printf(TEXT("arrival %d: the ending is open over the main menu (%s; entries: %s)"), GChain.Arrivals,
+					*GetNameSafe(TimeStateDebug::TopScreen(World)), *TimeStateDebug::DescribeChoiceList(World)));
+				if (Ending)
+				{
+					const bool bChosen = TimeStateDebug::ClickChoiceEntry(World, 0);
+					URunTextSceneWidget* Text = Cast<URunTextSceneWidget>(TimeStateDebug::TopScreen(World));
+					ChainCheck(bChosen && Text && Text->GetKind() == ERunSceneKind::EndingText,
+						FString::Printf(TEXT("ending: entry 0 (%s) opens its text"), *Ending->GetEndingOfEntry(0).ToString()));
+					if (Text)
+					{
+						Text->Skip();
+					}
+					const AStdMenuPlayerController* MenuPC = Cast<AStdMenuPlayerController>(World->GetFirstPlayerController());
+					UStdScreenWidget* MainMenu = MenuPC ? MenuPC->GetMainMenu() : nullptr;
+					ChainCheck(MainMenu && TimeStateDebug::TopScreen(World) == MainMenu && MainMenu->IsVisible(), TEXT("ending: after its text, the main menu"));
+					CheckInput(World, false, TEXT("main menu after the ending"));
+				}
+				GChain.bFromLastArea = false;
+			}
 			return;
 		}
 		const AEntity* Entity = nullptr;
@@ -475,6 +505,7 @@ namespace RunDebug
 		URunSubsystem* Run = URunSubsystem::Get(World);
 		const int32 Act = Run ? Run->GetActIndex() : -1;
 		GChain.ExpectedAct = Act >= UTheLastShiftSettings::Get()->AreaMaps.Num() ? 0 : Act + 1;
+		GChain.bFromLastArea = GChain.ExpectedAct == 0;
 		--GChain.TravelsLeft;
 		GChain.StartReal = Now;
 		UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: tls.Travel.Next from act %d (expecting %s)."), Act,
@@ -585,6 +616,28 @@ namespace RunDebug
 		{
 			Settings->ScanColors = Colors;
 		}
+		// Brief 9: the text degradation and the scenes' settings.
+		Values.Reset();
+		Section->MultiFind(TEXT("TextDegradation"), Values, true);
+		FTextDegradationTuning Degradation;
+		const bool bDegradation = Values.Num() > 0
+			&& FTextDegradationTuning::StaticStruct()->ImportText(*Values.Last(), &Degradation, nullptr, PPF_None, GLog, TEXT("FTextDegradationTuning")) != nullptr;
+		if (bDegradation)
+		{
+			Settings->TextDegradation = Degradation;
+		}
+		Values.Reset();
+		Section->MultiFind(TEXT("SceneCharsPerSecond"), Values, true);
+		if (Values.Num() > 0)
+		{
+			Settings->SceneCharsPerSecond = FCString::Atof(*Values.Last());
+		}
+		Values.Reset();
+		Section->MultiFind(TEXT("OpenEndingTwinParts"), Values, true);
+		if (Values.Num() > 0)
+		{
+			Settings->OpenEndingTwinParts = FCString::Atoi(*Values.Last());
+		}
 		FString Summary;
 		for (int32 I = 0; I < Recipes.Num(); ++I)
 		{
@@ -599,13 +652,17 @@ namespace RunDebug
 		const FScanColors& C = Settings->ScanColors;
 		Summary += FString::Printf(TEXT("; scan colours %s: scan %s, ready cue %s, residue %s, entity %s, interactable %s"), bColors ? TEXT("reloaded") : TEXT("kept"),
 			*C.Scan.ToString(), *C.ReadyCue.ToString(), *C.Residue.ToString(), *C.Entity.ToString(), *C.Interactable.ToString());
+		const FTextDegradationTuning& T = Settings->TextDegradation;
+		Summary += FString::Printf(TEXT("; text degradation %s: below %.3f / %.3f / %.3f / %.3f, %.1f to %.1f chars/s; scenes %.1f chars/s; Open the structure with %d twin parts (setting %d)"),
+			bDegradation ? TEXT("reloaded") : TEXT("kept"), T.NoArticlesBelow, T.AbbreviatedBelow, T.ScatteredBelow, T.SilentBelow, T.CharsPerSecondEmpty, T.CharsPerSecondFull,
+			Settings->GetSceneCharsPerSecond(), Settings->GetOpenEndingTwinParts(), Settings->OpenEndingTwinParts);
 		UE_LOG(LogTheLastShift, Display, TEXT("tls.Settings.Reload: %s; test recipe %s (from %s, in memory only)."), *Summary, bTest ? TEXT("reloaded") : TEXT("kept"), *Path);
 	}
 }
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 	TEXT("tls.RunChainTest"),
-	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0] [PauseCheck=1] [Replays=0]: FromMenu=1 first clicks the main menu's New game once no transition is running (this clears the saved run). On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, and checks the input state (game input in an area, menu input in the menu); with PauseCheck=1 it then opens and closes the pause menu, checking the input each way; then calls tls.Travel.Next until Travels are done; a travel after the last area must reach the main menu, where Replays>0 clicks New game again that many times. Quit=1 exits the game at the end (packaged builds)."),
+	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0] [PauseCheck=1] [Replays=0]: FromMenu=1 first clicks the main menu's New game once no transition is running (this clears the saved run). On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, and checks the input state (game input in an area, menu input in the menu); with PauseCheck=1 it then opens and closes the pause menu, checking the input each way; then calls tls.Travel.Next until Travels are done; a travel after the last area must reach the main menu and open the ending there (the test chooses its first entry and skips its text, then checks the main menu and its input), where Replays>0 clicks New game again that many times. New game skips the prologue at once. Quit=1 exits the game at the end (packaged builds)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);

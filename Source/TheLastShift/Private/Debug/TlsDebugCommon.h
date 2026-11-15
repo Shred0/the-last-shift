@@ -12,6 +12,7 @@
 
 class UInputAction;
 class UScanDirectorComponent;
+class UStdScreenWidget;
 class UWorld;
 struct FKey;
 
@@ -108,11 +109,20 @@ namespace TimeStateDebug
 	/** One line of input state with a verdict: "game" (IsGameReady), "menu" (IsMenuReady) or "none". */
 	void LogInputReport(UWorld* World, const TCHAR* Prefix);
 
-	/** Clicks the main menu's New game (the game's menu has no Play), as a real click would. False when no main menu is shown. */
+	/**
+	 * Clicks the main menu's New game (the game's menu has no Play), as a real click would, and skips the prologue it opens
+	 * (as back would): the travel to area 1 starts at once, as before the prologue existed. False when no main menu is shown.
+	 */
 	bool ClickMainMenuPlay(UWorld* World);
 
-	/** Clicks the main menu button named Name (Button_Continue, Button_SelectAct, Button_NewGame, ...). False when absent or hidden. */
-	bool ClickMainMenuButton(UWorld* World, FName Name);
+	/**
+	 * Clicks the main menu button named Name (Button_Continue, Button_SelectAct, Button_NewGame, ...). False when absent or
+	 * hidden. With bSkipPrologue a prologue opened by New game is skipped at once (tests written before the prologue).
+	 */
+	bool ClickMainMenuButton(UWorld* World, FName Name, bool bSkipPrologue = true);
+
+	/** The topmost StdCore screen of the first local player: the loss screen, the main menu or the pause menu, or one opened on them. */
+	UStdScreenWidget* TopScreen(UWorld* World);
 
 	/** Clicks entry Index (INDEX_NONE = back) of the topmost choice list (the loss screen, or Select act over the main menu). */
 	bool ClickChoiceEntry(UWorld* World, int32 Index);

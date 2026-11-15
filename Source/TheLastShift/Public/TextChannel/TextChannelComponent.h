@@ -44,8 +44,10 @@ enum class ETextVoice : uint8
  * (SetSuspended): while suspended nothing is typed or shown and the current message's timers stand still; when the
  * suspension ends the current message restarts from its first character. The queue is kept.
  *
- * A message is typed at a speed between CharsPerSecondEmpty and CharsPerSecondFull (by the battery), stays fully typed
- * for HoldSeconds + HoldSecondsPerChar per character, finishes, and the next one starts GapSeconds later.
+ * The battery thresholds of the levels and the typing speeds are not the channel's: their one owner is
+ * UTheLastShiftSettings::TextDegradation (Config/DefaultGame.ini), read when a message starts. A message is typed at the
+ * settings' speed for its battery, stays fully typed for HoldSeconds + HoldSecondsPerChar per character, finishes, and
+ * the next one starts GapSeconds later.
  *
  * Messages come from the table given with SetMessageTable (FAIMessageRow rows). Everything runs on unscaled real
  * time: the owner's tick gives real seconds, and AdvanceSeconds can be called directly (tests).
@@ -61,33 +63,7 @@ public:
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
-	// --- Levels ---
-
-	/** Below this battery fraction a message loses its articles. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|Levels", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float NoArticlesBelow = 0.70f;
-
-	/** Below this battery fraction a message is lowercase and abbreviated. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|Levels", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float AbbreviatedBelow = 0.40f;
-
-	/** Below this battery fraction only fragments of a message are left. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|Levels", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float ScatteredBelow = 0.10f;
-
-	/** Below this battery fraction a message is discarded. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|Levels", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float SilentBelow = 0.03f;
-
 	// --- Timing ---
-
-	/** Typing speed at a full battery. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|Timing", meta = (ClampMin = "1.0", ClampMax = "500.0"))
-	float CharsPerSecondFull = 40.f;
-
-	/** Typing speed at an empty battery; in between it follows the battery fraction linearly. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|Timing", meta = (ClampMin = "1.0", ClampMax = "500.0"))
-	float CharsPerSecondEmpty = 8.f;
 
 	/** A fully typed message stays this long, plus HoldSecondsPerChar per character, before it finishes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|Timing", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
@@ -196,11 +172,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	FString GetCurrentText() const { return bHasCurrent ? Typewriter.GetText() : FString(); }
 
-	/** Level of a battery fraction with this channel's thresholds. */
+	/** Level of a battery fraction, with the thresholds of the project settings (UTheLastShiftSettings::GetTextLevel). */
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	ETextDegradation GetLevelForBattery(double Fraction) const;
 
-	/** Typing speed at a battery fraction. */
+	/** Typing speed at a battery fraction, from the project settings (UTheLastShiftSettings::GetTextCharsPerSecond). */
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	float GetCharsPerSecond(double Fraction) const;
 

@@ -16,6 +16,7 @@
 #include "Internationalization/Regex.h"
 #include "Misc/Paths.h"
 #include "Narrative/NarrativeRows.h"
+#include "Run/TheLastShiftSettings.h"
 #include "TextChannel/TextChannelComponent.h"
 #include "TextChannel/TextDegradation.h"
 #include "TextChannel/TextTokens.h"
@@ -149,10 +150,17 @@ bool FTextChannelLevelTest::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("Battery %.2f is %s"), Case.Battery, LexToString(Case.Expected)),
 			Channel->GetLevelForBattery(Case.Battery), Case.Expected);
 	}
-	Channel->NoArticlesBelow = 0.80f;
-	TestEqual(TEXT("NoArticlesBelow 0.80: battery 0.75 is NoArticles"), Channel->GetLevelForBattery(0.75), ETextDegradation::NoArticles);
-	Channel->SilentBelow = 0.05f;
-	TestEqual(TEXT("SilentBelow 0.05: battery 0.03 is Silent"), Channel->GetLevelForBattery(0.03), ETextDegradation::Silent);
+	// The thresholds are the project settings' (one owner): a change there moves the channel's level, and is put back.
+	FTextDegradationTuning& Tuning = GetMutableDefault<UTheLastShiftSettings>()->TextDegradation;
+	const FTextDegradationTuning Saved = Tuning;
+	Tuning.NoArticlesBelow = 0.80f;
+	TestEqual(TEXT("NoArticlesBelow 0.80 in the settings: battery 0.75 is NoArticles"), Channel->GetLevelForBattery(0.75), ETextDegradation::NoArticles);
+	Tuning.SilentBelow = 0.05f;
+	TestEqual(TEXT("SilentBelow 0.05 in the settings: battery 0.03 is Silent"), Channel->GetLevelForBattery(0.03), ETextDegradation::Silent);
+	Tuning.CharsPerSecondFull = 60.f;
+	TestEqual(TEXT("CharsPerSecondFull 60 in the settings: the channel types at 60 at battery 1"), Channel->GetCharsPerSecond(1.0), 60.f);
+	Tuning = Saved;
+	TestEqual(TEXT("Settings put back: battery 0.75 is Full again"), Channel->GetLevelForBattery(0.75), ETextDegradation::Full);
 	return true;
 }
 
@@ -655,6 +663,68 @@ namespace NarrativeCsv
 		return Problems;
 	}
 
+	/**
+	 * Every problem of DT_Scenes.csv (empty: the structure is right): it parses, rows <Scene>_<order> matching their Scene
+	 * and Order columns, (Scene, Order) unique, every Voice one of Paradise, HomeAI and Engineer, no line break, no empty text.
+	 */
+	static TArray<FString> CheckScenes(const FString& Csv, const TCHAR* File = TEXT("DT_Scenes.csv"))
+	{
+		TArray<FString> Problems;
+		UScriptStruct* Struct = FSceneRow::StaticStruct();
+		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
+		if (Table->GetRowMap().IsEmpty())
+		{
+			Problems.Add(FString::Printf(TEXT("%s has no rows"), File));
+		}
+		// The Voice cell as written: an unknown name would import as the enum's first value without a word.
+		TArray<FString> Lines;
+		Csv.ParseIntoArrayLines(Lines, true);
+		const UEnum* VoiceEnum = StaticEnum<ESceneVoice>();
+		for (int32 I = 1; I < Lines.Num(); ++I)
+		{
+			TArray<FString> Cells;
+			Lines[I].ParseIntoArray(Cells, TEXT(","), false);
+			if (Cells.Num() < 6 || Cells[0].TrimStartAndEnd().IsEmpty())
+			{
+				continue;
+			}
+			const FString Voice = Cells[3].TrimStartAndEnd().TrimQuotes();
+			if (VoiceEnum->GetValueByNameString(Voice) == INDEX_NONE)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: voice '%s' is not Paradise, HomeAI or Engineer"), File, *Cells[0], *Voice));
+			}
+		}
+		const FRegexPattern NamePattern(TEXT("^([A-Za-z]+)_([0-9]+)$"));
+		TSet<FString> Keys;
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FString Name = Pair.Key.ToString();
+			const FSceneRow& Row = *reinterpret_cast<const FSceneRow*>(Pair.Value);
+			FRegexMatcher Match(NamePattern, Name);
+			if (!Match.FindNext())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not follow <Scene>_<order>"), File, *Name));
+			}
+			else if (FName(*Match.GetCaptureGroup(1)) != Row.Scene || FCString::Atoi(*Match.GetCaptureGroup(2)) != Row.Order)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not match its columns (scene %s, order %d)"), File, *Name, *Row.Scene.ToString(), Row.Order));
+			}
+			const FString Key = FString::Printf(TEXT("%s/%d"), *Row.Scene.ToString(), Row.Order);
+			if (Keys.Contains(Key))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: scene %s order %d appears twice"), File, *Name, *Row.Scene.ToString(), Row.Order));
+			}
+			Keys.Add(Key);
+			const FString Text = TextCell(Struct, Pair.Value, TEXT("Text"));
+			CheckLineBreaks(File, Pair.Key, TEXT("Text"), Text, Problems);
+			if (Text.IsEmpty())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: empty text"), File, *Name));
+			}
+		}
+		return Problems;
+	}
+
 	/** Csv with one more data line, on a line of its own. */
 	static FString WithLine(const FString& Csv, const FString& Line)
 	{
@@ -693,6 +763,12 @@ bool FTextChannelCsvTest::RunTest(const FString& Parameters)
 		MessageProblems.Num(), CountDataLines(Endings), EndingProblems.Num()));
 	TestEqual(TEXT("DT_AIMessages.csv: structure right (parse, names, triggers, acts, tokens, {jump}, line breaks, still)"), MessageProblems.Num(), 0);
 	TestEqual(TEXT("DT_Endings.csv: structure right (parse, Inject, Open, Loss, line breaks)"), EndingProblems.Num(), 0);
+	const FString Scenes = Load(TEXT("DT_Scenes.csv"));
+	TestFalse(TEXT("Narrative/DT_Scenes.csv is read"), Scenes.IsEmpty());
+	const TArray<FString> SceneProblems = CheckScenes(Scenes);
+	for (const FString& Problem : SceneProblems) { AddError(Problem); }
+	AddInfo(FString::Printf(TEXT("DT_Scenes.csv: %d data lines, %d problems."), CountDataLines(Scenes), SceneProblems.Num()));
+	TestEqual(TEXT("DT_Scenes.csv: structure right (parse, <Scene>_<order> names, voices, line breaks)"), SceneProblems.Num(), 0);
 #endif
 	return true;
 }
@@ -746,6 +822,21 @@ bool FTextChannelCsvCheckTest::RunTest(const FString& Parameters)
 	for (const FCase& Case : TwinCases)
 	{
 		const FString All = FString::Join(CheckTwinAI(WithLine(TwinBase, Case.Line), TEXT("DT_TwinAI.csv (copy)")), TEXT(" | "));
+		AddInfo(FString::Printf(TEXT("%s: %s"), Case.What, *All));
+		TestTrue(FString::Printf(TEXT("%s fails with a clear message (\"%s\" in: %s)"), Case.What, Case.Expected, *All), All.Contains(Case.Expected, ESearchCase::CaseSensitive));
+	}
+
+	const FString SceneBase = Load(TEXT("DT_Scenes.csv"));
+	TestEqual(TEXT("The committed DT_Scenes.csv has no problem before a bad row is added"), CheckScenes(SceneBase).Num(), 0);
+	const FCase SceneCases[] = {
+		{ TEXT("a scene row with a bad name"), TEXT("Prologue-901,Prologue,901,HomeAI,,\"A test line.\""), TEXT("does not follow <Scene>_<order>") },
+		{ TEXT("a scene row whose name does not match its order"), TEXT("Prologue_902,Prologue,903,HomeAI,,\"A test line.\""), TEXT("does not match its columns") },
+		{ TEXT("a scene row with an unknown voice"), TEXT("Prologue_904,Prologue,904,Narrator,,\"A test line.\""), TEXT("is not Paradise, HomeAI or Engineer") },
+		{ TEXT("a scene row with a line break"), TEXT("Prologue_905,Prologue,905,HomeAI,,\"A test line,\nbroken in two.\""), TEXT("line break") },
+	};
+	for (const FCase& Case : SceneCases)
+	{
+		const FString All = FString::Join(CheckScenes(WithLine(SceneBase, Case.Line), TEXT("DT_Scenes.csv (copy)")), TEXT(" | "));
 		AddInfo(FString::Printf(TEXT("%s: %s"), Case.What, *All));
 		TestTrue(FString::Printf(TEXT("%s fails with a clear message (\"%s\" in: %s)"), Case.What, Case.Expected, *All), All.Contains(Case.Expected, ESearchCase::CaseSensitive));
 	}

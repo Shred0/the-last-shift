@@ -5,6 +5,7 @@
 #include "Engine/DataTable.h"
 #include "Engine/World.h"
 #include "Narrative/NarrativeRows.h"
+#include "TextChannel/TwinWriting.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(TheLastShiftSettings)
 
@@ -76,4 +77,49 @@ FText UTheLastShiftSettings::GetEndingText(FName RowName) const
 	const UDataTable* Table = LoadEndingsTable();
 	const FEndingRow* Row = Table ? Table->FindRow<FEndingRow>(RowName, TEXT("Ending"), false) : nullptr;
 	return Row ? Row->Text : FText::GetEmpty();
+}
+
+UDataTable* UTheLastShiftSettings::LoadScenesTable() const
+{
+	return ScenesTable.IsNull() ? nullptr : ScenesTable.LoadSynchronous();
+}
+
+ETextDegradation UTheLastShiftSettings::GetTextLevel(double BatteryFraction) const
+{
+	const FTextDegradationTuning& T = TextDegradation;
+	return UTextDegradationLibrary::LevelFromBattery(BatteryFraction, FMath::Clamp(T.NoArticlesBelow, 0.f, 1.f), FMath::Clamp(T.AbbreviatedBelow, 0.f, 1.f),
+		FMath::Clamp(T.ScatteredBelow, 0.f, 1.f), FMath::Clamp(T.SilentBelow, 0.f, 1.f));
+}
+
+float UTheLastShiftSettings::GetTextCharsPerSecond(double BatteryFraction) const
+{
+	const float Empty = FMath::Clamp(TextDegradation.CharsPerSecondEmpty, 1.f, 500.f);
+	const float Full = FMath::Clamp(TextDegradation.CharsPerSecondFull, 1.f, 500.f);
+	return FMath::Lerp(Empty, Full, static_cast<float>(FMath::Clamp(BatteryFraction, 0.0, 1.0)));
+}
+
+int32 UTheLastShiftSettings::GetOpenEndingTwinParts() const
+{
+	const int32 Setting = FMath::Clamp(OpenEndingTwinParts, 0, 99);
+	return Setting > 0 ? Setting : TwinWriting::GetTwinPartCount(LoadTwinAITable());
+}
+
+void UTheLastShiftSettings::GetSceneVoiceColors(ESceneVoice Voice, FLinearColor& OutText, FLinearColor& OutBackground) const
+{
+	switch (Voice)
+	{
+	case ESceneVoice::Paradise:
+		OutText = TextColors.ParadiseText;
+		OutBackground = TextColors.ParadiseBackground;
+		return;
+	case ESceneVoice::Engineer:
+		OutText = TextColors.Engineer;
+		OutBackground = TextColors.SceneBackground;
+		return;
+	case ESceneVoice::HomeAI:
+	default:
+		OutText = TextColors.HomeAI;
+		OutBackground = TextColors.SceneBackground;
+		return;
+	}
 }

@@ -124,3 +124,56 @@ struct THELASTSHIFT_API FEndingRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (MultiLine = "true"))
 	FText Text;
 };
+
+/** Who speaks a line of a text scene: the voice sets the line's background and text colour. */
+UENUM(BlueprintType)
+enum class ESceneVoice : uint8
+{
+	/** The voices in the simulated world: dark text on a white background. */
+	Paradise,
+	/** The home AI: its colour on black; degraded by the run's battery. */
+	HomeAI,
+	/** The engineer's reply in an ending: its own colour on black. */
+	Engineer
+};
+
+inline const TCHAR* LexToString(ESceneVoice Voice)
+{
+	switch (Voice)
+	{
+	case ESceneVoice::Paradise: return TEXT("Paradise");
+	case ESceneVoice::HomeAI: return TEXT("HomeAI");
+	case ESceneVoice::Engineer: return TEXT("Engineer");
+	}
+	return TEXT("Unknown");
+}
+
+/**
+ * One line of a full-screen text scene (DT_Scenes, row name <Scene>_<order>): the prologue's lines (Scene Prologue) and
+ * the home AI's last message before the ending's choice (Scene Ending). A scene shows its rows in ascending Order.
+ * HomeAI lines are degraded by the run's battery and take the text channel's tokens; the other voices are shown as they
+ * are. Cue names a sound or an effect for the line's start (empty: none); the game only passes it on.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FSceneRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	/** The scene the line belongs to (Prologue, Ending). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative")
+	FName Scene;
+
+	/** Position among the lines of the same scene (ascending). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (ClampMin = "1", ClampMax = "999"))
+	int32 Order = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative")
+	ESceneVoice Voice = ESceneVoice::HomeAI;
+
+	/** A sound or an effect for the moment the line starts. None: nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative")
+	FName Cue;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (MultiLine = "true"))
+	FText Text;
+};

@@ -256,7 +256,8 @@ bool UHomeAIComponent::BuildTravelLabel(const UObject* WorldContext, int32 Act, 
 		return false;
 	}
 
-	// The thresholds and hold rule have one owner: the channel on the player's pawn, or its defaults where there is none (the main menu).
+	// The level has one owner, the project settings, with or without a pawn. The hold rule is the channel's: the one on the
+	// player's pawn, or its defaults where there is none (the main menu).
 	const UWorld* World = WorldContext ? WorldContext->GetWorld() : nullptr;
 	const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
 	const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
@@ -272,7 +273,7 @@ bool UHomeAIComponent::BuildTravelLabel(const UObject* WorldContext, int32 Act, 
 		Context.HomeSecondsElapsed = Home->GetHomeSecondsElapsed();
 		Context.BatteryFraction = Home->GetBatteryFraction();
 	}
-	const ETextDegradation Level = Rules->GetLevelForBattery(Context.BatteryFraction);
+	const ETextDegradation Level = UTheLastShiftSettings::Get()->GetTextLevel(Context.BatteryFraction);
 	const FString Text = UTextChannelComponent::ComposeMessage(*Row, Level, Context);
 	UE_LOG(LogTextChannel, Log, TEXT("Travel label for act %d: '%s' at %s (battery %.3f): \"%s\"."), Act, *Rows[0].ToString(), LexToString(Level),
 		Context.BatteryFraction, *Text);

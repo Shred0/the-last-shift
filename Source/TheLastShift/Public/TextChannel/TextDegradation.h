@@ -38,7 +38,7 @@ inline const TCHAR* LexToString(ETextDegradation Level)
 /**
  * The automatic degradation of a message: a deterministic function of the full text and the level, with no
  * randomness. Digits and {tokens} are never altered at any level. Pure functions; the thresholds are given by the
- * caller (their owner is UTextChannelComponent).
+ * caller (their owner is UTheLastShiftSettings::TextDegradation).
  */
 UCLASS()
 class THELASTSHIFT_API UTextDegradationLibrary : public UBlueprintFunctionLibrary

@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "Area/AreaTypes.h"
 #include "Engine/DeveloperSettings.h"
+#include "Narrative/NarrativeRows.h"
+#include "TextChannel/TextDegradation.h"
 #include "TheLastShiftSettings.generated.h"
 
 class UDataTable;
@@ -57,9 +59,10 @@ struct THELASTSHIFT_API FScanColors
 };
 
 /**
- * Every colour of the suit's text, in one place: the home AI's messages, the twin AI's messages and the translation of
- * the logs at a terminal. Barcode bars take the colour of their voice. None of them is a scan colour. The values live in
- * Config/DefaultGame.ini; the C++ defaults are only a fallback for a missing ini entry.
+ * Every colour of the suit's text, in one place: the home AI's messages, the twin AI's messages, the translation of the
+ * logs at a terminal, and the voices of the full-screen text scenes (prologue, endings). Barcode bars take the colour of
+ * their voice. None of them is a scan colour. The values live in Config/DefaultGame.ini; the C++ defaults are only a
+ * fallback for a missing ini entry.
  */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FSuitTextColors
@@ -74,6 +77,56 @@ struct THELASTSHIFT_API FSuitTextColors
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
 	FLinearColor LogTranslation = FLinearColor(0.85f, 0.88f, 0.8f, 0.95f);
+
+	/** The engineer's reply in an ending (a text scene), on SceneBackground. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
+	FLinearColor Engineer = FLinearColor(0.92f, 0.92f, 0.9f, 1.f);
+
+	/** The voices of the simulated world in a text scene: dark text on a white background. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
+	FLinearColor ParadiseText = FLinearColor(0.12f, 0.12f, 0.12f, 1.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
+	FLinearColor ParadiseBackground = FLinearColor(1.f, 1.f, 1.f, 1.f);
+
+	/** Background of the home AI's and the engineer's lines in a text scene. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
+	FLinearColor SceneBackground = FLinearColor(0.f, 0.f, 0.f, 1.f);
+};
+
+/**
+ * The degradation of the home AI's text by the battery, in one place: the battery thresholds of the five levels and the
+ * typing speeds. The text channel, the travel screen's line and the text scenes read them from here; nothing copies them.
+ * The values live in Config/DefaultGame.ini.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FTextDegradationTuning
+{
+	GENERATED_BODY()
+
+	/** Below this battery fraction a message loses its articles. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Degradation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float NoArticlesBelow = 0.70f;
+
+	/** Below this battery fraction a message is lowercase and abbreviated. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Degradation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AbbreviatedBelow = 0.40f;
+
+	/** Below this battery fraction only fragments of a message are left. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Degradation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ScatteredBelow = 0.10f;
+
+	/** Below this battery fraction a message is discarded (Silent). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Degradation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SilentBelow = 0.03f;
+
+	/** Typing speed of the home AI's messages at a full battery. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Degradation", meta = (ClampMin = "1.0", ClampMax = "500.0"))
+	float CharsPerSecondFull = 40.f;
+
+	/** Typing speed at an empty battery; in between it follows the battery fraction linearly. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Degradation", meta = (ClampMin = "1.0", ClampMax = "500.0"))
+	float CharsPerSecondEmpty = 8.f;
 };
 
 /** Where a log terminal shows its entries. */
@@ -132,7 +185,8 @@ struct THELASTSHIFT_API FTravelProgressFractions
 /**
  * Project settings of the game (Project Settings > Game > The Last Shift), stored as text in Config/DefaultGame.ini.
  * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning, of the scan colours, of
- * the suit's text colours and log and twin AI typing, and of which narrative tables the game reads: the area generator, the run subsystem, the home state subsystem and the home AI
+ * the suit's text colours and log and twin AI typing, of the home AI's text degradation (thresholds and typing speeds),
+ * of the text scenes' typing and ending condition, and of which narrative tables the game reads: the area generator, the run subsystem, the home state subsystem and the home AI
  * read them from here and copy nothing.
  */
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "The Last Shift"))
@@ -233,6 +287,43 @@ public:
 	/** Every colour of the suit's text: the one owner of those colours (see FSuitTextColors). */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Twin Writing")
 	FSuitTextColors TextColors;
+
+	/** The battery thresholds of the five levels of the home AI's text and its typing speeds: their one owner. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Text Channel")
+	FTextDegradationTuning TextDegradation;
+
+	/** The lines of the full-screen text scenes (FSceneRow: the prologue, the home AI's last message), imported from Narrative/DT_Scenes.csv. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> ScenesTable;
+
+	/** Typing speed of every line of a text scene, whatever its voice. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Scenes", meta = (ClampMin = "1.0", ClampMax = "500.0"))
+	float SceneCharsPerSecond = 40.f;
+
+	/**
+	 * The ending "Open the structure" is offered only when the suit's archive holds at least this many parts of the twin
+	 * AI. 0 = every part of the twin AI's table.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Scenes", meta = (ClampMin = "0", ClampMax = "99"))
+	int32 OpenEndingTwinParts = 0;
+
+	/** Level of the home AI's text at a battery fraction, with the thresholds of TextDegradation (clamped). */
+	ETextDegradation GetTextLevel(double BatteryFraction) const;
+
+	/** Typing speed of the home AI's text at a battery fraction (TextDegradation's speeds, clamped, linear in between). */
+	float GetTextCharsPerSecond(double BatteryFraction) const;
+
+	/** SceneCharsPerSecond, clamped. */
+	float GetSceneCharsPerSecond() const { return FMath::Clamp(SceneCharsPerSecond, 1.f, 500.f); }
+
+	/** Twin AI parts the archive must hold for "Open the structure": OpenEndingTwinParts, or every part of the twin table for 0. */
+	int32 GetOpenEndingTwinParts() const;
+
+	/** Text and background colour of a scene line spoken by Voice (from TextColors). */
+	void GetSceneVoiceColors(ESceneVoice Voice, FLinearColor& OutText, FLinearColor& OutBackground) const;
+
+	/** ScenesTable, loaded (null when unset or missing). */
+	UDataTable* LoadScenesTable() const;
 
 	/** LogsTable, loaded (null when unset or missing). */
 	UDataTable* LoadLogsTable() const;

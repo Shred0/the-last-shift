@@ -12,6 +12,7 @@
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Run/RunActListWidget.h"
+#include "Run/RunSceneSubsystem.h"
 #include "Run/RunSubsystem.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunMainMenuWidget)
@@ -119,6 +120,17 @@ void URunMainMenuWidget::NativeDestruct()
 	Super::NativeDestruct();
 }
 
+void URunMainMenuWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+	// After the menu has taken its focus: the ending opens over it, instead of the menu.
+	URunSceneSubsystem* Scenes = URunSceneSubsystem::Get(this);
+	if (Scenes && Scenes->IsEndingPending() && Scenes->ConsumePendingEnding())
+	{
+		Scenes->OpenEnding(this);
+	}
+}
+
 void URunMainMenuWidget::RefreshEntries()
 {
 	const URunSubsystem* Run = URunSubsystem::Get(this);
@@ -176,6 +188,11 @@ void URunMainMenuWidget::HandleSelectActClicked()
 
 void URunMainMenuWidget::HandleNewGameClicked()
 {
+	// The prologue first, every time; it starts the new run when it ends.
+	if (URunSceneSubsystem* Scenes = URunSceneSubsystem::Get(this); Scenes && Scenes->OpenPrologue(this))
+	{
+		return;
+	}
 	if (URunSubsystem* Run = URunSubsystem::Get(this))
 	{
 		Run->StartNewRun();

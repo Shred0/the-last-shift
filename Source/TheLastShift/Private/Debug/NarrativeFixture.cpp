@@ -23,6 +23,8 @@ namespace NarrativeFixture
 		TStrongObjectPtr<UDataTable> Endings;
 		TStrongObjectPtr<UDataTable> Logs;
 		TStrongObjectPtr<UDataTable> Twin;
+		TStrongObjectPtr<UDataTable> Scenes;
+		TSoftObjectPtr<UDataTable> SavedScenes;
 		TSoftObjectPtr<UDataTable> SavedMessages;
 		TSoftObjectPtr<UDataTable> SavedEndings;
 		TSoftObjectPtr<UDataTable> SavedLogs;
@@ -108,6 +110,55 @@ namespace NarrativeFixture
 		return Table;
 	}
 
+	static const TCHAR* EndingMessage = TEXT("Fixture last message of the home AI before the choice: the harvest and the structure are waiting for an answer.");
+
+	FString GetEndingMessageText()
+	{
+		return EndingMessage;
+	}
+
+	static void AddSceneRow(UDataTable* Table, FName Scene, int32 Order, ESceneVoice Voice, FName Cue, const FString& Text)
+	{
+		FSceneRow Row;
+		Row.Scene = Scene;
+		Row.Order = Order;
+		Row.Voice = Voice;
+		Row.Cue = Cue;
+		Row.Text = FText::FromString(Text);
+		Table->AddRow(FName(*FString::Printf(TEXT("%s_%d"), *Scene.ToString(), Order)), Row);
+	}
+
+	UDataTable* BuildScenes(bool bPrologue)
+	{
+		UDataTable* Table = NewObject<UDataTable>(GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(), UDataTable::StaticClass(), TEXT("DT_TlsFixtureScenes")));
+		Table->RowStruct = FSceneRow::StaticStruct();
+		if (bPrologue)
+		{
+			const FName P(TEXT("Prologue"));
+			AddSceneRow(Table, P, 1, ESceneVoice::Paradise, NAME_None, TEXT("Fixture prologue line 1, a voice of the simulated world, dark on white."));
+			AddSceneRow(Table, P, 2, ESceneVoice::Paradise, NAME_None, TEXT("Fixture prologue line 2, a second voice of the simulated world."));
+			AddSceneRow(Table, P, 3, ESceneVoice::HomeAI, NAME_None, TEXT("Fixture prologue line 3, the home AI after the cut to black. This neutral sentence ")
+				TEXT("is long enough to wrap onto a second line of the column. A third sentence makes sure that the block holds every one of its lines."));
+			AddSceneRow(Table, P, 4, ESceneVoice::HomeAI, TEXT("FixtureCue"), TEXT("Fixture prologue line 4, the home AI, with a cue name on its row."));
+			AddSceneRow(Table, P, 5, ESceneVoice::HomeAI, NAME_None, TEXT("Fixture prologue line 5, the home AI, a neutral sentence for the tests."));
+			AddSceneRow(Table, P, 6, ESceneVoice::HomeAI, NAME_None, TEXT("Fixture prologue line 6, the last line of the prologue."));
+		}
+		AddSceneRow(Table, TEXT("Ending"), 1, ESceneVoice::HomeAI, NAME_None, EndingMessage);
+		return Table;
+	}
+
+	void SetPrologueRows(bool bPrologue)
+	{
+		if (!G.bInstalled)
+		{
+			return;
+		}
+		G.Scenes.Reset(BuildScenes(bPrologue));
+		GetMutableDefault<UTheLastShiftSettings>()->ScenesTable = TSoftObjectPtr<UDataTable>(G.Scenes.Get());
+		UE_LOG(LogTheLastShift, Log, TEXT("Narrative fixture: scenes now %s (%d rows, %s prologue)."), *GetNameSafe(G.Scenes.Get()), G.Scenes->GetRowMap().Num(),
+			bPrologue ? TEXT("with a") : TEXT("no"));
+	}
+
 	static void SetChannels(UWorld* World, UDataTable* Table, UDataTable* TwinTable)
 	{
 		if (!World)
@@ -146,6 +197,9 @@ namespace NarrativeFixture
 		G.SavedEndings = Settings->EndingsTable;
 		G.SavedLogs = Settings->LogsTable;
 		G.SavedTwin = Settings->TwinAITable;
+		G.SavedScenes = Settings->ScenesTable;
+		G.Scenes.Reset(BuildScenes(true));
+		Settings->ScenesTable = TSoftObjectPtr<UDataTable>(G.Scenes.Get());
 		G.Messages.Reset(BuildAIMessages());
 		G.Endings.Reset(BuildEndings());
 		G.Logs.Reset(BuildLogs(8));
@@ -172,6 +226,8 @@ namespace NarrativeFixture
 		Settings->EndingsTable = G.SavedEndings;
 		Settings->LogsTable = G.SavedLogs;
 		Settings->TwinAITable = G.SavedTwin;
+		Settings->ScenesTable = G.SavedScenes;
+		G.Scenes.Reset();
 		G.bInstalled = false;
 		SetChannels(World, Settings->LoadAIMessagesTable(), Settings->LoadTwinAITable());
 		G.Messages.Reset();

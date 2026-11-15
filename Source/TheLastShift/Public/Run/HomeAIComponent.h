@@ -56,7 +56,7 @@ public:
 
 	/**
 	 * The label of the travel screen to area Act: its AreaEntry row at the current battery's level (the thresholds of
-	 * the world's channel, else the channel's defaults), tokens replaced, never typed out. False and an empty label when
+	 * the project settings, the same with or without a pawn), tokens replaced, never typed out. False and an empty label when
 	 * the act has no such row or the level is Silent. OutReadingSeconds is the channel's hold time for that text.
 	 */
 	static bool BuildTravelLabel(const UObject* WorldContext, int32 Act, FText& OutLabel, float& OutReadingSeconds);
