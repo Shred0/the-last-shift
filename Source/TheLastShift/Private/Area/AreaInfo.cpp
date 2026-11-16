@@ -8,6 +8,7 @@
 #include UE_INLINE_GENERATED_CPP_BY_NAME(AreaInfo)
 
 const FName AAreaInfo::GeneratedTag(TEXT("AreaGenerated"));
+const FName AAreaInfo::BeaconTag(TEXT("AreaBeacon"));
 
 AAreaInfo* AAreaInfo::Find(const UWorld* World)
 {

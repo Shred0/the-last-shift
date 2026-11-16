@@ -21,6 +21,9 @@ public:
 	/** Tag carried by every actor an area generator spawns; Clear() removes exactly the actors with it. */
 	static const FName GeneratedTag;
 
+	/** Tag carried by a beacon's light group (a light group with one light, see ABeaconBody), telling it from the recipe's light groups. */
+	static const FName BeaconTag;
+
 	/** The area info of World, or null. */
 	static AAreaInfo* Find(const UWorld* World);
 

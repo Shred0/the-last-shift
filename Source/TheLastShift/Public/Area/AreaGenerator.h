@@ -92,7 +92,7 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnAreaGenerationFinished, class AAreaGener
  * On BeginPlay: (1) read the recipe and seed; (2) plan the route with the planner; (3) publish the plan as one array
  * of box transforms per kind (the Plan* properties, one engine cube of 100 cm per box) and run the PCG graphs on it
  * with the same seed (StructureGraph: floors, walls, curbs, pillars, ceilings; BackdropGraph: the far masses); (4) spawn the gameplay actors in their slots (residues,
- * gates with door, terminal and regenerating residue, light groups, exit, area info) and move the map's PlayerStart
+ * gates with door, terminal and regenerating residue, light groups, log and twin AI terminals, beacons, exit, area info) and move the map's PlayerStart
  * and entity to theirs; (5) fit the map's NavMeshBoundsVolume to the route, wait for PCG and for the dynamic navmesh;
  * (6) run the validator; (7) broadcast OnAreaReady. Until then the player pawn cannot move, look or stop time and
  * StdCore's transition screen is held black. A seed that cannot be built or fails validation is logged and the next
@@ -328,6 +328,35 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Placement", meta = (ClampMin = "0.0", ClampMax = "600.0", Units = "s"))
 	float LightGroupPoweredSeconds = 30.f;
 
+	// --- Beacons (FAreaRecipe::BeaconCount): a light group with one light, hung above a Hall; powered for LightGroupPoweredSeconds ---
+
+	/** The head's mount above the open segment's highest floor or catwalk, over the centre of the space. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "300.0", ClampMax = "3000.0", Units = "cm"))
+	float BeaconHeight = 800.f;
+
+	/** The rod goes up to the first geometry above the mount; where there is none, it has this length. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "100.0", ClampMax = "20000.0", Units = "cm"))
+	float BeaconRodMaxLength = 6000.f;
+
+	/** Half-angle of the beacon's cone (the spot light's outer cone angle). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "1.0", ClampMax = "45.0", Units = "deg"))
+	float BeaconConeAngle = 6.f;
+
+	/** Luminous intensity on the beacon's axis, in candelas (does not change with the cone). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "0.0", ClampMax = "100000000.0"))
+	float BeaconIntensity = 500000.f;
+
+	/** Range of the beacon's light (its attenuation radius); the validator checks that it reaches the point it lights. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "1000.0", ClampMax = "50000.0", Units = "cm"))
+	float BeaconRange = 20000.f;
+
+	/**
+	 * Validator rule 8: nothing may stand on the line from the beacon's light to this height above the point where the
+	 * route leaves its segment. The beacon still aims at the floor point; this only places the end of the clear path.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "0.0", ClampMax = "400.0", Units = "cm"))
+	float BeaconClearPathHeight = 150.f;
+
 	// --- Classes and assets ---
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
@@ -349,6 +378,14 @@ public:
 	/** The recipe's twin AI terminal (FAreaRecipe::TwinAITerminalCount). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
 	TSubclassOf<ATwinAITerminal> TwinAITerminalClass;
+
+	/** The beacons' lamp head (SM_BeaconHead: pivot at its mount, +X the direction it lights). None: the beacon is a light alone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
+	TObjectPtr<UStaticMesh> BeaconHeadMesh;
+
+	/** The beacons' rod (SM_BeaconRod: one metre along +Z, pivot at its lower end), stretched to the length it needs. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
+	TObjectPtr<UStaticMesh> BeaconRodMesh;
 
 	// --- Validation (tls.AreaValidate) ---
 

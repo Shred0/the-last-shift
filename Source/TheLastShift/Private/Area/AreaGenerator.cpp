@@ -10,6 +10,8 @@
 #include "Components/BrushComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PointLightComponent.h"
+#include "Components/SpotLightComponent.h"
+#include "Energy/BeaconBody.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/LightGroupDevice.h"
 #include "Energy/LogTerminal.h"
@@ -17,6 +19,7 @@
 #include "Energy/TwinAITerminal.h"
 #include "Engine/GameInstance.h"
 #include "Engine/PointLight.h"
+#include "Engine/SpotLight.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
@@ -1151,9 +1154,11 @@ namespace AreaGen
 		 * straight wall: solid behind it over its whole width and a little beyond, so it never stands in front of a
 		 * niche, a side passage or a doorway (where it would block the opening on the navmesh); facing the centreline.
 		 */
-		bool FindSideSpot(float S, float MinS, FVector2D& OutPos, FVector2D& OutFacing, float MaxWallDistance = 1000.f)
+		bool FindSideSpot(float S, float MinS, FVector2D& OutPos, FVector2D& OutFacing, float MaxWallDistance = 1000.f, int32 FixedFirstSide = 0,
+			const TFunction<bool(const FVector2D&)>& Accept = nullptr)
 		{
-			const int32 FirstSide = Rng.FRand() < 0.5f ? 1 : -1;
+			// FixedFirstSide (1 left, -1 right) draws nothing from the stream: placements on top of a finished plan (beacons).
+			const int32 FirstSide = FixedFirstSide != 0 ? FMath::Sign(FixedFirstSide) : (Rng.FRand() < 0.5f ? 1 : -1);
 			for (float At = S; At >= MinS; At -= 100.f)
 			{
 				FVector2D Dir;
@@ -1188,7 +1193,7 @@ namespace AreaGen
 						bStraightWall &= !Plan.Cells.Contains(BehindCell) && Plan.IsFloor(FrontCell);
 					}
 					const FVector2D Stand = T - Out * 90.f;
-					if (bStraightWall && Plan.IsClear(T, 40.0) && Plan.IsClear(Stand, 60.0) && !NearUsed(T, 300.0))
+					if (bStraightWall && Plan.IsClear(T, 40.0) && Plan.IsClear(Stand, 60.0) && !NearUsed(T, 300.0) && (!Accept || Accept(T)))
 					{
 						OutPos = T;
 						OutFacing = -Out;
@@ -1534,6 +1539,91 @@ namespace AreaGen
 					WallError += FString::Printf(TEXT("%stwin AI terminal: %s"), WallError.IsEmpty() ? TEXT("") : TEXT("; "), *Why);
 					bAll = false;
 				}
+			}
+			return bAll;
+		}
+
+		// --- Beacons (Brief 10) ---
+		//
+		// Placed after the wall terminals, from the finished plan, with no random draw: one per Hall segment in route order,
+		// over the centre of the Hall's own body (its platforms or its floor, spurs left out), aimed at the point where the
+		// route leaves it; the terminal at the entrance with the light groups' rule (FindSideSpot, left side first instead
+		// of a drawn side), kept out of every other terminal's reach. A rule that cannot be met leaves the beacon out and
+		// the validator fails the seed; there is no fallback position.
+
+		struct FBeaconPlacement
+		{
+			int32 Segment = -1;
+			FVector2D Centre = FVector2D::ZeroVector;
+			FVector2D Aim = FVector2D::ZeroVector;
+			FVector2D Terminal = FVector2D::ZeroVector;
+			FVector2D TerminalFacing = FVector2D(1.0, 0.0);
+			float TerminalRouteDistance = 0.f;
+		};
+
+		TArray<FBeaconPlacement> BeaconPlacements;
+		/** Why a beacon of the recipe was left out (empty when all were placed). */
+		FString BeaconError;
+
+		/** TerminalReach: the standard terminal's InteractRadius; LogReach and TwinReach: the wall terminals' (already placed). */
+		bool PlaceBeacons(float TerminalReach, float LogReach, float TwinReach)
+		{
+			const int32 Wanted = FMath::Clamp(R.BeaconCount, 0, 4);
+			if (Wanted == 0)
+			{
+				return true;
+			}
+			TArray<TPair<FVector2D, float>> Others;
+			for (const FVector2D& P : UsedSideSpots) { Others.Emplace(P, TerminalReach); }
+			for (const FWallPlacement& P : LogPlacements) { Others.Emplace(P.Pos, LogReach); }
+			for (const FWallPlacement& P : TwinPlacements) { Others.Emplace(P.Pos, TwinReach); }
+			TArray<int32> Halls;
+			for (int32 Index = 0; Index < Plan.Segs.Num(); ++Index)
+			{
+				if (Plan.Segs[Index].Type == EAreaSegmentType::Hall) { Halls.Add(Index); }
+			}
+			bool bAll = true;
+			for (int32 K = 0; K < Wanted; ++K)
+			{
+				if (!Halls.IsValidIndex(K))
+				{
+					BeaconError += FString::Printf(TEXT("%sbeacon %d: the route has %d Hall segments"), BeaconError.IsEmpty() ? TEXT("") : TEXT("; "), K, Halls.Num());
+					bAll = false;
+					continue;
+				}
+				const int32 Index = Halls[K];
+				const FSeg& S = Plan.Segs[Index];
+				FBeaconPlacement B;
+				B.Segment = Index;
+				FBox2D Body(ForceInit);
+				for (const FLeg& Leg : S.Legs) { Body += Leg.Rect; }
+				B.Centre = Body.bIsValid ? Body.GetCenter() : S.Bounds.GetCenter();
+				B.Aim = Plan.PointAt(S.RouteEnd);
+				const TFunction<bool(const FVector2D&)> Accept = [&Others, TerminalReach, this](const FVector2D& T)
+				{
+					for (const TPair<FVector2D, float>& Other : Others)
+					{
+						if (FVector2D::Distance(T, Other.Key) < TerminalReach + Other.Value + 50.f) { return false; }
+					}
+					for (const FGatePlacement& Gate : GatePlacements)
+					{
+						if (FVector2D::Distance(T, Gate.Door) < 400.f) { return false; }
+					}
+					return true;
+				};
+				const float Start = S.RouteStart + 300.f;
+				const float MinS = FMath::Max(50.f, S.RouteStart - 500.f);
+				if (!FindSideSpot(Start, MinS, B.Terminal, B.TerminalFacing, 1000.f, 1, Accept)
+					&& !FindSideSpot(Start, MinS, B.Terminal, B.TerminalFacing, 3000.f, 1, Accept))
+				{
+					BeaconError += FString::Printf(TEXT("%sbeacon %d (segment %d): no spot for its terminal at the entrance (route %.0f-%.0f m)"),
+						BeaconError.IsEmpty() ? TEXT("") : TEXT("; "), K, Index, MinS / 100.f, Start / 100.f);
+					bAll = false;
+					continue;
+				}
+				B.TerminalRouteDistance = Plan.Project(B.Terminal);
+				Others.Emplace(B.Terminal, TerminalReach);
+				BeaconPlacements.Add(B);
 			}
 			return bAll;
 		}
@@ -2022,6 +2112,11 @@ int64 AAreaGenerator::ComputeLayoutHash(int32& OutLines, TArray<FString>* OutTex
 		else if (const APowerTerminal* Terminal = Cast<APowerTerminal>(Actor))
 		{
 			Line += FString::Printf(TEXT("|targets=%d"), Terminal->Targets.Num());
+		}
+		else if (const ABeaconBody* Body = Cast<ABeaconBody>(Actor))
+		{
+			const FVector Aim = Body->GetAimPoint();
+			Line += FString::Printf(TEXT("|rod=%d|aim=%d,%d,%d"), FMath::RoundToInt(Body->GetRodLength()), FMath::RoundToInt(Aim.X), FMath::RoundToInt(Aim.Y), FMath::RoundToInt(Aim.Z));
 		}
 		Lines.Add(MoveTemp(Line));
 	}
@@ -2752,6 +2847,11 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		{
 			UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d: %s; the validator fails this seed."), *GetName(), Act, Seed, *Builder.WallError);
 		}
+		// Beacons last, on top of everything (no random draw, nothing else moves).
+		if (!Builder.PlaceBeacons(TerminalDefaults->GetInteractRadius(), Log.Reach, Twin.Reach))
+		{
+			UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d: %s; the validator fails this seed."), *GetName(), Act, Seed, *Builder.BeaconError);
+		}
 	}
 
 	// --- Publish the plan to the PCG graphs ---
@@ -2935,6 +3035,88 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 			LexToString(Plan.Segs[P.Segment].Type), P.Pos.X, P.Pos.Y, YawOf(P.Facing).Yaw, P.RouteDistance / 100.f, Plan.RouteLength() / 100.f, P.Stand.X, P.Stand.Y);
 	}
 
+	// Beacons (optional: they power no door). Each is a light group with one spot light, its terminal and its body.
+	{
+		const FAreaPieceHeights Heights = GetPieceHeights();
+		const float Height = FMath::Clamp(BeaconHeight, 300.f, 3000.f);
+		const float RodMax = FMath::Clamp(BeaconRodMaxLength, 100.f, 20000.f);
+		for (int32 I = 0; I < Builder.BeaconPlacements.Num(); ++I)
+		{
+			const FBuilder::FBeaconPlacement& B = Builder.BeaconPlacements[I];
+			// Above the segment's highest floor or catwalk, over the centre of the space; aimed at the floor where the route leaves it.
+			float FloorTop = -TNumericLimits<float>::Max();
+			for (const FAreaFloorRect& Rect : Geometry.FloorRects)
+			{
+				if (Rect.Segment == B.Segment) { FloorTop = FMath::Max(FloorTop, static_cast<float>(Rect.Box.Max.Z)); }
+			}
+			FloorTop = FloorTop > -1.0e30f ? FloorTop : 0.f;
+			const FVector Mount = At(B.Centre, FloorTop + Height);
+			const FVector Aim = At(B.Aim, FloorTop);
+
+			// The rod: up to the first geometry of the plan above the mount, else its maximum length.
+			float Rod = RodMax;
+			for (int32 Kind = 0; Kind < PublishedPieces.Num(); ++Kind)
+			{
+				for (const FBox& Box : PublishedPieces[Kind].Boxes)
+				{
+					const FTransform T = Heights.MakeTransform(static_cast<EAreaPieceKind>(Kind), Box);
+					const FVector Half = T.GetScale3D() * (CubeSize * 0.5);
+					const FBox World3(T.GetLocation() - Half, T.GetLocation() + Half);
+					if (Mount.X >= World3.Min.X && Mount.X <= World3.Max.X && Mount.Y >= World3.Min.Y && Mount.Y <= World3.Max.Y && World3.Max.Z > Mount.Z)
+					{
+						Rod = FMath::Min(Rod, static_cast<float>(FMath::Max(0.0, World3.Min.Z - Mount.Z)));
+					}
+				}
+			}
+			const bool bReaches = Rod < RodMax;
+
+			ABeaconBody* Body = Cast<ABeaconBody>(Spawn(ABeaconBody::StaticClass(), Mount, FRotator::ZeroRotator, FString::Printf(TEXT("Area_Beacon%d_Body"), I), TEXT("Beacons")));
+			ALightGroupDevice* Device = Cast<ALightGroupDevice>(Spawn(LightGroupClass, At(B.Terminal, 0.f), FRotator::ZeroRotator, FString::Printf(TEXT("Area_Beacon%d"), I), TEXT("Beacons")));
+			APowerTerminal* Terminal = Cast<APowerTerminal>(Spawn(TerminalClass, At(B.Terminal, 0.f), YawOf(B.TerminalFacing), FString::Printf(TEXT("Area_Beacon%d_Terminal"), I), TEXT("Beacons")));
+			if (!Body || !Device)
+			{
+				continue;
+			}
+			Body->Tags.Add(AAreaInfo::BeaconTag);
+			Body->Build(BeaconHeadMesh, BeaconRodMesh, Aim, Rod, bReaches);
+			Body->Device = Device;
+			Body->Segment = B.Segment;
+			Body->HeightAboveFloor = Height;
+			Device->Tags.Add(AAreaInfo::BeaconTag);
+			Device->PoweredSeconds = LightGroupPoweredSeconds;
+			const FVector Lens = Body->GetLensLocation();
+			ASpotLight* Light = Cast<ASpotLight>(Spawn(ASpotLight::StaticClass(), Lens, (Aim - Lens).Rotation(), FString::Printf(TEXT("Area_Beacon%d_Light"), I), TEXT("Beacons")));
+			if (Light)
+			{
+				Light->Tags.Add(AAreaInfo::BeaconTag);
+				Light->GetRootComponent()->SetMobility(EComponentMobility::Movable);
+				// ASpotLight's root (the light) carries a -90 pitch that the spawn rotation is combined with: aim it here.
+				Light->SetActorRotation((Aim - Lens).Rotation());
+				if (USpotLightComponent* Component = Cast<USpotLightComponent>(Light->GetLightComponent()))
+				{
+					Component->SetIntensityUnits(ELightUnits::Candelas);
+					Component->SetIntensity(FMath::Clamp(BeaconIntensity, 0.f, 100000000.f));
+					Component->SetAttenuationRadius(FMath::Clamp(BeaconRange, 1000.f, 50000.f));
+					Component->SetInnerConeAngle(0.f);
+					Component->SetOuterConeAngle(FMath::Clamp(BeaconConeAngle, 1.f, 45.f));
+					Component->SetCastShadows(false);
+					// Dark until paid, whenever the device begins play (spawned during or after the world's BeginPlay).
+					Component->SetVisibility(false);
+				}
+				Device->Lights.Add(Light);
+			}
+			if (Terminal)
+			{
+				Terminal->Tags.Add(AAreaInfo::BeaconTag);
+				Terminal->Targets.Add(Device);
+			}
+			UE_LOG(LogArea, Log, TEXT("%s: beacon %d over segment %d (%s) at (%.0f, %.0f, %.0f), %.0f cm above its highest floor, aimed at (%.0f, %.0f, %.0f) %.1f m away, rod %.0f cm (%s), terminal at (%.0f, %.0f) facing yaw %.0f, route %.1f m (segment from %.1f m)."),
+				*GetName(), I, B.Segment, LexToString(Plan.Segs[B.Segment].Type), Mount.X, Mount.Y, Mount.Z, Height, Aim.X, Aim.Y, Aim.Z, FVector::Dist(Mount, Aim) / 100.f,
+				Rod, bReaches ? TEXT("reaches the geometry above") : TEXT("maximum length, nothing above"), B.Terminal.X, B.Terminal.Y, YawOf(B.TerminalFacing).Yaw,
+				B.TerminalRouteDistance / 100.f, Plan.Segs[B.Segment].RouteStart / 100.f);
+		}
+	}
+
 	// Navigation bounds fitted to the walkable route (applied to the map's NavMeshBoundsVolume in game worlds).
 	FBox2D Walkable(ForceInit);
 	for (const FAreaFloorRect& R : Geometry.FloorRects)
@@ -2955,10 +3137,10 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	RunPCG(StructurePCG, StructureGraph);
 	RunPCG(BackdropPCG, BackdropGraph);
 
-	UE_LOG(LogArea, Log, TEXT("%s: act %d seed %d planned in %.3f s: %d segments, route %.1f m, boxes (floors %d, walls %d, curbs %d, pillars %d, ceilings %d, backdrop %d), %d residues, %d gates, %d light groups, %d log terminals, %d twin AI terminals; PCG started."),
+	UE_LOG(LogArea, Log, TEXT("%s: act %d seed %d planned in %.3f s: %d segments, route %.1f m, boxes (floors %d, walls %d, curbs %d, pillars %d, ceilings %d, backdrop %d), %d residues, %d gates, %d light groups, %d log terminals, %d twin AI terminals, %d beacons; PCG started."),
 		*GetName(), Act, Seed, LastGenerationSeconds, Plan.Segs.Num(), Plan.RouteLength() / 100.f,
 		Geometry.Floors.Num(), Geometry.Walls.Num(), Geometry.Curbs.Num(), Geometry.Pillars.Num(), Geometry.Ceilings.Num(), Geometry.Backdrop.Num(),
 		Builder.NormalResidues.Num() + Builder.GatePlacements.Num(), Builder.GatePlacements.Num(), Builder.LightPlacements.Num(),
-		Builder.LogPlacements.Num(), Builder.TwinPlacements.Num());
+		Builder.LogPlacements.Num(), Builder.TwinPlacements.Num(), Builder.BeaconPlacements.Num());
 	return true;
 }

@@ -6,11 +6,15 @@
 #include "Area/AreaGenerator.h"
 #include "Area/AreaInfo.h"
 #include "Area/AreaTypes.h"
+#include "Energy/BeaconBody.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/LightGroupDevice.h"
 #include "Energy/LogTerminal.h"
 #include "Energy/TwinAITerminal.h"
 #include "Energy/PowerTerminal.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Components/SpotLightComponent.h"
+#include "Engine/Light.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -231,19 +235,25 @@ namespace AreaValidation
 			}
 		}
 		const int32 Gates = C.Recipe->GetGateCount();
-		const int32 LightGroups = All<ALightGroupDevice>(World).Num();
+		// The recipe's light groups; beacons are light groups too, counted by rule 8 (their terminals are counted here).
+		int32 LightGroups = 0;
+		for (const ALightGroupDevice* Group : All<ALightGroupDevice>(World))
+		{
+			LightGroups += Group->ActorHasTag(AAreaInfo::BeaconTag) ? 0 : 1;
+		}
+		const int32 Beacons = C.Recipe->BeaconCount;
 		const int32 Entities = All<AEntity>(World).Num();
 		const int32 Starts = All<APlayerStart>(World).Num();
 		const int32 Exits = All<AAreaExit>(World).Num();
 		// The optional terminals against a wall (rule 7 checks their own counts) are terminals too.
 		const int32 Optional = C.Recipe->LogTerminalCount + C.Recipe->TwinAITerminalCount;
 		const bool bCounts = Residues == C.Recipe->ResidueCount && Regenerating == Gates && Doors.Num() == Gates
-			&& Terminals.Num() == Gates + C.Recipe->LightGroupCount + Optional && LightGroups == C.Recipe->LightGroupCount
+			&& Terminals.Num() == Gates + C.Recipe->LightGroupCount + Optional + Beacons && LightGroups == C.Recipe->LightGroupCount
 			&& Entities == 1 && Starts == 1 && Exits == 1;
 		if (!bCounts)
 		{
 			AddDetail(R, FString::Printf(TEXT("counts: residues %d/%d (regenerating %d/%d), doors %d/%d, terminals %d/%d, light groups %d/%d, entities %d/1, starts %d/1, exits %d/1"),
-				Residues, C.Recipe->ResidueCount, Regenerating, Gates, Doors.Num(), Gates, Terminals.Num(), Gates + C.Recipe->LightGroupCount + Optional,
+				Residues, C.Recipe->ResidueCount, Regenerating, Gates, Doors.Num(), Gates, Terminals.Num(), Gates + C.Recipe->LightGroupCount + Optional + Beacons,
 				LightGroups, C.Recipe->LightGroupCount, Entities, Starts, Exits));
 		}
 		R.bPass = Unreachable == 0 && bCounts;
@@ -755,6 +765,310 @@ namespace AreaValidation
 			Lines.Num() > 0 ? TEXT("; ") : TEXT(""), *FString::Join(Lines, TEXT("; ")));
 		return R;
 	}
+
+	/** The boxes PCG built for the area, every kind, from their instances: what stands there, with collision or without (the backdrop has none). */
+	static TArray<FBox> BuiltBoxes(const FContext& C)
+	{
+		TArray<FBox> Out;
+		for (int32 Kind = 0; Kind <= static_cast<int32>(EAreaPieceKind::Backdrop); ++Kind)
+		{
+			for (const UInstancedStaticMeshComponent* Instances : C.Generator->GetPCGComponents(static_cast<EAreaPieceKind>(Kind)))
+			{
+				for (int32 Index = 0; Index < Instances->GetInstanceCount(); ++Index)
+				{
+					FTransform T;
+					Instances->GetInstanceTransform(Index, T, /*bWorldSpace=*/true);
+					const FVector Half = T.GetScale3D().GetAbs() * 50.0;
+					Out.Add(FBox(T.GetLocation() - Half, T.GetLocation() + Half));
+				}
+			}
+		}
+		return Out;
+	}
+
+	/** Rule 8: how far below BeaconHeight the lowest point of a beacon may come over a floor (the head hangs below its mount). */
+	static constexpr float BeaconClearanceMargin = 100.f;
+
+	/**
+	 * Rule 8 (Brief 10): the recipe's beacons. Counts match (light groups with the beacon tag, bodies); one beacon per Hall
+	 * segment in route order; each hangs above its segment, its lowest point at least BeaconHeight less
+	 * BeaconClearanceMargin above every floor or catwalk under it and above the segment's highest floor; one spot light,
+	 * aimed at the point where the route leaves the segment, with the range to reach it, and nothing on the line from the
+	 * light to BeaconClearPathHeight above that point (built geometry included, collision or not); the rod
+	 * ends in the first geometry above the mount, or has the maximum length where there is none; the body blocks nothing,
+	 * changes no navigation and renders no custom depth; its terminal stands at the entrance of the space (from 6 m before
+	 * to 4 m after the point where the route enters it) with a standing place on the navmesh, connected to the start and
+	 * free for the pawn, and no place within reach of another terminal; the exit is reached without paying any beacon.
+	 */
+	static FAreaRuleResult RuleBeacons(FContext& C)
+	{
+		FAreaRuleResult R;
+		R.Rule = 8;
+		R.Name = TEXT("beacons");
+		UWorld* World = C.World;
+		const int32 Wanted = C.Recipe->BeaconCount;
+		TArray<ALightGroupDevice*> Devices;
+		for (ALightGroupDevice* Device : All<ALightGroupDevice>(World))
+		{
+			if (Device->ActorHasTag(AAreaInfo::BeaconTag)) { Devices.Add(Device); }
+		}
+		TArray<ABeaconBody*> Bodies = All<ABeaconBody>(World);
+		Bodies.Sort([](const ABeaconBody& A, const ABeaconBody& B) { return A.Segment < B.Segment; });
+		const TArray<APowerTerminal*> Terminals = All<APowerTerminal>(World);
+		int32 Failures = 0;
+		TArray<FString> Lines;
+
+		TArray<int32> Halls;
+		for (int32 Index = 0; Index < C.Info->Segments.Num(); ++Index)
+		{
+			if (C.Info->Segments[Index].Type == EAreaSegmentType::Hall) { Halls.Add(Index); }
+		}
+		const bool bCounts = Devices.Num() == Wanted && Bodies.Num() == Wanted && Wanted <= Halls.Num();
+		if (!bCounts)
+		{
+			++Failures;
+			AddDetail(R, FString::Printf(TEXT("counts: beacon light groups %d, bodies %d, recipe %d, Hall segments %d"), Devices.Num(), Bodies.Num(), Wanted, Halls.Num()));
+		}
+
+		const float Height = FMath::Clamp(C.Generator->BeaconHeight, 300.f, 3000.f);
+		const float RodMax = FMath::Clamp(C.Generator->BeaconRodMaxLength, 100.f, 20000.f);
+		const TArray<FBox> Built = BuiltBoxes(C);
+		const float ClearHeight = FMath::Clamp(C.Generator->BeaconClearPathHeight, 0.f, 400.f);
+		for (int32 K = 0; K < Bodies.Num(); ++K)
+		{
+			const ABeaconBody* Body = Bodies[K];
+			const FString Name = Label(Body);
+			TArray<FString> Why;
+			float TightestGap = TNumericLimits<float>::Max();
+			FString TightestOver;
+			const int32 Segment = Body->Segment;
+			const FAreaSegmentRecord* Seg = C.Info->Segments.IsValidIndex(Segment) ? &C.Info->Segments[Segment] : nullptr;
+			if (!Halls.IsValidIndex(K) || Halls[K] != Segment)
+			{
+				Why.Add(FString::Printf(TEXT("hangs over segment %d, expected Hall segment %d"), Segment, Halls.IsValidIndex(K) ? Halls[K] : -1));
+			}
+			const FVector Mount = Body->GetActorLocation();
+			if (!Seg || !Seg->Bounds.IsInsideXY(Mount))
+			{
+				Why.Add(TEXT("not above its segment"));
+			}
+
+			// The light.
+			const ALightGroupDevice* Device = Body->Device;
+			const ALight* Light = Device && Device->Lights.Num() == 1 ? Device->Lights[0].Get() : nullptr;
+			const USpotLightComponent* Spot = Light ? Cast<USpotLightComponent>(Light->GetLightComponent()) : nullptr;
+			if (!Device || !Devices.Contains(Device) || !Spot)
+			{
+				Why.Add(TEXT("its light group is not a beacon light group with one spot light"));
+			}
+			const FVector LightAt = Spot ? Spot->GetComponentLocation() : Mount;
+
+			// Clear of every floor and catwalk below it.
+			float Lowest = FMath::Min(static_cast<float>(Mount.Z), static_cast<float>(LightAt.Z));
+			const FBox BodyBox = Body->GetBodyBounds();
+			FBox Footprint(Mount - FVector(50.f), Mount + FVector(50.f));
+			if (BodyBox.IsValid)
+			{
+				Lowest = FMath::Min(Lowest, static_cast<float>(BodyBox.Min.Z));
+				Footprint += BodyBox;
+			}
+			float SegmentTop = -TNumericLimits<float>::Max();
+			float Clearance = TNumericLimits<float>::Max();
+			for (const FAreaFloorRect& Rect : C.Info->FloorRects)
+			{
+				const bool bUnder = Rect.Box.Min.X <= Footprint.Max.X && Rect.Box.Max.X >= Footprint.Min.X && Rect.Box.Min.Y <= Footprint.Max.Y && Rect.Box.Max.Y >= Footprint.Min.Y;
+				if (Rect.Segment == Segment)
+				{
+					SegmentTop = FMath::Max(SegmentTop, static_cast<float>(Rect.Box.Max.Z));
+				}
+				if (bUnder)
+				{
+					Clearance = FMath::Min(Clearance, Lowest - static_cast<float>(Rect.Box.Max.Z));
+				}
+			}
+			if (SegmentTop > -1.0e30f)
+			{
+				Clearance = FMath::Min(Clearance, Lowest - SegmentTop);
+			}
+			if (Clearance < Height - BeaconClearanceMargin)
+			{
+				Why.Add(FString::Printf(TEXT("its lowest point is %.0f cm above a floor (needs %.0f)"), Clearance, Height - BeaconClearanceMargin));
+			}
+
+			// Aimed at the point where the route leaves the segment, reaching it, nothing between.
+			int32 ExitSegment = -1;
+			const FVector Leave = Seg ? C.Info->GetRoutePointAtDistance(Seg->RouteEnd, ExitSegment) : FVector::ZeroVector;
+			const FVector Aim = Body->GetAimPoint();
+			const float AimDistance = static_cast<float>(FVector::Dist(LightAt, Aim));
+			if (!Seg || FVector::Dist2D(Aim, Leave) > 50.f)
+			{
+				Why.Add(FString::Printf(TEXT("aimed at %s, the route leaves the segment at %s"), *Where(Aim), *Where(Leave)));
+			}
+			if (Spot)
+			{
+				const float Cos = static_cast<float>(FVector::DotProduct(Spot->GetForwardVector(), (Aim - LightAt).GetSafeNormal()));
+				if (Cos < FMath::Cos(FMath::DegreesToRadians(1.f)))
+				{
+					Why.Add(FString::Printf(TEXT("the light points %.1f degrees off its aim"), FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Cos, -1.f, 1.f)))));
+				}
+				if (Spot->AttenuationRadius < AimDistance)
+				{
+					Why.Add(FString::Printf(TEXT("range %.0f m short of its aim %.0f m away"), Spot->AttenuationRadius / 100.f, AimDistance / 100.f));
+				}
+			}
+			{
+				// To BeaconClearPathHeight above the point where the route leaves (the beacon itself aims at the floor point).
+				const FVector End = Aim + FVector(0.f, 0.f, ClearHeight);
+				FCollisionQueryParams Params(SCENE_QUERY_STAT(AreaBeaconView), false, Body);
+				FHitResult Hit;
+				if (World->LineTraceSingleByChannel(Hit, LightAt, End, ECC_Visibility, Params))
+				{
+					Why.Add(FString::Printf(TEXT("its light is blocked by %s at %s on the way to %s"), *GetNameSafe(Hit.GetActor()), *Where(Hit.ImpactPoint), *Where(End)));
+				}
+				// The built geometry too, collision or not.
+				for (const FBox& Box : Built)
+				{
+					if (FMath::LineBoxIntersection(Box, LightAt, End, End - LightAt))
+					{
+						Why.Add(FString::Printf(TEXT("its light crosses built geometry %s-%s on the way to %s"), *Where(Box.Min), *Where(Box.Max), *Where(End)));
+						break;
+					}
+				}
+				// How far the path passes above each terminal within a metre of it (in plan): the tightest is reported.
+				const FVector2D A2(LightAt.X, LightAt.Y);
+				const FVector2D B2(End.X, End.Y);
+				const double Len2 = FVector2D::DistSquared(A2, B2);
+				for (const APowerTerminal* Other : Terminals)
+				{
+					const FVector P = Other->GetActorLocation();
+					const double T = Len2 > 0.0 ? FMath::Clamp(FVector2D::DotProduct(FVector2D(P.X, P.Y) - A2, B2 - A2) / Len2, 0.0, 1.0) : 0.0;
+					const FVector2D Closest = A2 + (B2 - A2) * T;
+					if (FVector2D::Distance(Closest, FVector2D(P.X, P.Y)) > 100.0)
+					{
+						continue;
+					}
+					const FBox OtherBox = Other->GetComponentsBoundingBox(/*bNonColliding=*/true);
+					const float PathZ = static_cast<float>(FMath::Lerp(LightAt.Z, End.Z, T));
+					const float Gap = OtherBox.IsValid ? PathZ - static_cast<float>(OtherBox.Max.Z) : PathZ - static_cast<float>(P.Z);
+					if (Gap < TightestGap)
+					{
+						TightestGap = Gap;
+						TightestOver = FString::Printf(TEXT("%s (top %.0f cm, path %.0f cm)"), *Label(Other), OtherBox.IsValid ? OtherBox.Max.Z : P.Z, PathZ);
+					}
+				}
+			}
+
+			// The rod: to the first geometry above the mount, or its maximum length.
+			{
+				// The first geometry above: what blocks a trace, and every box PCG built (the backdrop has no collision).
+				FCollisionQueryParams Params(SCENE_QUERY_STAT(AreaBeaconRod), false, Body);
+				FHitResult Hit;
+				float Above = TNumericLimits<float>::Max();
+				FString What;
+				if (World->LineTraceSingleByChannel(Hit, Mount, Mount + FVector(0.f, 0.f, RodMax + 1.f), ECC_Visibility, Params))
+				{
+					Above = Hit.bStartPenetrating ? 0.f : static_cast<float>(Hit.Distance);
+					What = GetNameSafe(Hit.GetActor());
+				}
+				for (const FBox& Box : Built)
+				{
+					if (Mount.X >= Box.Min.X && Mount.X <= Box.Max.X && Mount.Y >= Box.Min.Y && Mount.Y <= Box.Max.Y && Box.Max.Z > Mount.Z)
+					{
+						const float Distance = static_cast<float>(FMath::Max(0.0, Box.Min.Z - Mount.Z));
+						if (Distance < Above)
+						{
+							Above = Distance;
+							What = FString::Printf(TEXT("built box %s-%s"), *Where(Box.Min), *Where(Box.Max));
+						}
+					}
+				}
+				const bool bHit = Above <= RodMax;
+				const float Expected = bHit ? Above : RodMax;
+				if (bHit && Above < 1.f)
+				{
+					Why.Add(FString::Printf(TEXT("its mount is inside geometry (%s)"), *What));
+				}
+				if (FMath::Abs(Body->GetRodLength() - Expected) > 10.f || Body->DoesRodReachGeometry() != bHit)
+				{
+					Why.Add(FString::Printf(TEXT("rod %.0f cm (%s), the first geometry above is %s"), Body->GetRodLength(), Body->DoesRodReachGeometry() ? TEXT("reaching") : TEXT("maximum"),
+						bHit ? *FString::Printf(TEXT("%.0f cm up (%s)"), Above, *What) : TEXT("not within the maximum length")));
+				}
+			}
+
+			// Ordinary geometry: blocks nothing, no navigation, no custom depth.
+			TArray<UPrimitiveComponent*> Parts;
+			Body->GetComponents(Parts);
+			for (const UPrimitiveComponent* Part : Parts)
+			{
+				if (Part->IsCollisionEnabled() || Part->CanEverAffectNavigation() || Part->bRenderCustomDepth)
+				{
+					Why.Add(FString::Printf(TEXT("%s has collision, navigation or custom depth"), *Part->GetName()));
+				}
+			}
+
+			// Its terminal, at the entrance, paid before the space is crossed.
+			const APowerTerminal* Terminal = Device ? TerminalOf(World, Device) : nullptr;
+			float TerminalS = 0.f;
+			if (!Terminal)
+			{
+				Why.Add(TEXT("no terminal powers it"));
+			}
+			else
+			{
+				FVector Stand = FVector::ZeroVector;
+				FString StandWhy;
+				if (!HasStandingPlace(C, Terminal, TerminalFront(Terminal), Stand, StandWhy))
+				{
+					Why.Add(FString::Printf(TEXT("terminal standing place: %s"), *StandWhy));
+				}
+				SegmentAt(C, Terminal->GetActorLocation(), TerminalS);
+				if (!Seg || TerminalS < Seg->RouteStart - 600.f || TerminalS > Seg->RouteStart + 400.f)
+				{
+					Why.Add(FString::Printf(TEXT("terminal at route %.1f m, the space starts at %.1f m (allowed %.1f-%.1f m)"), TerminalS / 100.f, Seg ? Seg->RouteStart / 100.f : 0.f,
+						Seg ? (Seg->RouteStart - 600.f) / 100.f : 0.f, Seg ? (Seg->RouteStart + 400.f) / 100.f : 0.f));
+				}
+				for (const APowerTerminal* Other : Terminals)
+				{
+					const float Distance = Other != Terminal ? static_cast<float>(FVector::Dist2D(Other->GetActorLocation(), Terminal->GetActorLocation())) : TNumericLimits<float>::Max();
+					if (Distance <= Other->GetInteractRadius() + Terminal->GetInteractRadius())
+					{
+						Why.Add(FString::Printf(TEXT("terminal %.0f cm from %s: a place is within reach of both"), Distance, *Label(Other)));
+					}
+				}
+			}
+
+			if (Why.Num() > 0)
+			{
+				++Failures;
+				AddDetail(R, Name + TEXT(": ") + FString::Join(Why, TEXT("; ")));
+			}
+			Lines.Add(FString::Printf(TEXT("%s over segment %d at %s, lowest point %.0f cm above the floor, rod %.0f cm (%s), aimed %.1f m at %s, clear path to %.0f cm above it%s, terminal at %.1f m (space from %.1f m)"),
+				*Name, Segment, *Where(Mount), Clearance, Body->GetRodLength(), Body->DoesRodReachGeometry() ? TEXT("to the geometry above") : TEXT("maximum"),
+				AimDistance / 100.f, *Where(Aim), ClearHeight,
+				TightestOver.IsEmpty() ? TEXT(" (no terminal within 1 m of it)") : *FString::Printf(TEXT(", passing %.0f cm above %s"), TightestGap, *TightestOver),
+				TerminalS / 100.f, Seg ? Seg->RouteStart / 100.f : 0.f));
+		}
+
+		// The exit without paying any: no door is powered by a beacon's terminal, and the start-to-exit path exists.
+		bool bExitFree = true;
+		for (const ADoorDevice* Door : All<ADoorDevice>(World))
+		{
+			const APowerTerminal* Terminal = TerminalOf(World, Door);
+			bExitFree &= !Terminal || !Terminal->ActorHasTag(AAreaInfo::BeaconTag);
+		}
+		double PathLength = 0.0;
+		bExitFree &= C.PathLength(C.Start, C.Exit, PathLength);
+		if (!bExitFree)
+		{
+			++Failures;
+			AddDetail(R, TEXT("the exit cannot be reached without paying a beacon"));
+		}
+
+		R.bPass = Failures == 0;
+		R.Summary = FString::Printf(TEXT("%d beacons (recipe %d, %d Hall segments), exit without paying them %s%s%s"), Bodies.Num(), Wanted, Halls.Num(),
+			bExitFree ? TEXT("yes") : TEXT("NO"), Lines.Num() > 0 ? TEXT("; ") : TEXT(""), *FString::Join(Lines, TEXT("; ")));
+		return R;
+	}
 }
 
 bool FAreaValidationResult::AllPassed() const
@@ -846,6 +1160,7 @@ FAreaValidationResult AreaValidator::Validate(UWorld* World)
 	Result.Rules.Add(RuleCurbs(C));
 	Result.Rules.Add(RuleNavmesh(C));
 	Result.Rules.Add(RuleOptionalTerminals(C));
+	Result.Rules.Add(RuleBeacons(C));
 	Result.Seconds = FPlatformTime::Seconds() - T0;
 	return Result;
 }

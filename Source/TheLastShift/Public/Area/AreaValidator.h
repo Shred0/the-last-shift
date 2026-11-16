@@ -48,6 +48,13 @@ struct THELASTSHIFT_API FAreaValidationResult
  *    eye and the screen, in a closed corridor or room of its own, one per equal part of the route; the twin AI's
  *    terminal: in the last closed segment); no place is within reach of two terminals of any kind; the exit is reached
  *    without paying any of them.
+ * 8. Beacons: their count matches the recipe, one per Hall segment in route order; each hangs above its segment, clear
+ *    of every floor and catwalk by at least BeaconHeight less a margin; its one spot light is aimed at the point where the
+ *    route leaves the segment and reaches it, and nothing stands on the line from the light to BeaconClearPathHeight
+ *    above that point; its rod ends in the first geometry above or has
+ *    the maximum length; the body blocks nothing and changes no navigation; its terminal stands at the entrance and can
+ *    be reached and paid before the space is crossed, within reach of no other terminal; the exit is reached without
+ *    paying any beacon.
  */
 namespace AreaValidator
 {
