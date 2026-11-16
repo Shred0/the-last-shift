@@ -27,6 +27,12 @@
 #include "UI/StdMainMenuWidget.h"
 #include "UI/StdTextSceneWidget.h"
 #include "Components/Border.h"
+#include "Components/Button.h"
+#include "Components/HorizontalBox.h"
+#include "Components/OverlaySlot.h"
+#include "Framework/Application/SlateApplication.h"
+#include "UI/StdKeyPromptWidget.h"
+#include "UObject/UObjectIterator.h"
 #include "StdTextSceneTestListener.h"
 
 namespace StdPlayTests
@@ -101,6 +107,84 @@ namespace StdPlayTests
 			}
 			return false;
 		}));
+	}
+
+	/** A point of a widget on the desktop (Fraction of its size from its top left), from its last layout (zero when it has none yet). */
+	FVector2D WidgetPoint(const UWidget* Widget, const FVector2D& Fraction)
+	{
+		const FGeometry& Geometry = Widget->GetCachedGeometry();
+		return Geometry.GetLocalSize().IsNearlyZero() ? FVector2D::ZeroVector : FVector2D(Geometry.LocalToAbsolute(Geometry.GetLocalSize() * Fraction));
+	}
+
+	FVector2D WidgetCentre(const UWidget* Widget)
+	{
+		return WidgetPoint(Widget, FVector2D(0.5, 0.5));
+	}
+
+	/** A mouse move through Slate to Position (the hover follows it). */
+	void MoveMouse(const FVector2D& Position)
+	{
+		FSlateApplication& Slate = FSlateApplication::Get();
+		Slate.ProcessMouseMoveEvent(FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Position, Position,
+			TSet<FKey>(), EKeys::Invalid, 0.f, FModifierKeysState()));
+	}
+
+	/** What Slate hits at Position: the leaf widget of the path and its window (a diagnostic). */
+	FString DescribeHit(const FVector2D& Position)
+	{
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const FWidgetPath Path = Slate.LocateWindowUnderMouse(Position, Slate.GetInteractiveTopLevelWindows(), false, FSlateApplication::CursorUserIndex);
+		if (!Path.IsValid())
+		{
+			return TEXT("<nothing>");
+		}
+		return FString::Printf(TEXT("%s (%d widgets in the path) in window \"%s\""), *Path.Widgets.Last().Widget->ToString(), Path.Widgets.Num(),
+			*Path.GetWindow()->GetTitle().ToString());
+	}
+
+	/** A left click through Slate at Fraction of Widget (its centre by default), as the mouse would: moved there, pressed, released. Whether the press was handled. */
+	bool ClickWidget(const UWidget* Widget, FString* OutHit = nullptr, const FVector2D& Fraction = FVector2D(0.5, 0.5))
+	{
+		const FVector2D Centre = Widget ? WidgetPoint(Widget, Fraction) : FVector2D::ZeroVector;
+		if (Centre.IsZero() || !FSlateApplication::IsInitialized())
+		{
+			return false;
+		}
+		MoveMouse(Centre);
+		FSlateApplication& Slate = FSlateApplication::Get();
+		if (OutHit)
+		{
+			*OutHit = FString::Printf(TEXT("at (%.0f, %.0f): %s"), Centre.X, Centre.Y, *DescribeHit(Centre));
+		}
+		const TSet<FKey> Pressed = { EKeys::LeftMouseButton };
+		const bool bHandled = Slate.ProcessMouseButtonDownEvent(nullptr, FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Centre, Centre,
+			Pressed, EKeys::LeftMouseButton, 0.f, FModifierKeysState()));
+		Slate.ProcessMouseButtonUpEvent(FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Centre, Centre,
+			TSet<FKey>(), EKeys::LeftMouseButton, 0.f, FModifierKeysState()));
+		return bHandled;
+	}
+
+	/** A key through Slate, pressed and released; whether the press was handled. */
+	bool PressKey(const FKey& Key)
+	{
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const bool bHandled = Slate.ProcessKeyDownEvent(FKeyEvent(Key, FModifierKeysState(), FSlateApplication::CursorUserIndex, false, 0, 0));
+		Slate.ProcessKeyUpEvent(FKeyEvent(Key, FModifierKeysState(), FSlateApplication::CursorUserIndex, false, 0, 0));
+		return bHandled;
+	}
+
+	/** The text scene the test shows (in the viewport, owned by the player). */
+	UStdTextSceneWidget* FindShownTextScene()
+	{
+		const APlayerController* PlayerController = GetPlayerController();
+		for (TObjectIterator<UStdTextSceneWidget> It; It; ++It)
+		{
+			if (It->GetOwningPlayer() == PlayerController && It->IsInViewport())
+			{
+				return *It;
+			}
+		}
+		return nullptr;
 	}
 
 	/** The Player Mappable Key names of the plugin's IMC_Default. */
@@ -709,6 +793,25 @@ bool FStdTextScenePlayTest::RunTest(const FString& Parameters)
 		Screen->OnSceneFinished.AddDynamic(Listener, &UStdTextSceneTestListener::HandleFinished);
 		Screen->ShowAsRoot(50);
 
+		// The on-screen controls: in the tree, off by default, never focusable, showing the confirm and back keys.
+		UHorizontalBox* Controls = Cast<UHorizontalBox>(Screen->WidgetTree->FindWidget(TEXT("Box_Controls")));
+		UButton* ContinueButton = Cast<UButton>(Screen->WidgetTree->FindWidget(TEXT("Button_Continue")));
+		UButton* SkipButton = Cast<UButton>(Screen->WidgetTree->FindWidget(TEXT("Button_Skip")));
+		UStdKeyPromptWidget* ContinuePrompt = Cast<UStdKeyPromptWidget>(Screen->WidgetTree->FindWidget(TEXT("KeyPrompt_Continue")));
+		UStdKeyPromptWidget* SkipPrompt = Cast<UStdKeyPromptWidget>(Screen->WidgetTree->FindWidget(TEXT("KeyPrompt_Skip")));
+		TestTrue(TEXT("Controls: Box_Controls, Button_Continue, Button_Skip, KeyPrompt_Continue and KeyPrompt_Skip are in the tree"),
+			Controls && ContinueButton && SkipButton && ContinuePrompt && SkipPrompt);
+		if (!Controls || !ContinueButton || !SkipButton || !ContinuePrompt || !SkipPrompt)
+		{
+			Listener->RemoveFromRoot();
+			return;
+		}
+		TestFalse(TEXT("Controls: off by default"), Screen->bShowControls);
+		TestTrue(TEXT("Controls: neither button can take the focus"), !ContinueButton->GetIsFocusable() && !SkipButton->GetIsFocusable());
+		TestTrue(TEXT("Controls: the keys shown are Enter (go on) and Escape (skip)"), ContinuePrompt->GetDisplayedKey() == EKeys::Enter
+			&& SkipPrompt->GetDisplayedKey() == EKeys::Escape);
+		TestTrue(TEXT("Controls: the default labels are Continue and Skip"), Screen->ContinueLabel.ToString() == TEXT("Continue") && Screen->SkipLabel.ToString() == TEXT("Skip"));
+
 		const FString Short = TEXT("A short first entry of forty characters.");
 		const FString Long = TEXT("A second entry that is much longer than one line of the column. It has three sentences so that it has to wrap. ")
 			TEXT("The third sentence makes sure that the block holds more than two lines at the default width of the column.");
@@ -720,6 +823,7 @@ bool FStdTextScenePlayTest::RunTest(const FString& Parameters)
 		Screen->SetEntries(Entries);
 		TestEqual(TEXT("Nothing starts before StartScene"), Listener->Started.Num(), 0);
 		Screen->StartScene();
+		TestTrue(TEXT("Controls off: collapsed while an entry is shown"), !Screen->AreControlsShown() && Controls->GetVisibility() == ESlateVisibility::Collapsed);
 		TestEqual(TEXT("StartScene shows entry 0"), Screen->GetCurrentIndex(), 0);
 		TestTrue(TEXT("Entry 0 is reported as it starts"), Listener->Started.Num() == 1 && Listener->Started[0] == 0);
 		TestTrue(TEXT("Entry 0 starts with nothing typed"), Screen->GetVisibleText().IsEmpty() && Screen->IsTyping());
@@ -783,6 +887,108 @@ bool FStdTextScenePlayTest::RunTest(const FString& Parameters)
 			&& StdTextScene::IsConfirmKey(EKeys::Gamepad_FaceButton_Bottom));
 		TestTrue(TEXT("Escape and the gamepad's right face button are back keys, not confirm keys"), UStdScreenWidget::IsBackKey(EKeys::Escape)
 			&& UStdScreenWidget::IsBackKey(EKeys::Gamepad_FaceButton_Right) && !StdTextScene::IsConfirmKey(EKeys::Escape));
+		TestTrue(TEXT("Controls off: still collapsed after the scenes"), Controls->GetVisibility() == ESlateVisibility::Collapsed);
+
+		// --- The controls switched on ---
+		Screen->SetShowControls(true);
+		TestFalse(TEXT("Controls on: not shown on a finished scene"), Screen->AreControlsShown());
+		Screen->ControlsOpacity = 0.5f;
+		Screen->SetEntries(Entries);
+		TestTrue(TEXT("Controls on: not shown before the start"), !Screen->AreControlsShown() && Controls->GetVisibility() == ESlateVisibility::Collapsed);
+		Screen->StartScene();
+		TestTrue(TEXT("Controls on: shown while an entry is on screen"), Screen->AreControlsShown() && Controls->GetVisibility() != ESlateVisibility::Collapsed);
+		FLinearColor Expected = Entries[0].TextColor;
+		Expected.A *= 0.5f;
+		TestTrue(TEXT("Controls on: in the entry's text colour at the controls' opacity"), Screen->GetControlsColor().Equals(Expected)
+			&& ContinuePrompt->Color.Equals(Expected) && SkipPrompt->Color.Equals(Expected));
+		TestTrue(TEXT("Controls on: labelled Continue and Skip"), ContinuePrompt->Label.ToString() == TEXT("Continue") && SkipPrompt->Label.ToString() == TEXT("Skip"));
+		const UOverlaySlot* ControlsSlot = Cast<UOverlaySlot>(Controls->Slot);
+		TestTrue(TEXT("Controls on: bottom right corner, ControlsMargin from the edges"), ControlsSlot && ControlsSlot->GetHorizontalAlignment() == HAlign_Right
+			&& ControlsSlot->GetVerticalAlignment() == VAlign_Bottom && ControlsSlot->GetPadding() == FMargin(0.f, 0.f, Screen->ControlsMargin, Screen->ControlsMargin));
+		Screen->FocusDefaultWidget();
+	});
+
+	// The clicks go through Slate, so they need the controls laid out.
+	WaitUntil(this, TEXT("the controls are laid out"), 5.0, []()
+	{
+		const UStdTextSceneWidget* Screen = FindShownTextScene();
+		const UWidget* Button = Screen ? Screen->WidgetTree->FindWidget(TEXT("Button_Skip")) : nullptr;
+		return Button && !WidgetCentre(Button).IsZero();
+	});
+
+	Step([this]()
+	{
+		APlayerController* PlayerController = GetPlayerController();
+		UStdTextSceneWidget* Screen = FindShownTextScene();
+		UStdTextSceneTestListener* Listener = nullptr;
+		for (TObjectIterator<UStdTextSceneTestListener> It; It; ++It)
+		{
+			Listener = *It;
+		}
+		UButton* ContinueButton = Screen ? Cast<UButton>(Screen->WidgetTree->FindWidget(TEXT("Button_Continue"))) : nullptr;
+		UButton* SkipButton = Screen ? Cast<UButton>(Screen->WidgetTree->FindWidget(TEXT("Button_Skip"))) : nullptr;
+		if (!TestTrue(TEXT("Controls on: the scene and its controls are still shown"), Screen && Listener && ContinueButton && SkipButton))
+		{
+			return;
+		}
+		const UWidget* Background = Screen->WidgetTree->FindWidget(TEXT("Border_Background"));
+		const int32 StartedBefore = Listener->Started.Num();
+		const int32 FinishedBefore = Listener->Finished.Num();
+		auto ScreenHasFocus = [Screen, PlayerController]()
+		{
+			return Screen->HasUserFocus(PlayerController);
+		};
+
+		TestTrue(TEXT("Clicks: entry 0 being typed"), Screen->GetCurrentIndex() == 0 && Screen->IsTyping());
+		TestTrue(TEXT("Clicks: a click on Continue is delivered"), ClickWidget(ContinueButton));
+		TestTrue(TEXT("Clicks: Continue on an entry being typed shows it whole, once"), Screen->GetCurrentIndex() == 0 && !Screen->IsTyping());
+		TestTrue(TEXT("Clicks: the screen keeps the focus after a click on Continue"), ScreenHasFocus());
+		TestTrue(TEXT("Clicks: a click on Continue is delivered again"), ClickWidget(ContinueButton));
+		TestTrue(TEXT("Clicks: Continue on a whole entry shows the next, once"), Screen->GetCurrentIndex() == 1 && Screen->IsTyping());
+		TestEqual(TEXT("Clicks: one entry started by the two clicks"), Listener->Started.Num() - StartedBefore, 1);
+		FLinearColor Expected = Screen->GetShownTextColor();
+		Expected.A *= Screen->ControlsOpacity;
+		TestTrue(TEXT("Controls on: entry 1 recolours them (dark on white)"), Screen->GetControlsColor().Equals(Expected));
+
+		// The mouse over a control: the keys still go on and skip.
+		MoveMouse(WidgetCentre(ContinueButton));
+		TestTrue(TEXT("Focus: Continue is hovered"), ContinueButton->IsHovered());
+		TestTrue(TEXT("Focus: hovering Continue leaves the focus on the screen"), ScreenHasFocus());
+		TestTrue(TEXT("Focus: Enter with the mouse over Continue is handled"), PressKey(EKeys::Enter));
+		TestTrue(TEXT("Focus: ... and shows entry 1 whole, once"), Screen->GetCurrentIndex() == 1 && !Screen->IsTyping());
+		MoveMouse(WidgetCentre(SkipButton));
+		TestTrue(TEXT("Focus: hovering Skip leaves the focus on the screen"), SkipButton->IsHovered() && ScreenHasFocus());
+		TestTrue(TEXT("Focus: Enter with the mouse over Skip goes on, never presses Skip"), PressKey(EKeys::Enter) && Screen->GetCurrentIndex() == 2 && !Screen->IsFinished());
+
+		// A click on the scene away from the controls still goes on (bClickConfirms). Near the top left corner: an editor
+		// window (the Message Log) may float over the middle of the viewport during a test run.
+		if (Background)
+		{
+			const FVector2D Corner(0.04, 0.06);
+			const FVector2D Point = WidgetPoint(Background, Corner);
+			FSlateApplication& Slate = FSlateApplication::Get();
+			const FWidgetPath Path = Slate.LocateWindowUnderMouse(Point, Slate.GetInteractiveTopLevelWindows(), false, FSlateApplication::CursorUserIndex);
+			TestTrue(TEXT("Clicks: the point clicked on the scene is the scene's"), Path.IsValid() && Path.ContainsWidget(Screen->GetCachedWidget().Get()));
+			FString Hit;
+			TestTrue(TEXT("Clicks: a click on the scene is handled"), ClickWidget(Background, &Hit, Corner));
+			AddInfo(FString::Printf(TEXT("Click on the scene %s"), *Hit));
+			TestTrue(TEXT("Clicks: a click on the scene away from the controls still goes on (shows entry 2 whole)"), Screen->GetCurrentIndex() == 2 && !Screen->IsTyping());
+		}
+
+		const int32 StartedBeforeSkip = Listener->Started.Num();
+		TestTrue(TEXT("Clicks: a click on Skip is delivered"), ClickWidget(SkipButton));
+		TestTrue(TEXT("Clicks: Skip ends the scene as skipped"), Screen->IsFinished() && Screen->WasSkipped());
+		TestTrue(TEXT("Clicks: the skip is reported once"), Listener->Finished.Num() == FinishedBefore + 1 && Listener->Finished.Last());
+		TestEqual(TEXT("Clicks: Skip does not also go on (no entry started)"), Listener->Started.Num() - StartedBeforeSkip, 0);
+		TestTrue(TEXT("Clicks: the screen keeps the focus after a click on Skip"), ScreenHasFocus());
+		TestFalse(TEXT("Controls on: hidden once the scene has ended"), Screen->AreControlsShown());
+
+		// After the clicks, the keys on a new play: confirm goes on, back skips.
+		Screen->SetEntries({ { FText::FromString(TEXT("One more entry.")), FLinearColor::White, FLinearColor::Black } });
+		Screen->StartScene();
+		TestTrue(TEXT("Focus: after the clicks Enter still goes on"), PressKey(EKeys::Enter) && !Screen->IsTyping());
+		TestTrue(TEXT("Focus: after the clicks the back key still skips"), PressKey(EKeys::Gamepad_FaceButton_Right) && Screen->IsFinished() && Screen->WasSkipped());
+		TestFalse(TEXT("Focus: neither control holds the keyboard focus"), ContinueButton->HasAnyUserFocus() || SkipButton->HasAnyUserFocus());
 
 		Screen->CloseScreen();
 		Listener->RemoveFromRoot();

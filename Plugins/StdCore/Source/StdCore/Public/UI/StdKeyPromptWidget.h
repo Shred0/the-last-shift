@@ -19,7 +19,8 @@ class UTextBlock;
  *
  * Keyboard and mouse keys are shown unless bPreferGamepad; an action with no key of the preferred kind shows its other
  * key. Std Core does not track which device the player used last, so whoever owns the prompt sets bPreferGamepad when
- * it knows. "Unbound" when the action has no key.
+ * it knows. "Unbound" when the action has no key. A FixedKey, when set, is shown instead and the action is ignored
+ * (for keys a screen reads directly, not through an action).
  *
  * The tree (Border_Key holding Text_Key, then Text_Label) is built in C++ when the class is used without a widget
  * Blueprint; a Blueprint subclass may provide its own widgets with those names. Fonts come from the Std Core UI theme.
@@ -34,6 +35,10 @@ public:
 	/** Action whose key is shown. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, BlueprintSetter = SetInputAction, Category = "Std Core|Key Prompt")
 	TObjectPtr<const UInputAction> InputAction;
+
+	/** A key shown as it is, whatever InputAction is bound to. Empty (the default): the action's key is shown. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, BlueprintSetter = SetFixedKey, Category = "Std Core|Key Prompt")
+	FKey FixedKey;
 
 	/** Text after the key cap. Empty hides it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, BlueprintSetter = SetLabel, Category = "Std Core|Key Prompt")
@@ -61,6 +66,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Std Core|Key Prompt")
 	void SetInputAction(const UInputAction* InAction);
+
+	/** Shows InKey as it is; an invalid key goes back to the action's key. */
+	UFUNCTION(BlueprintCallable, Category = "Std Core|Key Prompt")
+	void SetFixedKey(FKey InKey);
 
 	UFUNCTION(BlueprintCallable, Category = "Std Core|Key Prompt")
 	void SetLabel(const FText& InLabel);

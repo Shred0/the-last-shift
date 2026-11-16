@@ -8,6 +8,8 @@
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunTextSceneWidget)
 
+#define LOCTEXT_NAMESPACE "TheLastShift"
+
 void URunTextSceneWidget::Play(ERunSceneKind InKind, FName InSceneName, const TArray<FRunSceneLine>& InLines)
 {
 	Kind = InKind;
@@ -15,6 +17,10 @@ void URunTextSceneWidget::Play(ERunSceneKind InKind, FName InSceneName, const TA
 	Lines = InLines;
 	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
 	CharsPerSecond = Settings->GetSceneCharsPerSecond();
+	// The on-screen controls for going on and skipping, with the game's short UI labels.
+	ContinueLabel = LOCTEXT("SceneContinue", "Continue");
+	SkipLabel = LOCTEXT("SceneSkip", "Skip");
+	SetShowControls(true);
 	TArray<FStdTextSceneEntry> NewEntries;
 	for (const FRunSceneLine& Line : Lines)
 	{
@@ -62,3 +68,5 @@ void URunTextSceneWidget::HandleFinished(UStdTextSceneWidget* Screen, bool bInSk
 		CloseScreen();
 	}
 }
+
+#undef LOCTEXT_NAMESPACE

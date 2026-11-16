@@ -7,15 +7,21 @@
 // it), tls.Ending.Open (opens the ending with the run's state now: in the main menu at once, from an area through the
 // travel the last area's exit makes) and tls.Scene.LevelCheck (the level of the home AI's text at a battery in the three
 // places that degrade it). The tests read their own fixture rows (Debug/NarrativeFixture), never the rows of Narrative/.
-// Development builds only.
+// Brief 9b: the scenes' on-screen controls (go on, skip): shown on the prologue and an ending's text, not on the choice
+// list; real Slate clicks and keys with the mouse over them; tls.Scene.ControlsLayout measures them against the text and
+// shoots them at the resolutions it is given. Development builds only.
 
 #include "Area/AreaGenerator.h"
 #include "Blueprint/WidgetTree.h"
+#include "Components/Button.h"
+#include "Components/HorizontalBox.h"
 #include "Containers/Ticker.h"
 #include "Debug/NarrativeFixture.h"
 #include "Debug/SceneTestListener.h"
 #include "Debug/TlsDebugCommon.h"
 #include "Engine/DataTable.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "Flow/StdFlowSubsystem.h"
@@ -39,6 +45,7 @@
 #include "TextChannel/TwinWriting.h"
 #include "TheLastShift.h"
 #include "Time/HomeStateSubsystem.h"
+#include "UI/StdKeyPromptWidget.h"
 #include "UI/StdMainMenuWidget.h"
 #include "UnrealClient.h"
 #include "UObject/StrongObjectPtr.h"
@@ -260,6 +267,20 @@ namespace SceneDebug
 		Note(FString::Printf(TEXT("screenshot %s"), *Path));
 	}
 
+	/** A screenshot to Saved/Screenshots/Brief9b, its name ending in the viewport size. */
+	static void Shot9b(const FString& Name)
+	{
+		FIntPoint Size = FIntPoint::ZeroValue;
+		if (UGameViewportClient* Viewport = W() ? W()->GetGameViewport() : nullptr; Viewport && Viewport->Viewport)
+		{
+			Size = Viewport->Viewport->GetSizeXY();
+		}
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief9b"),
+			FString::Printf(TEXT("%s_%dx%d.png"), *Name, Size.X, Size.Y)));
+		FScreenshotRequest::RequestScreenshot(Path, true, false);
+		Note(FString::Printf(TEXT("screenshot %s"), *Path));
+	}
+
 	static void Start(const FString& Name, bool bQuit, TArray<FStep>&& Steps)
 	{
 		GRun = FRun();
@@ -288,6 +309,149 @@ namespace SceneDebug
 	}
 
 	static bool Near(const FLinearColor& A, const FLinearColor& B) { return A.Equals(B, 0.002f); }
+
+	// --- Brief 9b: the on-screen controls ---
+
+	/** A real key through Slate to whatever holds the focus now (no refocus: the focus is what is tested). */
+	static bool SendKeyAsIs(const FKey& Key)
+	{
+		if (!FSlateApplication::IsInitialized())
+		{
+			return false;
+		}
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const bool bHandled = Slate.ProcessKeyDownEvent(FKeyEvent(Key, FModifierKeysState(), 0, false, 0, 0));
+		Slate.ProcessKeyUpEvent(FKeyEvent(Key, FModifierKeysState(), 0, false, 0, 0));
+		return bHandled;
+	}
+
+	static UWidget* SceneWidget(const UStdTextSceneWidget* Scene, const TCHAR* Name)
+	{
+		return Scene && Scene->WidgetTree ? Scene->WidgetTree->FindWidget(FName(Name)) : nullptr;
+	}
+
+	/** A widget's last layout on the desktop, pixels (empty before its first layout). */
+	static FBox2D WidgetRect(const UWidget* Widget)
+	{
+		if (!Widget)
+		{
+			return FBox2D(ForceInit);
+		}
+		const FGeometry& G = Widget->GetCachedGeometry();
+		const FVector2D Min(G.GetAbsolutePosition());
+		const FVector2D Size(G.GetAbsoluteSize());
+		return Size.IsNearlyZero() ? FBox2D(ForceInit) : FBox2D(Min, Min + Size);
+	}
+
+	/** A point of a widget (Fraction of its size from its top left) on the desktop; zero before its first layout. */
+	static FVector2D WidgetPoint(const UWidget* Widget, const FVector2D& Fraction)
+	{
+		const FBox2D Rect = WidgetRect(Widget);
+		return Rect.bIsValid ? Rect.Min + Rect.GetSize() * Fraction : FVector2D::ZeroVector;
+	}
+
+	static FVector2D WidgetCentre(const UWidget* Widget) { return WidgetPoint(Widget, FVector2D(0.5, 0.5)); }
+
+	static void MoveMouse(const FVector2D& Position)
+	{
+		FSlateApplication::Get().ProcessMouseMoveEvent(FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Position, Position,
+			TSet<FKey>(), EKeys::Invalid, 0.f, FModifierKeysState()));
+	}
+
+	/** A real left click through Slate at Fraction of Widget (its centre by default): moved there, pressed, released. Whether the press was handled; what it hit is logged. */
+	static bool ClickWidget(const UWidget* Widget, const FVector2D& Fraction = FVector2D(0.5, 0.5))
+	{
+		const FVector2D Centre = WidgetPoint(Widget, Fraction);
+		if (Centre.IsZero() || !FSlateApplication::IsInitialized())
+		{
+			return false;
+		}
+		MoveMouse(Centre);
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const FWidgetPath Path = Slate.LocateWindowUnderMouse(Centre, Slate.GetInteractiveTopLevelWindows(), false, FSlateApplication::CursorUserIndex);
+		Note(FString::Printf(TEXT("click on %s at (%.0f, %.0f) hits %s"), *GetNameSafe(Widget), Centre.X, Centre.Y,
+			Path.IsValid() ? *FString::Printf(TEXT("%s (%d widgets in the path)"), *Path.Widgets.Last().Widget->ToString(), Path.Widgets.Num()) : TEXT("<nothing>")));
+		const bool bHandled = Slate.ProcessMouseButtonDownEvent(nullptr, FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Centre, Centre,
+			TSet<FKey>({ EKeys::LeftMouseButton }), EKeys::LeftMouseButton, 0.f, FModifierKeysState()));
+		Slate.ProcessMouseButtonUpEvent(FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Centre, Centre,
+			TSet<FKey>(), EKeys::LeftMouseButton, 0.f, FModifierKeysState()));
+		return bHandled;
+	}
+
+	/** The scene holds the keyboard focus and neither control does. */
+	static bool SceneHoldsFocus(const UStdTextSceneWidget* Scene)
+	{
+		APlayerController* PC = W() ? W()->GetFirstPlayerController() : nullptr;
+		const UWidget* Continue = SceneWidget(Scene, TEXT("Button_Continue"));
+		const UWidget* Skip = SceneWidget(Scene, TEXT("Button_Skip"));
+		return Scene && PC && Scene->HasUserFocus(PC) && Continue && Skip && !Continue->HasAnyUserFocus() && !Skip->HasAnyUserFocus();
+	}
+
+	/** The controls of the scene on screen: shown, the confirm and back keys with Continue and Skip, in the line's text colour at the controls' opacity. */
+	static void CheckControls(const FString& Label, const URunTextSceneWidget* Scene)
+	{
+		const UStdKeyPromptWidget* Continue = Cast<UStdKeyPromptWidget>(SceneWidget(Scene, TEXT("KeyPrompt_Continue")));
+		const UStdKeyPromptWidget* Skip = Cast<UStdKeyPromptWidget>(SceneWidget(Scene, TEXT("KeyPrompt_Skip")));
+		const UWidget* Box = SceneWidget(Scene, TEXT("Box_Controls"));
+		Check(Scene && Scene->bShowControls && Scene->AreControlsShown() && Box && Box->GetVisibility() != ESlateVisibility::Collapsed,
+			FString::Printf(TEXT("%s: the two controls are shown"), *Label));
+		Check(Continue && Skip && Continue->GetDisplayedKey() == EKeys::Enter && Skip->GetDisplayedKey() == EKeys::Escape
+			&& Continue->Label.ToString() == TEXT("Continue") && Skip->Label.ToString() == TEXT("Skip"),
+			FString::Printf(TEXT("%s: [%s] %s and [%s] %s"), *Label, Continue ? *Continue->GetKeyText().ToString() : TEXT("-"), Continue ? *Continue->Label.ToString() : TEXT("-"),
+				Skip ? *Skip->GetKeyText().ToString() : TEXT("-"), Skip ? *Skip->Label.ToString() : TEXT("-")));
+		FLinearColor Want = Scene ? Scene->GetShownTextColor() : FLinearColor::Transparent;
+		Want.A *= Scene ? Scene->ControlsOpacity : 0.f;
+		Check(Continue && Skip && Near(Continue->Color, Want) && Near(Skip->Color, Want), FString::Printf(TEXT("%s: in the line's text colour at opacity %.2f: %s"), *Label,
+			Scene ? Scene->ControlsOpacity : 0.f, Continue ? *Continue->Color.ToString() : TEXT("-")));
+	}
+
+	/**
+	 * Where the controls are against the text: the gaps between the controls and the laid-out block and the column, and
+	 * from the corner, in pixels and slate units. Logged; checked when bCheck (the controls never touch the text).
+	 */
+	static void MeasureControls(const FString& Label, const URunTextSceneWidget* Scene, bool bCheck)
+	{
+		const FBox2D Screen = WidgetRect(SceneWidget(Scene, TEXT("Border_Background")));
+		const FBox2D Text = WidgetRect(SceneWidget(Scene, TEXT("SizeBox_Line")));
+		const FBox2D Controls = WidgetRect(SceneWidget(Scene, TEXT("Box_Controls")));
+		const UWidget* Root = SceneWidget(Scene, TEXT("Border_Background"));
+		const float Scale = Root ? Root->GetCachedGeometry().Scale : 1.f;
+		if (!Screen.bIsValid || !Text.bIsValid || !Controls.bIsValid || Scale <= 0.f)
+		{
+			Check(!bCheck, FString::Printf(TEXT("%s: the controls and the text are laid out"), *Label));
+			return;
+		}
+		const double ColumnHalf = Scene->ColumnWidth * Scale * 0.5;
+		const double ColumnRight = Screen.GetCenter().X + ColumnHalf;
+		const FVector2D TextGap(Controls.Min.X - Text.Max.X, Controls.Min.Y - Text.Max.Y);
+		const double ColumnGap = Controls.Min.X - ColumnRight;
+		const FVector2D Corner(Screen.Max.X - Controls.Max.X, Screen.Max.Y - Controls.Max.Y);
+		const bool bApart = TextGap.X > 0.0 || TextGap.Y > 0.0;
+		Note(FString::Printf(TEXT("%s: screen %.0fx%.0f px, scale %.3f (%.0fx%.0f slate); text block %.0fx%.0f px; controls %.0fx%.0f px at (%.0f, %.0f); ")
+			TEXT("controls to the text block: %.0f px right of it, %.0f px below it (%.0f, %.0f slate); to the column's edge %.0f px (%.0f slate); from the corner %.0f, %.0f px (%.0f, %.0f slate)"),
+			*Label, Screen.GetSize().X, Screen.GetSize().Y, Scale, Screen.GetSize().X / Scale, Screen.GetSize().Y / Scale, Text.GetSize().X, Text.GetSize().Y,
+			Controls.GetSize().X, Controls.GetSize().Y, Controls.Min.X - Screen.Min.X, Controls.Min.Y - Screen.Min.Y, TextGap.X, TextGap.Y, TextGap.X / Scale, TextGap.Y / Scale,
+			ColumnGap, ColumnGap / Scale, Corner.X, Corner.Y, Corner.X / Scale, Corner.Y / Scale));
+		if (bCheck)
+		{
+			Check(bApart && !Controls.Intersect(Text), FString::Printf(TEXT("%s: the controls do not touch the text"), *Label));
+			Check(FMath::IsNearlyEqual(Corner.X / Scale, Scene->ControlsMargin, 1.0) && FMath::IsNearlyEqual(Corner.Y / Scale, Scene->ControlsMargin, 1.0),
+				FString::Printf(TEXT("%s: bottom right corner, ControlsMargin %.0f from both edges"), *Label, Scene->ControlsMargin));
+		}
+	}
+
+	static bool ControlsLaidOut()
+	{
+		return !WidgetCentre(SceneWidget(TopScene(), TEXT("Button_Skip"))).IsZero();
+	}
+
+	/** The choice list has no control of a text scene, and no text scene is on screen with it. */
+	static void CheckNoControlsOnChoice(const FString& Label, const URunEndingWidget* Ending)
+	{
+		const bool bNone = Ending && Ending->WidgetTree && !Ending->WidgetTree->FindWidget(TEXT("Box_Controls")) && !Ending->WidgetTree->FindWidget(TEXT("Button_Continue"))
+			&& !Ending->WidgetTree->FindWidget(TEXT("Button_Skip")) && Top() == Ending && !TopScene();
+		Check(bNone, FString::Printf(TEXT("%s: the choice list shows no on-screen controls"), *Label));
+	}
 
 	// --- tls.SceneTest ---
 
@@ -360,6 +524,8 @@ namespace SceneDebug
 			Check(Took >= Expected - 0.05f && Took <= Expected + 0.3f, FString::Printf(TEXT("A: %d characters typed in %.2f s (%.2f s at %.0f per second)"), Len, Took, Expected,
 				UTheLastShiftSettings::Get()->GetSceneCharsPerSecond()));
 			Check(Scene->GetVisibleText().Replace(TEXT("\n"), TEXT(" ")) == FixtureSceneText(TEXT("Prologue_1")), TEXT("A: line 1 shown whole, as written"));
+			CheckControls(TEXT("A: line 1 (Paradise)"), Scene);
+			MeasureControls(TEXT("A: line 1 (Paradise)"), Scene, true);
 			Shot(TEXT("Prologue_1_Paradise"));
 			return 0.5f;
 		}));
@@ -396,6 +562,8 @@ namespace SceneDebug
 			const URunTextSceneWidget* Scene = TopScene();
 			Check(Scene && Scene->IsTyping(), FString::Printf(TEXT("A: line 3 still being typed: %d of %d characters"), Scene ? Scene->GetVisibleText().Len() : 0,
 				Scene ? Scene->GetLaidOutText().Len() : 0));
+			CheckControls(TEXT("A: line 3 (HomeAI)"), Scene);
+			MeasureControls(TEXT("A: line 3 (HomeAI, the longest fixture line)"), Scene, true);
 			Shot(TEXT("Prologue_3_HomeAI_HalfTyped"));
 			return 0.5f;
 		}));
@@ -429,6 +597,7 @@ namespace SceneDebug
 			URunTextSceneWidget* Scene = TopScene();
 			SendKey(EKeys::Enter);
 			Check(Scene && Scene->IsFinished() && !Scene->WasSkipped(), TEXT("A: the prologue ends, read through"));
+			Check(Scene && !Scene->AreControlsShown(), TEXT("A: the controls go with the text once the prologue has ended"));
 			Check(Transitioning(), TEXT("A: the travel to area 1 starts"));
 			const FString Label = Run()->GetLastTravelLabel().ToString();
 			Check(Label.Contains(TEXT("Fixture entry line of act 1")), FString::Printf(TEXT("A: the travel screen carries the area entry line: \"%s\""), *Label));
@@ -495,10 +664,90 @@ namespace SceneDebug
 		S.Add(WaitFor(TEXT("C: arrived in area 1 (Select act)"), []() { return InArea(1); }, 90.f, []() { return 0.5f; }));
 		AddBackToMenu(S, TEXT("C"));
 
+		// --- E: the controls with the mouse: Continue, the keys over them and after the clicks, back after the clicks ---
+		S.Add(Do(TEXT("E: New game with a save"), []()
+		{
+			GRun.LinesSeen = LineCount();
+			TimeStateDebug::ClickMainMenuButton(W(), TEXT("Button_NewGame"), false);
+			URunTextSceneWidget* Scene = TopScene();
+			Check(Scene && Scene->GetCurrentIndex() == 0 && Scene->IsTyping(), TEXT("E: the prologue opens on line 1, being typed"));
+			if (Scene)
+			{
+				// The console box took the focus with the command: the scene gets it as it would when opened by a click.
+				Scene->FocusDefaultWidget();
+			}
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("E: the controls are laid out"), []() { return ControlsLaidOut(); }, 5.f, []()
+		{
+			URunTextSceneWidget* Scene = TopScene();
+			const UWidget* Continue = SceneWidget(Scene, TEXT("Button_Continue"));
+			const UWidget* Skip = SceneWidget(Scene, TEXT("Button_Skip"));
+			const UWidget* Background = SceneWidget(Scene, TEXT("Border_Background"));
+			const int32 Lines = LineCount();
+			Check(Scene && Scene->IsTyping() && Scene->GetCurrentIndex() == 0, TEXT("E: line 1 still being typed"));
+			Check(ClickWidget(Continue), TEXT("E: a click on Continue"));
+			Check(Scene && Scene->GetCurrentIndex() == 0 && !Scene->IsTyping() && LineCount() == Lines, TEXT("E: Continue on a line being typed shows it whole and stays on it"));
+			Check(SceneHoldsFocus(Scene), TEXT("E: after the click the scene holds the focus, not Continue"));
+			Check(ClickWidget(Continue), TEXT("E: a click on Continue on the whole line"));
+			Check(Scene && Scene->GetCurrentIndex() == 1 && Scene->IsTyping() && LineCount() == Lines + 1, FString::Printf(TEXT("E: ... shows the next line, once (line %d, %d started)"),
+				Scene ? Scene->GetCurrentIndex() + 1 : 0, LineCount() - Lines));
+			MoveMouse(WidgetCentre(Continue));
+			Check(Continue && Continue->IsHovered() && SceneHoldsFocus(Scene), TEXT("E: the mouse over Continue: the scene keeps the focus"));
+			Check(SendKeyAsIs(EKeys::Enter) && Scene && Scene->GetCurrentIndex() == 1 && !Scene->IsTyping(), TEXT("E: Enter with the mouse over Continue shows line 2 whole, once"));
+			MoveMouse(WidgetCentre(Skip));
+			Check(Skip && Skip->IsHovered() && SceneHoldsFocus(Scene), TEXT("E: the mouse over Skip: the scene keeps the focus"));
+			Check(SendKeyAsIs(EKeys::Enter) && Scene && Scene->GetCurrentIndex() == 2 && !Scene->IsFinished(), TEXT("E: Enter with the mouse over Skip goes on to line 3 (never presses Skip)"));
+			CheckControls(TEXT("E: line 3 (HomeAI)"), Scene);
+			// Near the top left corner, away from the controls (an editor window may float over the middle of the viewport in PIE).
+			Check(ClickWidget(Background, FVector2D(0.04, 0.06)), TEXT("E: a click on the scene, handled"));
+			Check(Scene && Scene->GetCurrentIndex() == 2 && !Scene->IsTyping(), TEXT("E: a click on the scene away from the controls still goes on (line 3 whole)"));
+			const int32 Before = LineCount();
+			MoveMouse(WidgetCentre(Skip));
+			Check(SendKeyAsIs(BackKey()), FString::Printf(TEXT("E: back (%s) with the mouse over Skip, after the clicks, handled"), *BackKey().ToString()));
+			Check(Scene && Scene->IsFinished() && Scene->WasSkipped() && LineCount() == Before, TEXT("E: ... skips the prologue, no line started"));
+			Check(Transitioning(), TEXT("E: the travel to area 1 starts"));
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("E: arrived in area 1"), []() { return InArea(1); }, 90.f, []() { return 1.f; }));
+		AddBackToMenu(S, TEXT("E"));
+
+		// --- F: a click on Skip ---
+		S.Add(Do(TEXT("F: New game with a save"), []()
+		{
+			TimeStateDebug::ClickMainMenuButton(W(), TEXT("Button_NewGame"), false);
+			URunTextSceneWidget* Scene = TopScene();
+			Check(Scene && Scene->GetCurrentIndex() == 0, TEXT("F: the prologue opens on line 1"));
+			if (Scene)
+			{
+				Scene->FocusDefaultWidget();
+			}
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("F: the controls are laid out"), []() { return ControlsLaidOut(); }, 5.f, []()
+		{
+			URunTextSceneWidget* Scene = TopScene();
+			const int32 Before = LineCount();
+			Check(ClickWidget(SceneWidget(Scene, TEXT("Button_Skip"))), TEXT("F: a click on Skip"));
+			Check(Scene && Scene->IsFinished() && Scene->WasSkipped(), TEXT("F: Skip ends the prologue, reported as skipped"));
+			Check(LineCount() == Before && Scene && Scene->GetCurrentIndex() == 0, TEXT("F: ... and does not also go on (no line started)"));
+			Check(SceneHoldsFocus(Scene), TEXT("F: after the click the scene holds the focus, not Skip"));
+			Check(Transitioning(), TEXT("F: the travel to area 1 starts at once"));
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("F: arrived in area 1"), []() { return InArea(1); }, 90.f, []()
+		{
+			const FString Now = InputSignature();
+			Check(Now == GRun.InputFirst, FString::Printf(TEXT("F: input in area 1 after a click on Skip is the same as after the prologue read through: %s"), *Now));
+			return 1.f;
+		}));
+		AddBackToMenu(S, TEXT("F"));
+
 		// --- D: no Prologue row ---
 		S.Add(Do(TEXT("D: New game without Prologue rows"), []()
 		{
 			NarrativeFixture::SetPrologueRows(false);
+			GRun.LinesSeen = LineCount();
 			TimeStateDebug::ClickMainMenuButton(W(), TEXT("Button_NewGame"), false);
 			Check(!TopScene() && Transitioning() && LineCount() == GRun.LinesSeen, TEXT("D: New game goes straight to the travel to area 1"));
 			return 0.f;
@@ -575,6 +824,12 @@ namespace SceneDebug
 			Check(Ending && Ending->GetEntryCount() == 1 && Ending->GetEntryLabel(0).ToString() == TEXT("Inject the harvest"),
 				FString::Printf(TEXT("battery %.2f, no twin part: one entry (%s)"), Battery, *TimeStateDebug::DescribeChoiceList(W())));
 			Check(Scenes()->IsEndingPending() == false, TEXT("opening it here leaves no ending pending"));
+			if (Expected == ETextDegradation::Full)
+			{
+				CheckNoControlsOnChoice(TEXT("battery 1.00"), Ending);
+				SendKey(BackKey());
+				Check(Top() == Ending && Ending && Ending->IsInViewport() && !TopScene(), FString::Printf(TEXT("battery 1.00: back (%s) on the choice list does nothing"), *BackKey().ToString()));
+			}
 			return 0.5f;
 		}));
 		S.Add(Do(FString::Printf(TEXT("message at battery %.2f: screenshot"), Battery), [ShotName]()
@@ -629,10 +884,12 @@ namespace SceneDebug
 				FString::Printf(TEXT("%s: in the Engineer colour %s on %s"), *Ending.ToString(), *Want.ToString(), *Back.ToString()));
 			const UTlsSceneTestListener::FLine* Last = LastLine();
 			Check(Last && Last->Scene == Ending && Last->Voice == ESceneVoice::Engineer, TEXT("the ending's line is reported as it starts"));
+			CheckControls(FString::Printf(TEXT("%s: its text"), *Ending.ToString()), Text);
 			return 0.f;
 		}));
-		S.Add(WaitFor(FString::Printf(TEXT("ending %s: typed out"), *Ending.ToString()), []() { return TopScene() && !TopScene()->IsTyping(); }, 15.f, [ShotName]()
+		S.Add(WaitFor(FString::Printf(TEXT("ending %s: typed out"), *Ending.ToString()), []() { return TopScene() && !TopScene()->IsTyping(); }, 15.f, [ShotName, Ending]()
 		{
+			MeasureControls(FString::Printf(TEXT("%s: its text"), *Ending.ToString()), TopScene(), true);
 			Shot(ShotName);
 			return 0.6f;
 		}));
@@ -838,7 +1095,9 @@ namespace SceneDebug
 				FString::Printf(TEXT("chain: the last message at the run's battery now (0.50): %s \"%s\""), Ending ? LexToString(Ending->GetMessageLevel()) : TEXT("-"),
 					Ending ? *Ending->GetBody().ToString() : TEXT("")));
 			Check(SaveHash() == GRun.HashA, TEXT("chain: the save is unchanged by the travel to the ending"));
+			CheckNoControlsOnChoice(TEXT("chain"), Ending);
 			Check(TimeStateDebug::ClickChoiceEntry(W(), 0), TEXT("chain: Inject the harvest"));
+			CheckControls(TEXT("chain: the ending's text"), TopScene());
 			if (URunTextSceneWidget* Text = TopScene())
 			{
 				Text->Confirm();
@@ -863,11 +1122,101 @@ namespace SceneDebug
 		}));
 		return S;
 	}
+
+	// --- tls.Scene.ControlsLayout ---
+
+	/** One resolution: set it (package), open the prologue, measure and shoot line 1 (Paradise) and line 3 (HomeAI, the longest fixture line) whole. */
+	static void AddLayoutCase(TArray<FStep>& S, const FString& Res)
+	{
+		S.Add(Do(FString::Printf(TEXT("layout %s: resolution"), *Res), [Res]()
+		{
+			if (!Res.IsEmpty() && !GIsEditor)
+			{
+				GEngine->Exec(W(), *FString::Printf(TEXT("r.SetRes %s"), *Res));
+			}
+			return 2.f;
+		}));
+		S.Add(Do(FString::Printf(TEXT("layout %s: the prologue"), *Res), []()
+		{
+			TimeStateDebug::ClickMainMenuButton(W(), TEXT("Button_NewGame"), false);
+			if (URunTextSceneWidget* Scene = TopScene())
+			{
+				Scene->Confirm();
+			}
+			return 0.6f;
+		}));
+		S.Add(WaitFor(FString::Printf(TEXT("layout %s: line 1 whole"), *Res), []() { return TopScene() && !TopScene()->IsTyping() && TopScene()->GetCurrentIndex() == 0 && ControlsLaidOut(); }, 5.f,
+			[Res]()
+		{
+			MeasureControls(FString::Printf(TEXT("layout %s: line 1 (Paradise)"), *Res), TopScene(), true);
+			Shot9b(TEXT("Prologue_1_Paradise"));
+			return 0.8f;
+		}));
+		S.Add(Do(FString::Printf(TEXT("layout %s: line 3"), *Res), []()
+		{
+			URunTextSceneWidget* Scene = TopScene();
+			if (Scene)
+			{
+				// Line 2 starts, is shown whole, line 3 starts, is shown whole.
+				Scene->Confirm();
+				Scene->Confirm();
+				Scene->Confirm();
+				Scene->Confirm();
+			}
+			Check(Scene && Scene->GetCurrentIndex() == 2 && !Scene->IsTyping(), TEXT("line 3 shown whole"));
+			return 0.6f;
+		}));
+		S.Add(Do(FString::Printf(TEXT("layout %s: line 3 measured"), *Res), [Res]()
+		{
+			int32 Longest = 0;
+			if (const URunTextSceneWidget* Scene = TopScene())
+			{
+				for (const FRunSceneLine& Line : Scene->GetLines())
+				{
+					Longest = FMath::Max(Longest, Line.Text.Len());
+				}
+				Check(Scene->GetLines().IsValidIndex(2) && Scene->GetLines()[2].Text.Len() == Longest,
+					FString::Printf(TEXT("line 3 is the longest fixture line (%d characters, %d lines)"), Longest, Scene->GetLineCount()));
+			}
+			MeasureControls(FString::Printf(TEXT("layout %s: line 3 (HomeAI, the longest)"), *Res), TopScene(), true);
+			Shot9b(TEXT("Prologue_3_HomeAI"));
+			return 0.8f;
+		}));
+		S.Add(Do(FString::Printf(TEXT("layout %s: close the prologue"), *Res), []()
+		{
+			// Closed as a screen, not finished: the main menu shows again and no travel starts.
+			if (URunTextSceneWidget* Scene = TopScene())
+			{
+				Scene->CloseScreen();
+			}
+			return 0.5f;
+		}));
+		S.Add(WaitFor(FString::Printf(TEXT("layout %s: back in the main menu"), *Res), []() { return InMenu() && Top() == MainMenu(); }, 10.f, []() { return 0.3f; }));
+	}
+
+	static TArray<FStep> BuildControlsLayout(const TArray<FString>& Resolutions)
+	{
+		TArray<FStep> S;
+		S.Add(WaitFor(TEXT("setup: the main menu is shown and no transition runs"), []() { return InMenu(); }, 30.f, []()
+		{
+			NarrativeFixture::Install(W());
+			return 0.3f;
+		}));
+		if (Resolutions.IsEmpty())
+		{
+			AddLayoutCase(S, FString());
+		}
+		for (const FString& Res : Resolutions)
+		{
+			AddLayoutCase(S, Res);
+		}
+		return S;
+	}
 }
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsSceneTestCommand(
 	TEXT("tls.SceneTest"),
-	TEXT("tls.SceneTest [Quit=0]: (fresh PIE or package, MainMenu; clears the save) with fixture rows: New game without a save opens the prologue's six lines, read through with Enter and Space (typing speed, confirm on a line being typed and on a whole one, each line's voice colours, the cut from white to black, the long line's wrap, the cue of line 4, three screenshots to Saved/Screenshots/Brief9), then the travel to area 1 with its entry line; New game with a save, skipped with back on line 3; Continue and Select act without it; New game without Prologue rows; the input in area 1 the same each time."),
+	TEXT("tls.SceneTest [Quit=0]: (fresh PIE or package, MainMenu; clears the save) with fixture rows: New game without a save opens the prologue's six lines, read through with Enter and Space (typing speed, confirm on a line being typed and on a whole one, each line's voice colours, the cut from white to black, the long line's wrap, the cue of line 4, three screenshots to Saved/Screenshots/Brief9), then the travel to area 1 with its entry line; New game with a save, skipped with back on line 3; Continue and Select act without it; the on-screen controls (shown, keys, labels, colour, apart from the text) on lines 1 and 3; E: real clicks on Continue, Enter with the mouse over each control, a click on the scene away from them, back after the clicks; F: a click on Skip; New game without Prologue rows; the input in area 1 the same each time."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		if (SceneDebug::GRun.bRunning || !SceneDebug::MainMenu())
@@ -880,7 +1229,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsSceneTestCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsEndingTestCommand(
 	TEXT("tls.EndingTest"),
-	TEXT("tls.EndingTest [local|chain] [Quit=0]: (fresh PIE or package, MainMenu) with fixture rows. local: the home AI's last message at battery 1.0, 0.35 and 0.02; the entries with 0, all but one and all twin AI parts, and with OpenEndingTwinParts 1; each ending's text in the Engineer colour, in full, then the main menu; the save untouched; screenshots to Saved/Screenshots/Brief9; the run's state is put back. chain (clears the save): New game, areas 1 to 4, the pause menu's Main menu and a loss in area 4 open no ending, the exit of area 4 does; the save the same before and after; Select act offers all four acts and the fourth starts with its entry snapshot."),
+	TEXT("tls.EndingTest [local|chain] [Quit=0]: (fresh PIE or package, MainMenu) with fixture rows. local: the home AI's last message at battery 1.0, 0.35 and 0.02; the entries with 0, all but one and all twin AI parts, and with OpenEndingTwinParts 1; each ending's text in the Engineer colour, in full, with the on-screen controls (none on the choice list, where back does nothing), then the main menu; the save untouched; screenshots to Saved/Screenshots/Brief9; the run's state is put back. chain (clears the save): New game, areas 1 to 4, the pause menu's Main menu and a loss in area 4 open no ending, the exit of area 4 does; the save the same before and after; Select act offers all four acts and the fourth starts with its entry snapshot."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		if (SceneDebug::GRun.bRunning || !SceneDebug::MainMenu())
@@ -961,6 +1310,32 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsSceneLevelCheckCommand(
 			Battery, T.NoArticlesBelow, T.AbbreviatedBelow, T.ScatteredBelow, T.SilentBelow, LexToString(ChannelLevel), Channel ? TEXT("the pawn's channel") : TEXT("no pawn: the channel's class"),
 			Act, LexToString(UTheLastShiftSettings::Get()->GetTextLevel(Battery)), *Label.ToString(), LexToString(EndingLevel), *Message.ToString());
 		Home->RestoreState(OldBattery, Home->GetHomeSecondsElapsed());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsSceneControlsLayoutCommand(
+	TEXT("tls.Scene.ControlsLayout"),
+	TEXT("tls.Scene.ControlsLayout [Res...] [quit] (MainMenu, fixture rows; the save is not touched): for each resolution (r.SetRes syntax, e.g. 1920x1080f 1280x720w 1680x720w; a package only, PIE keeps its viewport) opens the prologue, measures the on-screen controls against line 1 (Paradise) and line 3 (HomeAI, the longest fixture line) whole, checks they do not touch the text, and shoots both to Saved/Screenshots/Brief9b."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		if (SceneDebug::GRun.bRunning || !SceneDebug::MainMenu())
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Scene.ControlsLayout: needs the main menu, or a test is already running."));
+			return;
+		}
+		TArray<FString> Resolutions;
+		bool bQuit = false;
+		for (const FString& Arg : Args)
+		{
+			if (Arg.Equals(TEXT("quit"), ESearchCase::IgnoreCase))
+			{
+				bQuit = true;
+			}
+			else
+			{
+				Resolutions.Add(Arg);
+			}
+		}
+		SceneDebug::Start(TEXT("tls.Scene.ControlsLayout"), bQuit, SceneDebug::BuildControlsLayout(Resolutions));
 	}));
 
 #endif // !UE_BUILD_SHIPPING

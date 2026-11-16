@@ -124,6 +124,12 @@ void UStdKeyPromptWidget::SetInputAction(const UInputAction* InAction)
 	PendingRefreshFrames = StdKeyPrompt::RefreshFramesAfterRemap;
 }
 
+void UStdKeyPromptWidget::SetFixedKey(FKey InKey)
+{
+	FixedKey = InKey;
+	RefreshKey();
+}
+
 void UStdKeyPromptWidget::SetLabel(const FText& InLabel)
 {
 	Label = InLabel;
@@ -145,8 +151,15 @@ void UStdKeyPromptWidget::SetPreferGamepad(bool bInPreferGamepad)
 
 void UStdKeyPromptWidget::RefreshKey()
 {
-	const UStdInputSubsystem* Subsystem = FindInputSubsystem();
-	DisplayedKey = Subsystem && InputAction ? Subsystem->GetKeyForAction(InputAction, bPreferGamepad) : EKeys::Invalid;
+	if (FixedKey.IsValid())
+	{
+		DisplayedKey = FixedKey;
+	}
+	else
+	{
+		const UStdInputSubsystem* Subsystem = FindInputSubsystem();
+		DisplayedKey = Subsystem && InputAction ? Subsystem->GetKeyForAction(InputAction, bPreferGamepad) : EKeys::Invalid;
+	}
 	if (Text_Key)
 	{
 		Text_Key->SetText(GetKeyText());

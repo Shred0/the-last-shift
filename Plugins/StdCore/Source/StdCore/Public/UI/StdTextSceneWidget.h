@@ -9,7 +9,10 @@
 
 class FSlateFontMeasure;
 class UBorder;
+class UButton;
+class UHorizontalBox;
 class USizeBox;
+class UStdKeyPromptWidget;
 class UStdTextSceneWidget;
 class UTextBlock;
 
@@ -43,6 +46,10 @@ namespace StdTextScene
 
 	/** Confirm keys of a text scene: Enter, Space and the gamepad's bottom face button. */
 	STDCORE_API bool IsConfirmKey(const FKey& Key);
+
+	/** The keys the on-screen controls show: the keyboard's confirm key (Enter) and back key (Escape). */
+	STDCORE_API FKey ContinueControlKey();
+	STDCORE_API FKey SkipControlKey();
 }
 
 /**
@@ -56,6 +63,13 @@ namespace StdTextScene
  * and the block is centred on screen, so typing never moves a line or a word. The tree is built in C++ (Border_Background,
  * SizeBox_Line, Text_Line), with no texture and without the menu theme (each entry sets its colours). Typing runs on
  * the widget's own tick (real time); AdvanceSeconds drives it directly (tests).
+ *
+ * On-screen controls (bShowControls, off by default): while an entry is on screen, two controls in the bottom right
+ * corner, one that goes on (the confirm key's prompt and ContinueLabel) and one that skips (the back key's prompt and
+ * SkipLabel), in the entry's text colour at ControlsOpacity, ControlsMargin from the corner. A click on one does what its
+ * key does, once; they never take the keyboard focus, so the keys keep working whatever the mouse did. With the option
+ * off they are collapsed and the screen is as without them. They are part of the tree built in C++ (Box_Controls,
+ * Button_Continue holding KeyPrompt_Continue, Button_Skip holding KeyPrompt_Skip).
  */
 UCLASS()
 class STDCORE_API UStdTextSceneWidget : public UStdScreenWidget
@@ -141,6 +155,41 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI")
 	bool bClickConfirms = true;
 
+	/** Shows the two on-screen controls (go on, skip) while an entry is on screen. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, BlueprintSetter = SetShowControls, Category = "Std Core|UI|Controls")
+	bool bShowControls = false;
+
+	/** Label of the control that goes on, after its key. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI|Controls")
+	FText ContinueLabel;
+
+	/** Label of the control that skips, after its key. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI|Controls")
+	FText SkipLabel;
+
+	/** Opacity of the controls, times the alpha of the entry's text colour. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI|Controls", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float ControlsOpacity = 0.5f;
+
+	/** Distance of the controls from the bottom and right edges of the screen, slate units. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI|Controls", meta = (ClampMin = "0.0", ClampMax = "400.0"))
+	float ControlsMargin = 40.f;
+
+	UFUNCTION(BlueprintCallable, Category = "Std Core|UI|Controls")
+	void SetShowControls(bool bInShowControls);
+
+	/** Pushes the controls' option, labels, opacity, margin and the entry's colour to them (call after changing them at runtime). */
+	UFUNCTION(BlueprintCallable, Category = "Std Core|UI|Controls")
+	void RefreshControls();
+
+	/** The controls are on screen now (the option is on and an entry is shown). */
+	UFUNCTION(BlueprintPure, Category = "Std Core|UI|Controls")
+	bool AreControlsShown() const;
+
+	/** Colour the controls are drawn in now. */
+	UFUNCTION(BlueprintPure, Category = "Std Core|UI|Controls")
+	FLinearColor GetControlsColor() const;
+
 	UPROPERTY(BlueprintAssignable, Category = "Std Core|UI")
 	FStdOnTextSceneEntryStarted OnEntryStarted;
 
@@ -149,6 +198,7 @@ public:
 
 protected:
 	virtual void NativeOnInitialized() override;
+	virtual void NativeConstruct() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 	virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
 	virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
@@ -166,7 +216,30 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
 	TObjectPtr<UTextBlock> Text_Line;
 
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI|Controls")
+	TObjectPtr<UHorizontalBox> Box_Controls;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI|Controls")
+	TObjectPtr<UButton> Button_Continue;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI|Controls")
+	TObjectPtr<UButton> Button_Skip;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI|Controls")
+	TObjectPtr<UStdKeyPromptWidget> KeyPrompt_Continue;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI|Controls")
+	TObjectPtr<UStdKeyPromptWidget> KeyPrompt_Skip;
+
 private:
+	UFUNCTION()
+	void HandleContinueClicked();
+
+	UFUNCTION()
+	void HandleSkipClicked();
+
+	UButton* BuildControl(FName ButtonName, FName PromptName, TObjectPtr<UStdKeyPromptWidget>& OutPrompt, const FKey& Key);
+
 	void ShowEntry(int32 Index);
 	void Finish(bool bInSkipped);
 	void RefreshText();

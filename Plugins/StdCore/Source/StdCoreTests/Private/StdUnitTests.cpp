@@ -234,6 +234,20 @@ bool FStdKeyPromptTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("The cap shows the key text"), Key->GetText().ToString(), Prompt->GetKeyText().ToString());
 	}
 
+	TestFalse(TEXT("No fixed key by default"), Prompt->FixedKey.IsValid());
+	Prompt->SetFixedKey(EKeys::Enter);
+	TestEqual(TEXT("A fixed key is shown"), Prompt->GetDisplayedKey(), EKeys::Enter);
+	TestEqual(TEXT("A fixed key reads its short name"), Prompt->GetKeyText().ToString(), EKeys::Enter.GetDisplayName(false).ToString());
+	if (Key)
+	{
+		TestEqual(TEXT("The cap shows the fixed key"), Key->GetText().ToString(), EKeys::Enter.GetDisplayName(false).ToString());
+	}
+	Prompt->RefreshKey();
+	TestEqual(TEXT("A refresh keeps the fixed key (the action is ignored)"), Prompt->GetDisplayedKey(), EKeys::Enter);
+	Prompt->SetFixedKey(EKeys::Invalid);
+	TestFalse(TEXT("Clearing the fixed key goes back to the action's key"), Prompt->GetDisplayedKey().IsValid());
+	TestEqual(TEXT("Cleared: Unbound again"), Prompt->GetKeyText().ToString(), FString(TEXT("Unbound")));
+
 	Prompt->SetLabel(FText::FromString(TEXT("Open")));
 	if (Label)
 	{

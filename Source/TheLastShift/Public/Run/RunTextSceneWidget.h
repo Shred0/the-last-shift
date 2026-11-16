@@ -22,6 +22,7 @@ enum class ERunSceneKind : uint8
  * colours of its voice, typed at the settings' SceneCharsPerSecond. Every line that starts is reported to the scene
  * subsystem (OnSceneLineStarted, with its cue). When the scene ends, finished or skipped: a prologue starts the new run
  * (the screen stays until the travel covers it), an ending's text closes the ending and the main menu shows again.
+ * The scene shows StdCore's two on-screen controls, labelled Continue and Skip.
  */
 UCLASS()
 class THELASTSHIFT_API URunTextSceneWidget : public UStdTextSceneWidget
