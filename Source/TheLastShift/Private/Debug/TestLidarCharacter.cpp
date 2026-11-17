@@ -15,7 +15,9 @@
 #include "Residue/Residue.h"
 #include "Residue/ResidueCollectCueWidget.h"
 #include "Run/HomeAIComponent.h"
+#include "Run/RunSubsystem.h"
 #include "Run/TextChannelWidget.h"
+#include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanCueWidget.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "TextChannel/TextChannelComponent.h"
@@ -61,7 +63,13 @@ ATestLidarCharacter::ATestLidarCharacter()
 void ATestLidarCharacter::BeginPlay()
 {
 	Super::BeginPlay();
-	Flashlight->SetVisibility(bFlashlightOnAtStart);
+	// The map decides whether the flashlight works and how it starts (the prologue's maps, in the settings); elsewhere
+	// it works and starts as bFlashlightOnAtStart says.
+	bool bOnAtStart = bFlashlightOnAtStart;
+	bFlashlightAvailable = UTheLastShiftSettings::Get()->GetMapFlashlight(URunSubsystem::GetPrologueStageOf(GetWorld()), bOnAtStart);
+	Flashlight->SetVisibility(bFlashlightAvailable && bOnAtStart);
+	UE_LOG(LogTheLastShift, Log, TEXT("TestLidarCharacter: flashlight %s, %s."), bFlashlightAvailable ? TEXT("available") : TEXT("unavailable in this map"),
+		Flashlight->IsVisible() ? TEXT("on") : TEXT("off"));
 
 	if (UTimeStateSubsystem* TimeState = GetWorld()->GetSubsystem<UTimeStateSubsystem>())
 	{
@@ -216,11 +224,17 @@ void ATestLidarCharacter::OnScan()
 	ScanDirector->RequestScan();
 }
 
+bool ATestLidarCharacter::IsFlashlightOn() const
+{
+	return Flashlight && Flashlight->IsVisible();
+}
+
 void ATestLidarCharacter::OnToggleFlashlight()
 {
-	// The flashlight is locked off while time is stopped, and stays as it is while the pause menu freezes the run.
+	// The flashlight is locked off while time is stopped and in a map without it, and stays as it is while the pause menu
+	// freezes the run. The action stays mapped: its key just does nothing.
 	const UTimeStateSubsystem* TimeState = GetWorld()->GetSubsystem<UTimeStateSubsystem>();
-	if (TimeState && (TimeState->IsStopped() || TimeState->IsRunFrozen()))
+	if (!bFlashlightAvailable || (TimeState && (TimeState->IsStopped() || TimeState->IsRunFrozen())))
 	{
 		return;
 	}

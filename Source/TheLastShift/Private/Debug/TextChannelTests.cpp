@@ -725,6 +725,56 @@ namespace NarrativeCsv
 		return Problems;
 	}
 
+	/**
+	 * Every problem of DT_Prologue.csv (empty: the structure is right): it parses, rows <Group>_<order> matching their Group
+	 * and Order columns, every Group one of Wake, Hologram, Hangar, Flight, Hatch and Door, (Group, Order) unique, no line
+	 * break, no empty text.
+	 */
+	static TArray<FString> CheckPrologue(const FString& Csv, const TCHAR* File = TEXT("DT_Prologue.csv"))
+	{
+		TArray<FString> Problems;
+		UScriptStruct* Struct = FPrologueRow::StaticStruct();
+		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
+		if (Table->GetRowMap().IsEmpty())
+		{
+			Problems.Add(FString::Printf(TEXT("%s has no rows"), File));
+		}
+		const TSet<FName> Groups = { PrologueGroups::Wake, PrologueGroups::Hologram, PrologueGroups::Hangar, PrologueGroups::Flight, PrologueGroups::Hatch, PrologueGroups::Door };
+		const FRegexPattern NamePattern(TEXT("^([A-Za-z]+)_([0-9]+)$"));
+		TSet<FString> Keys;
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FString Name = Pair.Key.ToString();
+			const FPrologueRow& Row = *reinterpret_cast<const FPrologueRow*>(Pair.Value);
+			FRegexMatcher Match(NamePattern, Name);
+			if (!Match.FindNext())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not follow <Group>_<order>"), File, *Name));
+			}
+			else if (FName(*Match.GetCaptureGroup(1)) != Row.Group || FCString::Atoi(*Match.GetCaptureGroup(2)) != Row.Order)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not match its columns (group %s, order %d)"), File, *Name, *Row.Group.ToString(), Row.Order));
+			}
+			if (!Groups.Contains(Row.Group))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: group '%s' is not Wake, Hologram, Hangar, Flight, Hatch or Door"), File, *Name, *Row.Group.ToString()));
+			}
+			const FString Key = FString::Printf(TEXT("%s/%d"), *Row.Group.ToString(), Row.Order);
+			if (Keys.Contains(Key))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: group %s order %d appears twice"), File, *Name, *Row.Group.ToString(), Row.Order));
+			}
+			Keys.Add(Key);
+			const FString Text = TextCell(Struct, Pair.Value, TEXT("Text"));
+			CheckLineBreaks(File, Pair.Key, TEXT("Text"), Text, Problems);
+			if (Text.IsEmpty())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: empty text"), File, *Name));
+			}
+		}
+		return Problems;
+	}
+
 	/** Csv with one more data line, on a line of its own. */
 	static FString WithLine(const FString& Csv, const FString& Line)
 	{
@@ -769,6 +819,12 @@ bool FTextChannelCsvTest::RunTest(const FString& Parameters)
 	for (const FString& Problem : SceneProblems) { AddError(Problem); }
 	AddInfo(FString::Printf(TEXT("DT_Scenes.csv: %d data lines, %d problems."), CountDataLines(Scenes), SceneProblems.Num()));
 	TestEqual(TEXT("DT_Scenes.csv: structure right (parse, <Scene>_<order> names, voices, line breaks)"), SceneProblems.Num(), 0);
+	const FString Prologue = Load(TEXT("DT_Prologue.csv"));
+	TestFalse(TEXT("Narrative/DT_Prologue.csv is read"), Prologue.IsEmpty());
+	const TArray<FString> PrologueProblems = CheckPrologue(Prologue);
+	for (const FString& Problem : PrologueProblems) { AddError(Problem); }
+	AddInfo(FString::Printf(TEXT("DT_Prologue.csv: %d data lines, %d problems."), CountDataLines(Prologue), PrologueProblems.Num()));
+	TestEqual(TEXT("DT_Prologue.csv: structure right (parse, <Group>_<order> names, groups, line breaks)"), PrologueProblems.Num(), 0);
 #endif
 	return true;
 }

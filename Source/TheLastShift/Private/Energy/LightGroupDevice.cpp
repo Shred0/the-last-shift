@@ -22,6 +22,10 @@ void ALightGroupDevice::BeginPlay()
 		}
 	}
 	Super::BeginPlay();
+	if (bPoweredAtStart)
+	{
+		PowerOn();
+	}
 }
 
 void ALightGroupDevice::OnPowerStateChanged(bool bNowPowered)

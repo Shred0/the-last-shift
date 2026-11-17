@@ -67,9 +67,52 @@ int32 URunSubsystem::GetActIndex() const
 	return GetActIndexOf(GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr);
 }
 
+int32 URunSubsystem::GetPrologueStageOf(const UWorld* World)
+{
+	return World ? UTheLastShiftSettings::Get()->GetPrologueStageOfMap(World->GetOutermost()->GetName()) : 0;
+}
+
+int32 URunSubsystem::GetPrologueStage() const
+{
+	return GetPrologueStageOf(GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr);
+}
+
+bool URunSubsystem::StartNewGame()
+{
+	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+	if (!Settings->ArePrologueMapsOn())
+	{
+		UE_LOG(LogRun, Log, TEXT("New game: the prologue's maps are off, the new run starts at once."));
+		return StartNewRun();
+	}
+	if (!CanTravelNow(TEXT("New game")))
+	{
+		return false;
+	}
+	// The prologue's maps are outside the run: nothing is saved there; the run starts for real at the arrival's exit.
+	ResetRunState(TEXT("new game, prologue"));
+	UE_LOG(LogRun, Log, TEXT("New game: battery 1, home 0 s, banked 0, archive empty in memory; save kept (%d snapshots); to the prologue's home."), Snapshots.Num());
+	return TravelToLevel(Settings->PrologueHomeMap, false, FText::GetEmpty(), 0.f, TEXT("new game -> prologue home"));
+}
+
 bool URunSubsystem::TravelToNextArea()
 {
 	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+	const int32 Stage = GetPrologueStage();
+	if (Stage == 1)
+	{
+		// The flight: the travel screen carries the first Flight line.
+		FText Label;
+		float ReadingSeconds = 0.f;
+		const UGameInstance* GameInstance = GetGameInstance();
+		UHomeAIComponent::BuildPrologueTravelLabel(GameInstance ? GameInstance->GetWorld() : nullptr, Label, ReadingSeconds);
+		return TravelToLevel(Settings->PrologueArrivalMap, false, Label, ReadingSeconds, TEXT("prologue home -> prologue arrival (the flight)"));
+	}
+	if (Stage == 2)
+	{
+		UE_LOG(LogRun, Log, TEXT("Prologue arrival left: the new run starts."));
+		return StartNewRun();
+	}
 	const int32 Act = GetActIndex();
 	if (Act >= Settings->AreaMaps.Num() && Act > 0)
 	{
@@ -111,6 +154,21 @@ bool URunSubsystem::TravelToEnding()
 
 bool URunSubsystem::TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FString& What)
 {
+	if (bMainMenu)
+	{
+		return TravelToLevel(Level, true, FText::GetEmpty(), 0.f, What);
+	}
+	// The label is the destination act's AreaEntry line, never typed out; it stays at least as long as it takes to read.
+	const UGameInstance* GameInstance = GetGameInstance();
+	const int32 DestinationAct = UTheLastShiftSettings::Get()->GetActOfMap(Level.ToSoftObjectPath().GetLongPackageName());
+	float ReadingSeconds = 0.f;
+	FText Label;
+	UHomeAIComponent::BuildTravelLabel(GameInstance ? GameInstance->GetWorld() : nullptr, DestinationAct, Label, ReadingSeconds);
+	return TravelToLevel(Level, false, Label, ReadingSeconds, What);
+}
+
+bool URunSubsystem::TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FText& Label, float ReadingSeconds, const FString& What)
+{
 	UGameInstance* GameInstance = GetGameInstance();
 	UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
 	UStdFlowSubsystem* Flow = GameInstance ? GameInstance->GetSubsystem<UStdFlowSubsystem>() : nullptr;
@@ -136,13 +194,9 @@ bool URunSubsystem::TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu
 	}
 	else
 	{
-		// The label is the destination act's AreaEntry line, never typed out; it stays at least as long as it takes to read.
-		const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
-		const int32 DestinationAct = Settings->GetActOfMap(Level.ToSoftObjectPath().GetLongPackageName());
-		float ReadingSeconds = 0.f;
 		FStdTravelOptions Options;
-		UHomeAIComponent::BuildTravelLabel(World, DestinationAct, Options.Label, ReadingSeconds);
-		Options.MinCoveredSeconds = FMath::Clamp(FMath::Max(Settings->TravelHoldSeconds, ReadingSeconds), 0.f, 60.f);
+		Options.Label = Label;
+		Options.MinCoveredSeconds = FMath::Clamp(FMath::Max(UTheLastShiftSettings::Get()->TravelHoldSeconds, ReadingSeconds), 0.f, 60.f);
 		bStarted = Flow->TravelToLevelWithOptions(Level, Options);
 		if (bStarted)
 		{
@@ -332,19 +386,24 @@ bool URunSubsystem::StartNewRun()
 	{
 		return false;
 	}
-	UGameInstance* GameInstance = GetGameInstance();
-	if (UHomeStateSubsystem* Home = GameInstance->GetSubsystem<UHomeStateSubsystem>())
-	{
-		Home->ResetRun();
-	}
-	if (UEnergySubsystem* Energy = GameInstance->GetSubsystem<UEnergySubsystem>())
-	{
-		Energy->RestoreBankedEnergy(0);
-	}
-	SetArchive(FSuitArchive(), TEXT("new run"));
+	ResetRunState(TEXT("new run"));
 	ClearSave();
 	UE_LOG(LogRun, Log, TEXT("New run: battery 1, home 0 s, banked 0, archive empty, save cleared."));
 	return TravelToArea(1);
+}
+
+void URunSubsystem::ResetRunState(const TCHAR* Why)
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	if (UHomeStateSubsystem* Home = GameInstance ? GameInstance->GetSubsystem<UHomeStateSubsystem>() : nullptr)
+	{
+		Home->ResetRun();
+	}
+	if (UEnergySubsystem* Energy = GameInstance ? GameInstance->GetSubsystem<UEnergySubsystem>() : nullptr)
+	{
+		Energy->RestoreBankedEnergy(0);
+	}
+	SetArchive(FSuitArchive(), Why);
 }
 
 bool URunSubsystem::RestartFromAct(int32 Act)

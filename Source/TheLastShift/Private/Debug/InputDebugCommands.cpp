@@ -33,6 +33,7 @@
 #include "Run/RunActListWidget.h"
 #include "Run/RunSubsystem.h"
 #include "Run/RunTextSceneWidget.h"
+#include "Run/TheLastShiftSettings.h"
 #include "UI/StdChoiceListWidget.h"
 #include "UI/StdMainMenuWidget.h"
 #include "UI/StdPauseMenuWidget.h"
@@ -308,8 +309,14 @@ namespace TimeStateDebug
 		{
 			if (URunTextSceneWidget* Prologue = Cast<URunTextSceneWidget>(TopScreen(World)); Prologue && Prologue->GetKind() == ERunSceneKind::Prologue)
 			{
-				UE_LOG(LogTheLastShift, Display, TEXT("New game clicked: the prologue (%d lines) is skipped at once, as back would."), Prologue->GetEntryCount());
+				// As before the prologue existed: the prologue's maps are passed by too (they are switched off for the skip only).
+				UE_LOG(LogTheLastShift, Display, TEXT("New game clicked: the prologue (%d lines) is skipped at once, as back would, and its maps passed by."),
+					Prologue->GetEntryCount());
+				UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+				const bool bMaps = Settings->bPrologueMaps;
+				Settings->bPrologueMaps = false;
 				Prologue->Skip();
+				Settings->bPrologueMaps = bMaps;
 			}
 		}
 		return true;

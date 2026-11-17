@@ -49,9 +49,10 @@ void URunTextSceneWidget::HandleFinished(UStdTextSceneWidget* Screen, bool bInSk
 		GetCurrentIndex() + 1, Lines.Num());
 	if (Kind == ERunSceneKind::Prologue)
 	{
-		// The new run starts exactly as "New game" did without a prologue; the screen stays until the travel covers it.
+		// Read or skipped, the same: the prologue's maps when they are on, else the new run at once; the screen stays until
+		// the travel covers it.
 		URunSubsystem* Run = URunSubsystem::Get(this);
-		if (!Run || !Run->StartNewRun())
+		if (!Run || !Run->StartNewGame())
 		{
 			UE_LOG(LogScenes, Warning, TEXT("%s: the new run was refused after the prologue; back to the main menu."), *GetName());
 			CloseScreen();

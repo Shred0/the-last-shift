@@ -177,3 +177,37 @@ struct THELASTSHIFT_API FSceneRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (MultiLine = "true"))
 	FText Text;
 };
+
+/**
+ * One line of the home AI in the prologue's maps (DT_Prologue, row name <Group>_<order>). A group is the moment the
+ * lines belong to: Wake, Hologram, Hangar, Flight, Hatch, Door. The text channel says a group's rows once, in ascending
+ * Order, degraded and with tokens like any home AI message; Flight is the travel screen's line between the two maps and
+ * uses its first row only. A group with no rows says nothing.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FPrologueRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	/** The moment of the prologue the line belongs to (Wake, Hologram, Hangar, Flight, Hatch, Door). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative")
+	FName Group;
+
+	/** Position among the lines of the same group (ascending). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (ClampMin = "1", ClampMax = "999"))
+	int32 Order = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (MultiLine = "true"))
+	FText Text;
+};
+
+/** The groups of DT_Prologue: the moments at which the home AI speaks in the prologue's maps. */
+namespace PrologueGroups
+{
+	inline const FName Wake(TEXT("Wake"));
+	inline const FName Hologram(TEXT("Hologram"));
+	inline const FName Hangar(TEXT("Hangar"));
+	inline const FName Flight(TEXT("Flight"));
+	inline const FName Hatch(TEXT("Hatch"));
+	inline const FName Door(TEXT("Door"));
+}

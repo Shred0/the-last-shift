@@ -202,6 +202,11 @@ void UInteractPromptWidget::Refresh()
 		ShowMode(EInteractPromptMode::Read, FText::GetEmpty(), ReadLabel);
 		return;
 	}
+	if (Terminal && Terminal->OffersPayment() && Terminal->GetCost() == 0)
+	{
+		ShowMode(EInteractPromptMode::Power, FText::GetEmpty(), FreeLabel);
+		return;
+	}
 	if (Terminal && Terminal->OffersPayment())
 	{
 		const UEnergySubsystem* Energy = UEnergySubsystem::Get(this);

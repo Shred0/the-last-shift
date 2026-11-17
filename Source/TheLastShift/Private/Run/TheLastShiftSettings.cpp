@@ -22,6 +22,50 @@ int32 UTheLastShiftSettings::GetActOfMap(const FString& PackageName) const
 	return 0;
 }
 
+int32 UTheLastShiftSettings::GetPrologueStageOfMap(const FString& PackageName) const
+{
+	const FString Clean = UWorld::RemovePIEPrefix(PackageName);
+	if (!PrologueHomeMap.IsNull() && PrologueHomeMap.ToSoftObjectPath().GetLongPackageName() == Clean)
+	{
+		return 1;
+	}
+	if (!PrologueArrivalMap.IsNull() && PrologueArrivalMap.ToSoftObjectPath().GetLongPackageName() == Clean)
+	{
+		return 2;
+	}
+	return 0;
+}
+
+bool UTheLastShiftSettings::GetMapFlashlight(int32 PrologueStage, bool& bInOutOnAtStart) const
+{
+	switch (PrologueStage)
+	{
+	case 1:
+		bInOutOnAtStart = bFlashlightAtHome && bInOutOnAtStart;
+		return bFlashlightAtHome;
+	case 2:
+		bInOutOnAtStart = bFlashlightOnAtArrival;
+		return true;
+	default:
+		return true;
+	}
+}
+
+FHologramTuning UTheLastShiftSettings::GetHologramTuning() const
+{
+	FHologramTuning T;
+	T.Size = FMath::Clamp(Hologram.Size, 50.f, 1000.f);
+	T.Points = FMath::Clamp(Hologram.Points, 50, 10000);
+	T.PointSize = FMath::Clamp(Hologram.PointSize, 0.5f, 20.f);
+	T.EdgeShare = FMath::Clamp(Hologram.EdgeShare, 0.f, 1.f);
+	return T;
+}
+
+UDataTable* UTheLastShiftSettings::LoadPrologueTable() const
+{
+	return PrologueTable.IsNull() ? nullptr : PrologueTable.LoadSynchronous();
+}
+
 const FAreaRecipe* UTheLastShiftSettings::FindRecipe(int32 Act) const
 {
 	if (Act <= 0)

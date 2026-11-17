@@ -9,6 +9,7 @@
 #include "HomeAIComponent.generated.h"
 
 class APowerTerminal;
+class UDataTable;
 class UTextChannelComponent;
 struct FHomeJump;
 
@@ -24,9 +25,14 @@ struct FHomeJump;
  * - The player released in an area that is ready (URunSubsystem::OnAreaEntered): every AreaStart row of the act.
  * - Banked energy rising from zero through a voluntary Resume, once per map load: every FirstEnergy row of the act.
  * - A successful payment at a terminal: one Spend row of the act; at the twin AI's terminal, then every row of the part
- *   that payment played (ATwinAITerminal::GetLastPlayedPart), as the twin voice, after the spending comment.
+ *   that payment played (ATwinAITerminal::GetLastPlayedPart), as the twin voice, after the spending comment. A terminal
+ *   that costs nothing takes no payment: it says nothing.
  * - The loss: the channel is cleared and hidden (the loss screen shows the Loss ending, not an AI message).
- * The travel screen's label (an AreaEntry row) is built here too, for the run subsystem: BuildTravelLabel.
+ * - The prologue's maps (outside the run): every row of a group of the prologue table (FPrologueRow), once per map, in
+ *   order: Wake when the home map begins, the others when the map's triggers fire (APrologueLineTrigger::OnAnyLine:
+ *   Hologram, Hangar on entering their rooms, Hatch when the arrival's hatch has closed, Door when its exit door opens).
+ * The travel screen's labels are built here too, for the run subsystem: BuildTravelLabel (an AreaEntry row) and
+ * BuildPrologueTravelLabel (the first Flight row).
  *
  * The numbers come from their owners (home state, time state) when the event happens; nothing is copied.
  */
@@ -61,7 +67,25 @@ public:
 	 */
 	static bool BuildTravelLabel(const UObject* WorldContext, int32 Act, FText& OutLabel, float& OutReadingSeconds);
 
+	/** The label of the travel screen between the prologue's two maps: the first Flight row, as BuildTravelLabel builds a line. */
+	static bool BuildPrologueTravelLabel(const UObject* WorldContext, FText& OutLabel, float& OutReadingSeconds);
+
+	/** Rows of Group in a prologue table (FPrologueRow), in ascending Order (ties by row name). */
+	static TArray<FName> FindPrologueRows(const UDataTable* Table, FName Group);
+
+	/**
+	 * Queues every row of Group of the prologue table, in order, the first time it is asked in this map; later asks say
+	 * nothing. Returns how many were queued (0 for a group with no rows).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "HomeAI")
+	int32 SayPrologueGroup(FName Group);
+
+	/** True once Group was asked for in this map (with or without rows). */
+	UFUNCTION(BlueprintPure, Category = "HomeAI")
+	bool HasSaidPrologueGroup(FName Group) const { return SaidPrologueGroups.Contains(Group); }
+
 private:
+	void HandlePrologueLine(UWorld* World, FName Group);
 	UFUNCTION()
 	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
 
@@ -85,6 +109,8 @@ private:
 
 	TWeakObjectPtr<UTextChannelComponent> Channel;
 	FDelegateHandle TerminalHandle;
+	FDelegateHandle PrologueHandle;
+	TSet<FName> SaidPrologueGroups;
 	bool bAreaStartDone = false;
 	bool bFirstEnergyDone = false;
 };

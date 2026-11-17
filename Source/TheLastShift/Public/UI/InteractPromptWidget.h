@@ -86,6 +86,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interact Prompt|Labels")
 	FText PowerLabel = NSLOCTEXT("TheLastShift", "PromptPower", "Power — {Cost} · energy {Energy}");
 
+	/** After the key near a terminal that costs nothing (the prologue's): no cost, no energy. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interact Prompt|Labels")
+	FText FreeLabel = NSLOCTEXT("TheLastShift", "PromptFree", "Power");
+
 	/** After the key at an unlocked log terminal. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Interact Prompt|Labels")
 	FText ReadLabel = NSLOCTEXT("TheLastShift", "PromptRead", "Read");

@@ -40,6 +40,14 @@ public:
 
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 
+	/** The flashlight works in this map (its key toggles it). Set at BeginPlay from UTheLastShiftSettings::GetMapFlashlight. */
+	UFUNCTION(BlueprintPure, Category = "Test")
+	bool IsFlashlightAvailable() const { return bFlashlightAvailable; }
+
+	/** The flashlight is lit. */
+	UFUNCTION(BlueprintPure, Category = "Test")
+	bool IsFlashlightOn() const;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -65,8 +73,10 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Test")
 	TObjectPtr<UHomeAIComponent> HomeAI;
 
+	/** The flashlight at the start of a map; a prologue map decides it in the settings instead (UTheLastShiftSettings::GetMapFlashlight). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Test")
 	bool bFlashlightOnAtStart = true;
+
 
 	/** Scan-ready cue created for the local player (WBP_ScanCue). None = no cue. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Test|UI")
@@ -140,6 +150,8 @@ private:
 
 	/** Flashlight state at the moment time was stopped, restored on Resume. */
 	bool bFlashlightWasOnBeforeStop = false;
+
+	bool bFlashlightAvailable = true;
 
 	/** Residue being held for, between Interact pressed and released. */
 	TWeakObjectPtr<AResidue> HeldResidue;

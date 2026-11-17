@@ -25,6 +25,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lights")
 	TArray<TObjectPtr<ALight>> Lights;
 
+	/**
+	 * Powered from the start, with no terminal: with PoweredSeconds 0 and bResetOnJump off, lights that are always on in
+	 * Normal time and dark while Stopped, like every light of the game (the prologue's rooms, the arrival ship's lights).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lights")
+	bool bPoweredAtStart = false;
+
 	/** Lights currently lit (of those in Lights that exist). */
 	UFUNCTION(BlueprintPure, Category = "Lights")
 	int32 GetLitCount() const;

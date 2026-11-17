@@ -188,14 +188,14 @@ void URunMainMenuWidget::HandleSelectActClicked()
 
 void URunMainMenuWidget::HandleNewGameClicked()
 {
-	// The prologue first, every time; it starts the new run when it ends.
+	// The prologue's text first, every time; when it ends the new game goes on (the prologue's maps, or the new run).
 	if (URunSceneSubsystem* Scenes = URunSceneSubsystem::Get(this); Scenes && Scenes->OpenPrologue(this))
 	{
 		return;
 	}
 	if (URunSubsystem* Run = URunSubsystem::Get(this))
 	{
-		Run->StartNewRun();
+		Run->StartNewGame();
 	}
 }
 

@@ -40,6 +40,18 @@ namespace NarrativeFixture
 	 */
 	UDataTable* BuildScenes(bool bPrologue = true);
 
+	/**
+	 * A new transient DT_Prologue-shaped table: Wake_1..2, Hologram_1, Hangar_1, Flight_1..2, Hatch_1..2 and Door_1..2,
+	 * less the rows of the groups in Without (each text names its group and order, see GetPrologueLineText).
+	 */
+	UDataTable* BuildPrologue(const TArray<FName>& Without = TArray<FName>());
+
+	/** The text of the fixture's prologue row <Group>_<Order>. */
+	FString GetPrologueLineText(FName Group, int32 Order);
+
+	/** Replaces the installed prologue fixture with one without the rows of the groups in Without. No-op when not installed. */
+	void SetPrologueGroups(const TArray<FName>& Without);
+
 	/** The text of the fixture's Ending_1 row, in full. */
 	FString GetEndingMessageText();
 

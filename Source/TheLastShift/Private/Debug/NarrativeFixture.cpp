@@ -24,7 +24,9 @@ namespace NarrativeFixture
 		TStrongObjectPtr<UDataTable> Logs;
 		TStrongObjectPtr<UDataTable> Twin;
 		TStrongObjectPtr<UDataTable> Scenes;
+		TStrongObjectPtr<UDataTable> Prologue;
 		TSoftObjectPtr<UDataTable> SavedScenes;
+		TSoftObjectPtr<UDataTable> SavedPrologue;
 		TSoftObjectPtr<UDataTable> SavedMessages;
 		TSoftObjectPtr<UDataTable> SavedEndings;
 		TSoftObjectPtr<UDataTable> SavedLogs;
@@ -147,6 +149,58 @@ namespace NarrativeFixture
 		return Table;
 	}
 
+	UDataTable* BuildPrologue(const TArray<FName>& Without)
+	{
+		UDataTable* Table = NewObject<UDataTable>(GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(), UDataTable::StaticClass(), TEXT("DT_TlsFixturePrologue")));
+		Table->RowStruct = FPrologueRow::StaticStruct();
+		auto Add = [Table, &Without](FName Group, int32 Order)
+		{
+			if (Without.Contains(Group))
+			{
+				return;
+			}
+			FPrologueRow Row;
+			Row.Group = Group;
+			Row.Order = Order;
+			Row.Text = FText::FromString(FString::Printf(TEXT("Fixture prologue %s line %d, a neutral sentence for the tests."), *Group.ToString(), Order));
+			Table->AddRow(FName(*FString::Printf(TEXT("%s_%d"), *Group.ToString(), Order)), Row);
+		};
+		// Added out of order on purpose: the rows are said in ascending Order.
+		Add(PrologueGroups::Wake, 2);
+		Add(PrologueGroups::Wake, 1);
+		Add(PrologueGroups::Hologram, 1);
+		Add(PrologueGroups::Flight, 1);
+		Add(PrologueGroups::Flight, 2);
+		Add(PrologueGroups::Door, 2);
+		Add(PrologueGroups::Door, 1);
+		Add(PrologueGroups::Hangar, 1);
+		Add(PrologueGroups::Hatch, 1);
+		Add(PrologueGroups::Hatch, 2);
+		return Table;
+	}
+
+	FString GetPrologueLineText(FName Group, int32 Order)
+	{
+		return FString::Printf(TEXT("Fixture prologue %s line %d, a neutral sentence for the tests."), *Group.ToString(), Order);
+	}
+
+	void SetPrologueGroups(const TArray<FName>& Without)
+	{
+		if (!G.bInstalled)
+		{
+			return;
+		}
+		G.Prologue.Reset(BuildPrologue(Without));
+		GetMutableDefault<UTheLastShiftSettings>()->PrologueTable = TSoftObjectPtr<UDataTable>(G.Prologue.Get());
+		FString Left;
+		for (const FName& Group : Without)
+		{
+			Left += (Left.IsEmpty() ? TEXT("") : TEXT(", ")) + Group.ToString();
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("Narrative fixture: prologue lines now %s (%d rows, without: %s)."), *GetNameSafe(G.Prologue.Get()), G.Prologue->GetRowMap().Num(),
+			Left.IsEmpty() ? TEXT("none") : *Left);
+	}
+
 	void SetPrologueRows(bool bPrologue)
 	{
 		if (!G.bInstalled)
@@ -200,6 +254,9 @@ namespace NarrativeFixture
 		G.SavedScenes = Settings->ScenesTable;
 		G.Scenes.Reset(BuildScenes(true));
 		Settings->ScenesTable = TSoftObjectPtr<UDataTable>(G.Scenes.Get());
+		G.SavedPrologue = Settings->PrologueTable;
+		G.Prologue.Reset(BuildPrologue());
+		Settings->PrologueTable = TSoftObjectPtr<UDataTable>(G.Prologue.Get());
 		G.Messages.Reset(BuildAIMessages());
 		G.Endings.Reset(BuildEndings());
 		G.Logs.Reset(BuildLogs(8));
@@ -228,6 +285,8 @@ namespace NarrativeFixture
 		Settings->TwinAITable = G.SavedTwin;
 		Settings->ScenesTable = G.SavedScenes;
 		G.Scenes.Reset();
+		Settings->PrologueTable = G.SavedPrologue;
+		G.Prologue.Reset();
 		G.bInstalled = false;
 		SetChannels(World, Settings->LoadAIMessagesTable(), Settings->LoadTwinAITable());
 		G.Messages.Reset();

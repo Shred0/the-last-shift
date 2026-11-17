@@ -13,6 +13,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Narrative/NarrativeRows.h"
+#include "Prologue/PrologueLineTrigger.h"
 #include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "TextChannel/TextChannelComponent.h"
@@ -75,10 +76,19 @@ void UHomeAIComponent::BeginPlay()
 		Energy->OnSessionBanked.AddUniqueDynamic(this, &UHomeAIComponent::HandleSessionBanked);
 	}
 	TerminalHandle = APowerTerminal::OnAnyActivated.AddUObject(this, &UHomeAIComponent::HandleTerminalActivated);
+	PrologueHandle = APrologueLineTrigger::OnAnyLine.AddUObject(this, &UHomeAIComponent::HandlePrologueLine);
 
 	UpdateSuspension();
-	UE_LOG(LogTextChannel, Log, TEXT("%s: home AI on %s, act %d, table %s, twin table %s."), *GetName(), *GetNameSafe(Owner), GetAct(),
-		*GetNameSafe(Text->GetMessageTable()), *GetNameSafe(Text->GetTwinTable()));
+	const int32 PrologueStage = URunSubsystem::GetPrologueStageOf(World);
+	UE_LOG(LogTextChannel, Log, TEXT("%s: home AI on %s, act %d, table %s, twin table %s%s."), *GetName(), *GetNameSafe(Owner), GetAct(),
+		*GetNameSafe(Text->GetMessageTable()), *GetNameSafe(Text->GetTwinTable()),
+		PrologueStage > 0 ? *FString::Printf(TEXT(", prologue map %d, prologue table %s"), PrologueStage, *GetNameSafe(UTheLastShiftSettings::Get()->LoadPrologueTable())) : TEXT(""));
+
+	// Waking in the print room: the home map's first lines (said when the travel screen has gone, the channel's rule).
+	if (PrologueStage == 1)
+	{
+		SayPrologueGroup(PrologueGroups::Wake);
+	}
 
 	// An area that became ready before this pawn began play has already released the player.
 	if (const AAreaGenerator* Generator = AAreaGenerator::Find(World); Generator && Generator->IsReady())
@@ -111,6 +121,8 @@ void UHomeAIComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	APowerTerminal::OnAnyActivated.Remove(TerminalHandle);
 	TerminalHandle.Reset();
+	APrologueLineTrigger::OnAnyLine.Remove(PrologueHandle);
+	PrologueHandle.Reset();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -232,6 +244,12 @@ void UHomeAIComponent::HandleTerminalActivated(APowerTerminal* Terminal, int32 C
 	{
 		return;
 	}
+	// A terminal that costs nothing (the prologue's free terminals) takes no payment: no spending comment.
+	if (Cost <= 0 && !Terminal->IsA<ATwinAITerminal>())
+	{
+		UE_LOG(LogTextChannel, Log, TEXT("%s: %s used for free: no spending comment."), *GetName(), *Terminal->GetName());
+		return;
+	}
 	Text->PushTrigger(ETextTrigger::Spend, GetAct(), MakeContext());
 	// The twin AI speaks after the home AI's comment on the same payment, in the same queue.
 	if (const ATwinAITerminal* Twin = Cast<ATwinAITerminal>(Terminal))
@@ -242,7 +260,104 @@ void UHomeAIComponent::HandleTerminalActivated(APowerTerminal* Terminal, int32 C
 	}
 }
 
+// --- The prologue's lines ---
+
+TArray<FName> UHomeAIComponent::FindPrologueRows(const UDataTable* Table, FName Group)
+{
+	TArray<TPair<int32, FName>> Found;
+	if (Table && Table->GetRowStruct() && Table->GetRowStruct()->IsChildOf(FPrologueRow::StaticStruct()))
+	{
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FPrologueRow* Row = reinterpret_cast<const FPrologueRow*>(Pair.Value);
+			if (Row && Row->Group == Group)
+			{
+				Found.Emplace(Row->Order, Pair.Key);
+			}
+		}
+	}
+	Found.Sort([](const TPair<int32, FName>& A, const TPair<int32, FName>& B)
+	{
+		return A.Key != B.Key ? A.Key < B.Key : A.Value.LexicalLess(B.Value);
+	});
+	TArray<FName> Names;
+	for (const TPair<int32, FName>& Pair : Found)
+	{
+		Names.Add(Pair.Value);
+	}
+	return Names;
+}
+
+int32 UHomeAIComponent::SayPrologueGroup(FName Group)
+{
+	UTextChannelComponent* Text = Channel.Get();
+	if (!Text || Group.IsNone() || SaidPrologueGroups.Contains(Group))
+	{
+		return 0;
+	}
+	SaidPrologueGroups.Add(Group);
+	const UDataTable* Table = UTheLastShiftSettings::Get()->LoadPrologueTable();
+	const FTextChannelContext Context = MakeContext();
+	int32 Queued = 0;
+	for (const FName& RowName : FindPrologueRows(Table, Group))
+	{
+		const FPrologueRow* Row = Table->FindRow<FPrologueRow>(RowName, TEXT("Prologue"), false);
+		if (Row && Text->PushText(Row->Text.ToString(), Context, RowName))
+		{
+			++Queued;
+		}
+	}
+	UE_LOG(LogTextChannel, Log, TEXT("%s: prologue group %s: %d lines queued from %s."), *GetName(), *Group.ToString(), Queued, *GetNameSafe(Table));
+	return Queued;
+}
+
+void UHomeAIComponent::HandlePrologueLine(UWorld* World, FName Group)
+{
+	if (World == GetWorld())
+	{
+		SayPrologueGroup(Group);
+	}
+}
+
 // --- Travel label ---
+
+namespace HomeAIImpl
+{
+	/**
+	 * Row at the battery's level now (the thresholds of the project settings, the same with or without a pawn), tokens
+	 * replaced, never typed out; OutReadingSeconds is the channel's hold time for that text. False when nothing is left.
+	 */
+	static bool ComposeTravelLine(const UObject* WorldContext, const FAIMessageRow& Row, FName RowName, const FString& What, FText& OutLabel, float& OutReadingSeconds)
+	{
+		// The hold rule is the channel's: the one on the player's pawn, or its defaults where there is none (the main menu).
+		const UWorld* World = WorldContext ? WorldContext->GetWorld() : nullptr;
+		const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+		const UTextChannelComponent* Rules = Pawn ? Pawn->FindComponentByClass<UTextChannelComponent>() : nullptr;
+		if (!Rules)
+		{
+			Rules = GetDefault<UTextChannelComponent>();
+		}
+
+		FTextChannelContext Context;
+		if (const UHomeStateSubsystem* Home = UHomeStateSubsystem::Get(WorldContext))
+		{
+			Context.HomeSecondsElapsed = Home->GetHomeSecondsElapsed();
+			Context.BatteryFraction = Home->GetBatteryFraction();
+		}
+		const ETextDegradation Level = UTheLastShiftSettings::Get()->GetTextLevel(Context.BatteryFraction);
+		const FString Text = UTextChannelComponent::ComposeMessage(Row, Level, Context);
+		UE_LOG(LogTextChannel, Log, TEXT("Travel label for %s: '%s' at %s (battery %.3f): \"%s\"."), *What, *RowName.ToString(), LexToString(Level),
+			Context.BatteryFraction, *Text);
+		if (Text.IsEmpty())
+		{
+			return false;
+		}
+		OutLabel = FText::FromString(Text);
+		OutReadingSeconds = Rules->GetHoldSecondsFor(Text.Len());
+		return true;
+	}
+}
 
 bool UHomeAIComponent::BuildTravelLabel(const UObject* WorldContext, int32 Act, FText& OutLabel, float& OutReadingSeconds)
 {
@@ -255,33 +370,23 @@ bool UHomeAIComponent::BuildTravelLabel(const UObject* WorldContext, int32 Act, 
 	{
 		return false;
 	}
+	return HomeAIImpl::ComposeTravelLine(WorldContext, *Row, Rows[0], FString::Printf(TEXT("act %d"), Act), OutLabel, OutReadingSeconds);
+}
 
-	// The level has one owner, the project settings, with or without a pawn. The hold rule is the channel's: the one on the
-	// player's pawn, or its defaults where there is none (the main menu).
-	const UWorld* World = WorldContext ? WorldContext->GetWorld() : nullptr;
-	const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
-	const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
-	const UTextChannelComponent* Rules = Pawn ? Pawn->FindComponentByClass<UTextChannelComponent>() : nullptr;
-	if (!Rules)
+bool UHomeAIComponent::BuildPrologueTravelLabel(const UObject* WorldContext, FText& OutLabel, float& OutReadingSeconds)
+{
+	OutLabel = FText::GetEmpty();
+	OutReadingSeconds = 0.f;
+	const UDataTable* Table = UTheLastShiftSettings::Get()->LoadPrologueTable();
+	const TArray<FName> Rows = FindPrologueRows(Table, PrologueGroups::Flight);
+	const FPrologueRow* Row = Rows.Num() > 0 ? Table->FindRow<FPrologueRow>(Rows[0], TEXT("TravelLabel"), false) : nullptr;
+	if (!Row)
 	{
-		Rules = GetDefault<UTextChannelComponent>();
-	}
-
-	FTextChannelContext Context;
-	if (const UHomeStateSubsystem* Home = UHomeStateSubsystem::Get(WorldContext))
-	{
-		Context.HomeSecondsElapsed = Home->GetHomeSecondsElapsed();
-		Context.BatteryFraction = Home->GetBatteryFraction();
-	}
-	const ETextDegradation Level = UTheLastShiftSettings::Get()->GetTextLevel(Context.BatteryFraction);
-	const FString Text = UTextChannelComponent::ComposeMessage(*Row, Level, Context);
-	UE_LOG(LogTextChannel, Log, TEXT("Travel label for act %d: '%s' at %s (battery %.3f): \"%s\"."), Act, *Rows[0].ToString(), LexToString(Level),
-		Context.BatteryFraction, *Text);
-	if (Text.IsEmpty())
-	{
+		UE_LOG(LogTextChannel, Log, TEXT("Travel label for the flight: no Flight row in %s."), *GetNameSafe(Table));
 		return false;
 	}
-	OutLabel = FText::FromString(Text);
-	OutReadingSeconds = Rules->GetHoldSecondsFor(Text.Len());
-	return true;
+	// The line degrades like any home AI message: from its full text, with the channel's tokens.
+	FAIMessageRow Message;
+	Message.Text = Row->Text;
+	return HomeAIImpl::ComposeTravelLine(WorldContext, Message, Rows[0], TEXT("the flight"), OutLabel, OutReadingSeconds);
 }

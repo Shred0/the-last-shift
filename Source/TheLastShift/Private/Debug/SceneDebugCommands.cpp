@@ -485,7 +485,12 @@ namespace SceneDebug
 		{
 			NarrativeFixture::Install(W());
 			Run()->ClearSave();
-			Note(FString::Printf(TEXT("fixture installed, save cleared; scenes table %s"), *GetNameSafe(UTheLastShiftSettings::Get()->LoadScenesTable())));
+			// The text scene is tested here; the prologue's maps after it are tls.PrologueTest's (Brief 11): switched off for this test.
+			UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+			const bool bMaps = Settings->bPrologueMaps;
+			Settings->bPrologueMaps = false;
+			GRun.Cleanup = [bMaps]() { GetMutableDefault<UTheLastShiftSettings>()->bPrologueMaps = bMaps; };
+			Note(FString::Printf(TEXT("fixture installed, save cleared, the prologue's maps off; scenes table %s"), *GetNameSafe(UTheLastShiftSettings::Get()->LoadScenesTable())));
 			return 0.5f;
 		}));
 

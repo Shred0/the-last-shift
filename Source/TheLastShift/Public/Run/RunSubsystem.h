@@ -84,9 +84,26 @@ public:
 	/** Act of World's map (1-4), 0 outside the map list. */
 	static int32 GetActIndexOf(const UWorld* World);
 
+	/** 1 in the prologue's home map, 2 in its arrival map, 0 anywhere else (UTheLastShiftSettings::GetPrologueStageOfMap). */
+	UFUNCTION(BlueprintPure, Category = "Run")
+	int32 GetPrologueStage() const;
+
+	static int32 GetPrologueStageOf(const UWorld* World);
+
 	/**
-	 * Travels to the map after the current one (outside the list: to the first area); after the last area, to the ending
-	 * (TravelToEnding). Refused (false) while time is Stopped or while a transition is already running.
+	 * "New game" after the text scene. With the prologue's maps on (UTheLastShiftSettings::ArePrologueMapsOn): the run's
+	 * state in memory becomes a new run's (battery full, no home time, no banked energy, an empty archive) so the home AI
+	 * speaks as at the start of a run, the save is left as it is, and the travel goes to the prologue's home map. Off:
+	 * StartNewRun. Refused while time is Stopped or while a transition runs.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Run")
+	bool StartNewGame();
+
+	/**
+	 * Travels to the map after the current one: from the prologue's home map to its arrival map (the flight, with the
+	 * first Flight line of the prologue table as the travel screen's label), from the arrival map StartNewRun (exactly
+	 * what "New game" did before the prologue's maps), outside the list to the first area; after the last area, to the
+	 * ending (TravelToEnding). Refused (false) while time is Stopped or while a transition is already running.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Run")
 	bool TravelToNextArea();
@@ -206,6 +223,15 @@ public:
 
 private:
 	bool TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FString& What);
+
+	/**
+	 * A travel through StdCore's travel screen with Label, covered for at least TravelHoldSeconds and ReadingSeconds (or
+	 * to the main menu, without a label). Refused while time is Stopped.
+	 */
+	bool TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FText& Label, float ReadingSeconds, const FString& What);
+
+	/** Battery full, no home time, no banked energy, an empty archive (the save is not touched). */
+	void ResetRunState(const TCHAR* Why);
 
 	UFUNCTION()
 	void HandleFlowStateChanged(EStdFlowState NewState);

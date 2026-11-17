@@ -227,13 +227,14 @@ int32 UTextChannelComponent::PushTwinPart(int32 Part)
 	return Queued;
 }
 
-bool UTextChannelComponent::PushText(const FString& Text, const FTextChannelContext& Context)
+bool UTextChannelComponent::PushText(const FString& Text, const FTextChannelContext& Context, FName Name)
 {
 	FQueued Item;
+	Item.RowName = Name;
 	Item.RawText = Text;
 	Item.bRaw = true;
 	Item.Context = Context;
-	return Enqueue(MoveTemp(Item), TEXT("a text"));
+	return Enqueue(MoveTemp(Item), Name.IsNone() ? TEXT("a text") : *FString::Printf(TEXT("text '%s'"), *Name.ToString()));
 }
 
 // --- Running ---
@@ -273,7 +274,7 @@ void UTextChannelComponent::StartNext()
 		}
 
 		const ETextDegradation Level = GetLevelForBattery(Item.Context.BatteryFraction);
-		const FString What = Item.bRaw ? FString(TEXT("text")) : FString::Printf(TEXT("'%s'"), *Item.RowName.ToString());
+		const FString What = Item.bRaw && Item.RowName.IsNone() ? FString(TEXT("text")) : FString::Printf(TEXT("'%s'"), *Item.RowName.ToString());
 		if (Level == ETextDegradation::Silent)
 		{
 			UE_LOG(LogTextChannel, Log, TEXT("%s: %s discarded: battery %.3f is Silent."), *GetNameSafe(GetOwner()), *What, Item.Context.BatteryFraction);

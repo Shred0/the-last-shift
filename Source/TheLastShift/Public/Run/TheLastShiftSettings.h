@@ -183,6 +183,32 @@ struct THELASTSHIFT_API FTravelProgressFractions
 };
 
 /**
+ * The twin structure's hologram in the prologue's monitor room: a still cloud of points on an octahedron, in the scan
+ * colour. The values live in Config/DefaultGame.ini.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FHologramTuning
+{
+	GENERATED_BODY()
+
+	/** Distance between two opposite vertices of the octahedron. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram", meta = (ClampMin = "50.0", ClampMax = "1000.0", Units = "cm"))
+	float Size = 400.f;
+
+	/** Points of the cloud, on the octahedron's edges and faces. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram", meta = (ClampMin = "50", ClampMax = "10000"))
+	int32 Points = 1500;
+
+	/** Side of each point (a small unlit cube). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram", meta = (ClampMin = "0.5", ClampMax = "20.0", Units = "cm"))
+	float PointSize = 3.f;
+
+	/** Of the points, the share laid along the twelve edges (the rest fill the eight faces). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float EdgeShare = 0.35f;
+};
+
+/**
  * Project settings of the game (Project Settings > Game > The Last Shift), stored as text in Config/DefaultGame.ini.
  * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning, of the scan colours, of
  * the suit's text colours and log and twin AI typing, of the home AI's text degradation (thresholds and typing speeds),
@@ -306,6 +332,75 @@ public:
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Scenes", meta = (ClampMin = "0", ClampMax = "99"))
 	int32 OpenEndingTwinParts = 0;
+
+	// --- The prologue's maps ---
+
+	/**
+	 * On: "New game" goes from the text scene to PrologueHomeMap, then PrologueArrivalMap, then area 1. Off (or a map
+	 * unset): from the text scene straight to area 1.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	bool bPrologueMaps = true;
+
+	/** The home: print room, monitor room with the hologram, hangar and ship. Outside the run (act 0). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	TSoftObjectPtr<UWorld> PrologueHomeMap;
+
+	/** The arrival hangar of the twin structure, its hatch and the door to area 1. Outside the run (act 0). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	TSoftObjectPtr<UWorld> PrologueArrivalMap;
+
+	/** The home AI's lines in the prologue's maps and on the flight (FPrologueRow), imported from Narrative/DT_Prologue.csv. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> PrologueTable;
+
+	/** Normal-time seconds the arrival hangar's hatch takes to close once the player has left the ship. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
+	float HatchCloseSeconds = 4.f;
+
+	/**
+	 * Normal-time seconds between the home AI's Door lines in the arrival hangar (or, with none, its Hatch lines, or, with
+	 * neither, the hatch closing) and the exit door opening. Stands still while Stopped and behind the pause menu.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float ExitDoorDelaySeconds = 2.f;
+
+	/** In PrologueHomeMap the flashlight works (true) or is off with its input ignored (false). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	bool bFlashlightAtHome = false;
+
+	/** In PrologueArrivalMap the flashlight works as in the areas; this is whether it is on when the map starts. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	bool bFlashlightOnAtArrival = false;
+
+	/** The twin structure's hologram in the monitor room. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	FHologramTuning Hologram;
+
+	/** bPrologueMaps, with both prologue maps set. */
+	bool ArePrologueMapsOn() const { return bPrologueMaps && !PrologueHomeMap.IsNull() && !PrologueArrivalMap.IsNull(); }
+
+	/** 1 for the prologue's home map, 2 for its arrival map (PIE prefix ignored), 0 for any other map. */
+	int32 GetPrologueStageOfMap(const FString& PackageName) const;
+
+	/** HatchCloseSeconds, clamped. */
+	float GetHatchCloseSeconds() const { return FMath::Clamp(HatchCloseSeconds, 0.5f, 30.f); }
+
+	/** ExitDoorDelaySeconds, clamped. */
+	float GetExitDoorDelaySeconds() const { return FMath::Clamp(ExitDoorDelaySeconds, 0.f, 30.f); }
+
+	/**
+	 * The flashlight of a map, by its prologue stage (GetPrologueStageOfMap): returns whether it works there, and sets
+	 * bInOutOnAtStart to whether it starts on. The prologue's maps decide both here (bFlashlightAtHome,
+	 * bFlashlightOnAtArrival); every other map (stage 0) keeps the pawn's own default, passed in.
+	 */
+	bool GetMapFlashlight(int32 PrologueStage, bool& bInOutOnAtStart) const;
+
+	/** Hologram, every value clamped. */
+	FHologramTuning GetHologramTuning() const;
+
+	/** PrologueTable, loaded (null when unset or missing). */
+	UDataTable* LoadPrologueTable() const;
 
 	/** Level of the home AI's text at a battery fraction, with the thresholds of TextDegradation (clamped). */
 	ETextDegradation GetTextLevel(double BatteryFraction) const;

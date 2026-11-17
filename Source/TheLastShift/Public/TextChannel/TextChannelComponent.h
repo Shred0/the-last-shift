@@ -115,9 +115,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "TextChannel")
 	int32 PushTwinPart(int32 Part);
 
-	/** Queues a text that is no row (debug: tls.Text.Say), degraded automatically. */
+	/**
+	 * Queues a text that is no row of the message table (a prologue line, debug: tls.Text.Say), degraded automatically
+	 * and with the context's tokens. Name is what GetCurrentRowName reports for it (None: nothing).
+	 */
 	UFUNCTION(BlueprintCallable, Category = "TextChannel")
-	bool PushText(const FString& Text, const FTextChannelContext& Context);
+	bool PushText(const FString& Text, const FTextChannelContext& Context, FName Name = NAME_None);
 
 	UFUNCTION(BlueprintCallable, Category = "TextChannel")
 	void SetSuspended(bool bInSuspended);
@@ -138,6 +141,13 @@ public:
 	/** A message is shown, waits to restart, or is queued. */
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	bool IsBusy() const { return bHasCurrent || Queue.Num() > 0; }
+
+	/**
+	 * Everything pushed so far has been typed out: nothing is queued, and the current message, if any, shows its last
+	 * character (it is held, or it has finished). A message that restarts after a suspension is being typed again.
+	 */
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	bool IsTypedOut() const { return Queue.Num() == 0 && (!bHasCurrent || Phase == EPhase::Holding); }
 
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	bool IsSuspended() const { return bSuspended; }
