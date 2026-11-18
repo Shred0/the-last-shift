@@ -14,6 +14,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "NiagaraComponent.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
@@ -88,6 +89,9 @@
  * pushed by this component every frame. Sprites face the camera plane, so a sprite of world size s at planar view
  * depth z covers exactly s / (z * ViewPixelScale) pixels anywhere on screen: every point is PointPixelSize pixels.
  * The offset is a real displacement of the particle (no renderer camera offset), so the size needs no correction.
+ * Both cosines of AngleTerm are absolute values, so a point seen from behind its own surface (through it, when points
+ * behind geometry are shown) gets the same term as from the same angle in front. Size, compensation and offsets are
+ * computed by the emitters, so every renderer and every point material of the system shows the same values.
  * It lifts sprites off their own surface so grazing views do not clip them; being a fixed world distance it never
  * carries a point through geometry thicker than the offset, whatever the viewing distance.
  * Compensation reads S, not the drawn position: SampleDepth is the depth of S along CaptureForward (raw depth minus
@@ -95,6 +99,43 @@
  * PointColor.rgb already carries PointIntensity; the additive material multiplies rgb by alpha. The alpha of every
  * captured point, channel or not, is PointColor.a * fade: a channel changes the colour and intensity only.
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
+ *
+ * Occlusion display. Each emitter has two sprite renderers with the same bindings. The first is the one described
+ * above: material M_LidarPoint, depth tested, so a point behind real geometry is hidden; it never changes. The second
+ * draws with User.PointMaterial (MaterialUserParamBinding; M_LidarPointOccluded when unset) and is enabled by the user
+ * bool User.OcclusionDisplay (RendererEnabledBinding), false by default: disabled, it generates and draws nothing, so
+ * with OccludedIntensity = 0 (the component never sets either parameter) the points, the materials and the cost are
+ * those of a component without occlusion display. With OccludedIntensity > 0 every slot gets User.OcclusionDisplay =
+ * true and User.PointMaterial = one dynamic instance of OccludedPointMaterial (M_LidarPointOccluded) shared by all slots;
+ * both go back to false / unset when OccludedIntensity returns to 0. That material is unlit, additive, two-sided, used
+ * with Niagara sprites and has no depth test; with Base = the M_LidarPoint emissive (Particles.Color.rgb *
+ * Particles.Color.a * disc), Zp the sprite's pixel depth (sprites face the camera plane: the particle's planar view
+ * depth) and Zs(uv) the scene depth (opaque geometry), with F = OccludedFactor and W = F * BehindWeight, it adds
+ *   0                                      if W <= 0,
+ * at F = 1 (OccludedIntensity 1, or any pulse during its link time):
+ *   Base * BehindWeight                    if the fragment's device Z < the scene's device Z at the same pixel,
+ *   0                                      otherwise,
+ * the exact complement of the first renderer's depth test (reversed Z: it keeps device Z >= scene device Z), so the
+ * two renderers together draw every sprite pixel of a BehindWeight-1 point once, whatever covers it: as if the points
+ * had no depth test, with no margin and no edge band; and between 0 and 1 (F < 1):
+ *   0                                      if Zp <= Zs(pixel) * 1.001 + 2 cm   (in front, or sunk into its own surface:
+ *                                                                               left to the first renderer),
+ *   Base * W                               if Zp >  Zmax + max(5 cm, 0.01 * Zp)          (behind geometry),
+ *   0                                      otherwise,
+ *   Zmax = max of Zs at the pixel and at +-3 and +-8 pixels along each screen axis,
+ * so the pixels of points in view are exactly those of the first renderer (it never removes light), a point sitting on
+ * a surface in view (whose surface reaches farther than the point within 8 pixels) is never treated as hidden, and
+ * behind a wall every neighbour sees the wall. Below 1, points within 8 pixels of an occluder's edge, and points behind
+ * geometry by less than max(5 cm, 1% of depth) (a wall thinner than that margin), are drawn by neither renderer: they
+ * stay hidden. OccludedFactor
+ * is a scalar parameter of the instance, pushed by the component every frame of the pulse: 1 for LinkSeconds after the
+ * newest scan started (every alive scan uses the one instance, so the older scans pulse with the new one), then
+ * linearly to OccludedIntensity over OcclusionFadeSeconds, on world time (the clock of the scans' age fade: it stands
+ * still while the game is paused). BehindWeight is Particles.DynamicMaterialParameter.x: the Points emitter writes no
+ * dynamic parameter, so the material reads its default 1; the Injected emitter writes (InjectedBehindWeight[i], 1, 1, 1)
+ * at spawn, 1 for sources with FLidarSourceSettings::bShowBehindGeometry and 0 otherwise, so other injected points stay
+ * hidden behind geometry at every moment of the pulse. A channel only changes Base, so a hidden point keeps its
+ * channel's colour.
  *
  * Slots and the ghost cap: one instance holds exactly one scan. At most MaxAliveScans instances exist; when a scan
  * needs a slot and none is idle, the oldest scan's slot is reused and that scan is evicted: the component completes
@@ -117,7 +158,9 @@
  *
  * Injected emitter (second emitter of the same system, so it shares the instance: ghost cap, ClearScans, eviction).
  * Spawn (once per activation): burst of InjectedPointCount particles; particle i reads InjectedPositions[i] (P),
- * InjectedColors[i], InjectedParams[i] = (FadeWeight, OcclusionTolerance) and InjectedTransient[i] = (Hold, Vanish).
+ * InjectedColors[i], InjectedParams[i] = (FadeWeight, OcclusionTolerance), InjectedTransient[i] = (Hold, Vanish) and
+ * InjectedBehindWeight[i] (stored as Particles.LidarBehindWeight; Particles.DynamicMaterialParameter = (it, 1, 1, 1),
+ * see Occlusion display above).
  * With d = dot(P - CaptureOrigin,
  * CaptureForward), u' = dot(P - CaptureOrigin, CaptureRight) / (d * TanHalfFov.x), v' = dot(P - CaptureOrigin,
  * CaptureUp) / (d * TanHalfFov.y), the point reads the depth texel at UV = ((u' + 1) / 2, (1 - v') / 2) (same
@@ -181,6 +224,12 @@ namespace LidarScanParams
 	static const FName SupersededAge(TEXT("User.SupersededAge"));
 	static const FName InjectedIntensity(TEXT("User.InjectedIntensity"));
 	static const FName FadeOutAlpha(TEXT("User.FadeOutAlpha"));
+	static const FName InjectedBehindWeight(TEXT("User.InjectedBehindWeight"));
+	static const FName PointMaterial(TEXT("User.PointMaterial"));
+	static const FName OcclusionDisplay(TEXT("User.OcclusionDisplay"));
+
+	/** Scalar parameter of OccludedPointMaterial that carries the pulse factor. */
+	static const FName OccludedFactorParameter(TEXT("OccludedFactor"));
 
 	/** Colour of channels 1 to 4 (ULidarScanComponent::NumChannels). */
 	static const FName ChannelColors[] = {
@@ -214,6 +263,7 @@ ULidarScanComponent::ULidarScanComponent()
 	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
 	PointSystem = TSoftObjectPtr<UNiagaraSystem>(FSoftObjectPath(TEXT("/LidarScan/NS_LidarPoints.NS_LidarPoints")));
 	ChannelCaptureMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/LidarScan/M_LidarDepthStencil.M_LidarDepthStencil")));
+	OccludedPointMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/LidarScan/M_LidarPointOccluded.M_LidarPointOccluded")));
 	Channels.SetNum(NumChannels);
 }
 
@@ -618,6 +668,10 @@ void ULidarScanComponent::Scan()
 	ViewPixelScale = ResolveViewPixelScale();
 	PushLiveParameters(Slot);
 
+	// The pulse: every alive scan shares the occluded material instance, so all of them restart it with this scan.
+	PulseStartTime = World ? World->GetTimeSeconds() : 0.0;
+	RefreshOcclusion();
+
 	Slot.ScanIndex = ScanIndex;
 	SetComponentTickEnabled(true);
 
@@ -648,6 +702,7 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 	InjectedColors.Reset();
 	InjectedParams.Reset();
 	InjectedTransient.Reset();
+	InjectedBehindWeight.Reset();
 
 	const int32 Cap = FMath::Clamp(MaxInjectedPointsPerScan, 0, 65536);
 	bool bAnyOccluding = false;
@@ -684,6 +739,7 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 		const FVector2D Transient = Settings.FadeMode == ELidarFadeMode::Transient
 			? FVector2D(FMath::Clamp(Settings.HoldSeconds, 0.f, 30.f), Vanish)
 			: Settings.FadeMode == ELidarFadeMode::UntilNextScan ? FVector2D(-2.0, Vanish) : FVector2D(-1.0, 0.0);
+		const float BehindWeight = Settings.bShowBehindGeometry ? 1.f : 0.f;
 
 		for (const FLidarInjectedPoint& Point : Gathered)
 		{
@@ -705,6 +761,7 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 			InjectedColors.Add(Color);
 			InjectedParams.Add(Params);
 			InjectedTransient.Add(Transient);
+			InjectedBehindWeight.Add(BehindWeight);
 			bAnyOccluding |= Settings.bOccludeByCapture;
 		}
 	}
@@ -716,6 +773,7 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(Points, LidarScanParams::InjectedColors, InjectedColors);
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector2D(Points, LidarScanParams::InjectedParams, InjectedParams);
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector2D(Points, LidarScanParams::InjectedTransient, InjectedTransient);
+		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(Points, LidarScanParams::InjectedBehindWeight, InjectedBehindWeight);
 		Points->SetVariableInt(LidarScanParams::InjectedPointCount, Stats.Uploaded);
 	}
 
@@ -1036,6 +1094,120 @@ void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 
 	// FOV or viewport size may have changed since the last frame (zoom, window resize).
 	UpdateViewPixelScale();
+	PushOccludedFactor();
+}
+
+void ULidarScanComponent::SetOcclusion(float InOccludedIntensity, float InLinkSeconds, float InFadeSeconds)
+{
+	OccludedIntensity = FMath::Clamp(InOccludedIntensity, 0.f, 1.f);
+	LinkSeconds = FMath::Clamp(InLinkSeconds, 0.f, 10.f);
+	OcclusionFadeSeconds = FMath::Clamp(InFadeSeconds, 0.f, 10.f);
+	RefreshOcclusion();
+}
+
+bool ULidarScanComponent::IsOcclusionDisplayActive() const
+{
+	return OccludedIntensity > 0.f && OccludedMaterialInstance != nullptr;
+}
+
+float ULidarScanComponent::GetOccludedFactor() const
+{
+	const float Intensity = FMath::Clamp(OccludedIntensity, 0.f, 1.f);
+	if (Intensity <= 0.f)
+	{
+		return 0.f;
+	}
+	const UWorld* World = GetWorld();
+	if (PulseStartTime < 0.0 || !World)
+	{
+		return Intensity;
+	}
+	const double Age = World->GetTimeSeconds() - PulseStartTime;
+	const double Link = FMath::Clamp(LinkSeconds, 0.f, 10.f);
+	const double Fade = FMath::Clamp(OcclusionFadeSeconds, 0.f, 10.f);
+	if (Age < Link)
+	{
+		return 1.f;
+	}
+	if (Fade <= 0.0)
+	{
+		return Intensity;
+	}
+	const float Alpha = static_cast<float>(FMath::Clamp((Age - Link) / Fade, 0.0, 1.0));
+	return FMath::Lerp(1.f, Intensity, Alpha);
+}
+
+int32 ULidarScanComponent::GetOccludedMaterialSlotCount() const
+{
+	int32 Count = 0;
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		Count += Slot.bOccludedMaterial ? 1 : 0;
+	}
+	return Count;
+}
+
+bool ULidarScanComponent::ResolveOcclusion()
+{
+	if (OccludedIntensity <= 0.f)
+	{
+		return false;
+	}
+	if (!OccludedMaterialInstance)
+	{
+		if (!LoadedOccludedMaterial)
+		{
+			LoadedOccludedMaterial = OccludedPointMaterial.LoadSynchronous();
+			if (LoadedOccludedMaterial)
+			{
+				// As for the channel material: the editor compiles shaders on demand, so compile them once now.
+				LoadedOccludedMaterial->EnsureIsComplete();
+			}
+		}
+		if (!LoadedOccludedMaterial)
+		{
+			if (!bReportedOcclusionUnavailable)
+			{
+				bReportedOcclusionUnavailable = true;
+				UE_LOG(LogLidarScan, Warning, TEXT("%s: OccludedIntensity is above 0 but OccludedPointMaterial '%s' could not be loaded; points behind geometry stay hidden."),
+					*GetPathName(), *OccludedPointMaterial.ToString());
+			}
+			return false;
+		}
+		OccludedMaterialInstance = UMaterialInstanceDynamic::Create(LoadedOccludedMaterial, this);
+		PushedOccludedFactor = -1.f;
+	}
+	return OccludedMaterialInstance != nullptr;
+}
+
+void ULidarScanComponent::RefreshOcclusion()
+{
+	const bool bActive = ResolveOcclusion();
+	for (FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.Points && Slot.bOccludedMaterial != bActive)
+		{
+			// Off: the second renderer is disabled and its material unset, exactly as without occlusion display.
+			Slot.Points->SetVariableMaterial(LidarScanParams::PointMaterial, bActive ? OccludedMaterialInstance.Get() : nullptr);
+			Slot.Points->SetVariableBool(LidarScanParams::OcclusionDisplay, bActive);
+			Slot.bOccludedMaterial = bActive;
+		}
+	}
+	PushOccludedFactor();
+}
+
+void ULidarScanComponent::PushOccludedFactor()
+{
+	if (!OccludedMaterialInstance || OccludedIntensity <= 0.f)
+	{
+		return;
+	}
+	const float Factor = GetOccludedFactor();
+	if (Factor != PushedOccludedFactor)
+	{
+		OccludedMaterialInstance->SetScalarParameterValue(LidarScanParams::OccludedFactorParameter, Factor);
+		PushedOccludedFactor = Factor;
+	}
 }
 
 void ULidarScanComponent::UpdateViewPixelScale()
@@ -1104,6 +1276,7 @@ void ULidarScanComponent::ApplyLiveSettings()
 	{
 		PushLiveParameters(Slot);
 	}
+	RefreshOcclusion();
 }
 
 int32 ULidarScanComponent::GetAliveScanCount() const

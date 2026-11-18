@@ -152,6 +152,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
 	ULidarScanComponent* GetLidarScan() const { return LidarScan; }
 
+	/**
+	 * Pushes ScanOcclusion of the project settings (its one owner: occluded intensity, link time, fade time) to the lidar,
+	 * applied to every alive scan at once. Also done at BeginPlay and before every scan.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Scan")
+	void ApplyScanOcclusion();
+
 	/** Owner transform recorded at the last Stop (identity before the first Stop). */
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
 	FTransform GetStopAnchor() const { return StopAnchor; }
@@ -217,7 +224,7 @@ private:
 	/**
 	 * Pushes the scan colour (ScanColors.Scan of the project settings, its one owner) to the lidar, turns its colour
 	 * channels on and gives ScanColors.Interactable to channel InteractableScanChannel (the stencil value of terminals
-	 * and doors).
+	 * and doors), then the occlusion values (ApplyScanOcclusion).
 	 */
 	void ApplyScanColor();
 

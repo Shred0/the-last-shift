@@ -8,6 +8,7 @@
 #include "UObject/ScriptInterface.h"
 #include "LidarScanComponent.generated.h"
 
+class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UNiagaraComponent;
 class UNiagaraSystem;
@@ -51,6 +52,9 @@ struct FLidarScanSlot
 
 	/** Real time until which an idle slot stays activated with nothing to spawn (warm-up); negative when not warming. */
 	double WarmUntilRealTime = -1.0;
+
+	/** The slot's point system has its second renderer on (points behind geometry, occluded point material). */
+	bool bOccludedMaterial = false;
 
 	bool IsActive() const { return ScanIndex != INDEX_NONE; }
 	bool IsWarming() const { return !IsActive() && WarmUntilRealTime >= 0.0; }
@@ -346,6 +350,49 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Fade", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float AlphaFloor = 0.12f;
 
+	// --- Occlusion (live) ---
+
+	/**
+	 * Points behind the real geometry: 0 hides them (the engine's depth test, exactly as a component without this
+	 * setting: same material, same points, same cost); above 0 they are drawn at this factor of their own intensity,
+	 * channel colour kept. At 1 every alive point is drawn as if it had no depth test: the scan looks as if the geometry
+	 * were not there. Between 0 and 1 a point behind geometry by less than max(5 cm, 1% of its depth), or within 8 pixels
+	 * of an occluder's edge, stays hidden. A point on a surface in view is never treated as hidden. Injected points behind
+	 * geometry stay hidden unless their source sets FLidarSourceSettings::bShowBehindGeometry.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Occlusion", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
+	float OccludedIntensity = 0.f;
+
+	/**
+	 * Pulse: for this long after each scan starts, every alive point (all alive scans, the new one included) is at full
+	 * intensity, hidden or not. Timed on world time, like the scans' fade, so it stands still while the game is paused.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Occlusion", meta = (ClampMin = "0.0", ClampMax = "10.0", UIMin = "0.0", UIMax = "10.0", Units = "s"))
+	float LinkSeconds = 1.5f;
+
+	/** Pulse: after LinkSeconds, hidden points go from full intensity to OccludedIntensity over this long (0 = at once). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Occlusion", meta = (ClampMin = "0.0", ClampMax = "10.0", UIMin = "0.0", UIMax = "10.0", Units = "s"))
+	float OcclusionFadeSeconds = 0.75f;
+
+	/** Sets OccludedIntensity, LinkSeconds and OcclusionFadeSeconds (clamped) and applies them to every alive scan at once. */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Occlusion")
+	void SetOcclusion(float InOccludedIntensity, float InLinkSeconds, float InFadeSeconds);
+
+	/**
+	 * Factor applied now to points behind geometry that are shown (1 during the link time, OccludedIntensity once the
+	 * fade is over). OccludedIntensity when no scan has started yet; 0 when occlusion display is off.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Occlusion")
+	float GetOccludedFactor() const;
+
+	/** True when points behind geometry are shown: OccludedIntensity above 0 and the occluded point material loaded. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Occlusion")
+	bool IsOcclusionDisplayActive() const;
+
+	/** Number of slots whose point system currently draws points behind geometry with the occluded point material (diagnostics). */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Diagnostics")
+	int32 GetOccludedMaterialSlotCount() const;
+
 	// --- Injected (applied on the next scan) ---
 
 	/** Upper bound on the points all sources together add to one scan; points beyond it are dropped. */
@@ -423,6 +470,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Lidar|Assets")
 	TSoftObjectPtr<UMaterialInterface> ChannelCaptureMaterial;
 
+	/**
+	 * Material of the point system's second renderer, on while OccludedIntensity > 0: no depth test, adds only the points
+	 * behind geometry (see the contract in LidarScanComponent.cpp). Same cook rule as PointSystem.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Lidar|Assets")
+	TSoftObjectPtr<UMaterialInterface> OccludedPointMaterial;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -460,6 +514,29 @@ private:
 	/** CPU count of uploaded points that lie behind the captured depth (see bVerifyInjectedOcclusion). */
 	int32 CountBehindCapturedDepth(UTextureRenderTarget2D* Target, const FLidarScanContext& Context) const;
 
+	/** Whether points behind geometry are shown; loads the occluded material and creates its instance once. */
+	bool ResolveOcclusion();
+	/** Gives every slot the material that matches ResolveOcclusion() and pushes the current pulse factor. */
+	void RefreshOcclusion();
+	/** Pushes GetOccludedFactor() to the occluded material instance when it changed. */
+	void PushOccludedFactor();
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> LoadedOccludedMaterial;
+
+	/** Instance of the occluded point material shared by every slot; carries the pulse factor. */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> OccludedMaterialInstance;
+
+	/** The occluded material could not be loaded; reported once. */
+	bool bReportedOcclusionUnavailable = false;
+
+	/** World time at which the newest scan started (the pulse), negative before the first scan. */
+	double PulseStartTime = -1.0;
+
+	/** Last factor pushed to OccludedMaterialInstance, negative when none. */
+	float PushedOccludedFactor = -1.f;
+
 	UPROPERTY(Transient)
 	TObjectPtr<USceneCaptureComponent2D> DepthCapture;
 
@@ -496,6 +573,7 @@ private:
 	TArray<FLinearColor> InjectedColors;
 	TArray<FVector2D> InjectedParams;
 	TArray<FVector2D> InjectedTransient;
+	TArray<float> InjectedBehindWeight;
 
 	/** World size of one screen pixel at unit view depth for the current view, last value pushed to the scans. */
 	float ViewPixelScale = 0.f;

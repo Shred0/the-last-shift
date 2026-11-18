@@ -429,6 +429,16 @@ void UScanDirectorComponent::ApplyScanColor()
 #endif
 		LidarScan->SetChannel(UTheLastShiftSettings::GetInteractableScanChannel(), Colors.Interactable, 1.f);
 	}
+	ApplyScanOcclusion();
+}
+
+void UScanDirectorComponent::ApplyScanOcclusion()
+{
+	if (ULidarScanComponent* Lidar = ResolveLidarScan())
+	{
+		const FScanOcclusion& Occlusion = UTheLastShiftSettings::GetScanOcclusion();
+		Lidar->SetOcclusion(Occlusion.OccludedIntensity, Occlusion.LinkSeconds, Occlusion.FadeSeconds);
+	}
 }
 
 void UScanDirectorComponent::IssueScan(double ScanTime, bool bAutomatic)

@@ -373,5 +373,7 @@ FLidarSourceSettings AResidue::GetLidarSourceSettings_Implementation() const
 	Settings.FadeMode = ELidarFadeMode::ScanFade;
 	Settings.bOccludeByCapture = true;
 	Settings.OcclusionTolerance = FMath::Clamp(OcclusionTolerance, 0.f, 200.f);
+	// A residue a scan has shown stays visible, attenuated, when geometry comes between it and the player.
+	Settings.bShowBehindGeometry = true;
 	return Settings;
 }

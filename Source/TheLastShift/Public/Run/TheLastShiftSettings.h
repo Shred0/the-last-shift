@@ -59,6 +59,29 @@ struct THELASTSHIFT_API FScanColors
 };
 
 /**
+ * How scan points behind geometry are shown, in one place. The scan director pushes these values to the lidar; nothing
+ * copies them. The values live in Config/DefaultGame.ini; the C++ defaults are only a fallback for a missing ini entry
+ * (points behind geometry hidden).
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FScanOcclusion
+{
+	GENERATED_BODY()
+
+	/** Points behind geometry are drawn at this factor of their own intensity; 0 hides them, 1 shows them like the points in front (as if the geometry were not there). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Occlusion", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float OccludedIntensity = 0.f;
+
+	/** Link time: after each scan starts, every alive point is at full intensity for this long, hidden or not. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Occlusion", meta = (ClampMin = "0.0", ClampMax = "10.0", Units = "s"))
+	float LinkSeconds = 1.5f;
+
+	/** Occlusion fade time: after the link time, hidden points go down to OccludedIntensity over this long. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Occlusion", meta = (ClampMin = "0.0", ClampMax = "10.0", Units = "s"))
+	float FadeSeconds = 0.75f;
+};
+
+/**
  * Every colour of the suit's text, in one place: the home AI's messages, the twin AI's messages, the translation of the
  * logs at a terminal, and the voices of the full-screen text scenes (prologue, endings). Barcode bars take the colour of
  * their voice. None of them is a scan colour. The values live in Config/DefaultGame.ini; the C++ defaults are only a
@@ -267,6 +290,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability", meta = (ClampMin = "1", ClampMax = "4"))
 	int32 InteractableScanChannel = 1;
 
+	/** Scan points behind geometry: occluded intensity, link time, fade time. The one owner of those values. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability")
+	FScanOcclusion ScanOcclusion;
+
 	/** The travel screen stays black at least this long, even when the next area is ready sooner. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float TravelHoldSeconds = 4.f;
@@ -464,6 +491,9 @@ public:
 
 	/** ScanColors of the project settings. */
 	static const FScanColors& GetScanColors() { return Get()->ScanColors; }
+
+	/** ScanOcclusion of the project settings (clamped where it is pushed, by the lidar). */
+	static const FScanOcclusion& GetScanOcclusion() { return Get()->ScanOcclusion; }
 
 	/** InteractableScanChannel of the project settings, clamped to [1, 4]. */
 	static int32 GetInteractableScanChannel() { return FMath::Clamp(Get()->InteractableScanChannel, 1, 4); }

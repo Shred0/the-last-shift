@@ -915,6 +915,9 @@ FLidarSourceSettings AEntity::GetLidarSourceSettings_Implementation() const
 	Settings.VanishSeconds = FMath::Clamp(PointVanishSeconds, 0.f, 30.f);
 	Settings.bOccludeByCapture = true;
 	Settings.OcclusionTolerance = OcclusionTolerance;
+	// Once a scan has shown it, it stays visible when geometry comes between it and the player, like the scan's points.
+	// The capture still decides whether a scan picks it up (bOccludeByCapture): a scan does not reveal it through a wall.
+	Settings.bShowBehindGeometry = true;
 	return Settings;
 }
 

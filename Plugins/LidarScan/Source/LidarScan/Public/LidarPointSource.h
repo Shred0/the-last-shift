@@ -130,6 +130,14 @@ struct LIDARSCAN_API FLidarSourceSettings
 	/** How far behind the captured surface a point may be and still count as visible. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar", meta = (ClampMin = "0.0", ClampMax = "200.0", Units = "cm"))
 	float OcclusionTolerance = 10.f;
+
+	/**
+	 * When the points are drawn, those behind real geometry are shown like the scan's own points behind geometry: at the
+	 * scan component's OccludedIntensity, with its pulse (at 1, as if they had no depth test). Off: they are hidden behind
+	 * geometry, at any moment of the pulse and at any OccludedIntensity. Only the drawing changes: which points a scan takes is decided by bOccludeByCapture, as before.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar")
+	bool bShowBehindGeometry = false;
 };
 
 UINTERFACE(BlueprintType, MinimalAPI)
