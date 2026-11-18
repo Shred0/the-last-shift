@@ -222,7 +222,7 @@ namespace OcclusionDebug
 	// --- Shots, measured on their pixels ---
 
 	/** A colour class of scan points, as seen on screen after tonemapping (8-bit sRGB). */
-	enum class EHue : uint8 { Any, Scan, Residue, Entity, Interactable, TestSource };
+	enum class EHue : uint8 { Any, Scan, Residue, Entity, Interactable, TestSource, InteractableDim };
 
 	struct FShot
 	{
@@ -249,6 +249,9 @@ namespace OcclusionDebug
 		case EHue::Entity: return R > 12 && R * 10 > G * 25 && R * 10 > B * 25;
 		case EHue::Interactable: return G > 12 && G * 10 > R * 18 && G * 10 > B * 14;
 		case EHue::TestSource: return R > 20 && G > 20 && B * 10 < FMath::Min(R, G) * 5;
+		// The interactables' hue down to dim pixels (Brief 13, check F with local exposure off): green at least 4 levels,
+		// the same ratios to red and blue as Interactable.
+		case EHue::InteractableDim: return G >= 4 && G * 10 > R * 18 && G * 10 > B * 14;
 		}
 		return false;
 	}
@@ -428,6 +431,39 @@ namespace OcclusionDebug
 		GRun.bQuit = bQuit;
 		GRun.bSaveShots = bShots;
 		GSavedOcclusion = UTheLastShiftSettings::GetScanOcclusion();
+	}
+
+	// --- Lines off for the run (Brief 13): these tests measure the points, and lines uncovered by hiding the geometry would
+	// count as points seen through it. The settings are the lines' one owner; the director pushes them before every scan. ---
+
+	static FScanLinks GSavedLinks;
+	static bool bLinksOffForRun = false;
+
+	static void LinesOffForRun()
+	{
+		FScanLinks& Links = GetMutableDefault<UTheLastShiftSettings>()->ScanLinks;
+		GSavedLinks = Links;
+		bLinksOffForRun = true;
+		Links.Neighbours = 0;
+		if (UScanDirectorComponent* D = Director())
+		{
+			D->ApplyScanLinks();
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("%s   ..  lines off for this run (%d neighbours in the settings, put back at the end)"), *GRun.Name, GSavedLinks.Neighbours);
+	}
+
+	static void RestoreLines()
+	{
+		if (!bLinksOffForRun)
+		{
+			return;
+		}
+		GetMutableDefault<UTheLastShiftSettings>()->ScanLinks = GSavedLinks;
+		bLinksOffForRun = false;
+		if (UScanDirectorComponent* D = Director())
+		{
+			D->ApplyScanLinks();
+		}
 	}
 
 	static void Launch()
@@ -673,6 +709,10 @@ namespace OcclusionDebug
 				const FShotStats V = Measure(GVisibleShot, Hue);
 				const FShotStats H = Measure(Shot, Hue);
 				Note(FString::Printf(TEXT("%s: in its colour, visible %s / hidden %s"), *Label, *Describe(V), *Describe(H)));
+				if (Hue == EHue::Interactable)
+				{
+					Note(FString::Printf(TEXT("%s: dim interactable hue, visible %s"), *Label, *Describe(Measure(GVisibleShot, EHue::InteractableDim))));
+				}
 				if (bCheck)
 				{
 					Check(V.Lit > 5 && FMath::Abs(V.Lit - H.Lit) <= FMath::Max(5, H.Lit / 100) && FMath::Abs(V.Sum - H.Sum) <= 0.01 * H.Sum,
@@ -695,6 +735,12 @@ namespace OcclusionDebug
 			const FShotStats Stats = Measure(Shot, Hue);
 			G.Stats.Add(FString::Printf(TEXT("%s_%03d"), *Label, FMath::RoundToInt32(Intensity * 100.f)), Stats);
 			Note(FString::Printf(TEXT("%s at %.2f: %s"), *Label, Intensity, *Describe(Stats)));
+			if (Hue == EHue::Interactable)
+			{
+				const FShotStats Dim = Measure(Shot, EHue::InteractableDim);
+				G.Stats.Add(FString::Printf(TEXT("%s_%03d_Dim"), *Label, FMath::RoundToInt32(Intensity * 100.f)), Dim);
+				Note(FString::Printf(TEXT("%s at %.2f, dim interactable hue: %s"), *Label, Intensity, *Describe(Dim)));
+			}
 		});
 	}
 
@@ -739,6 +785,7 @@ namespace OcclusionDebug
 	static void StartOcclusionTest(bool bQuit, bool bShots)
 	{
 		StartRun(TEXT("OcclusionTest"), bQuit, bShots);
+		LinesOffForRun();
 		G = FState();
 		// Values between 0 and 1 keep working as built: they are checked at 0.2; the game's value (1) has checks of its own.
 		G.Intensity = 0.2f;
@@ -749,6 +796,7 @@ namespace OcclusionDebug
 			{
 				D->ApplyScanOcclusion();
 			}
+			RestoreLines();
 			ShowGeometry();
 			if (G.TestSource.IsValid())
 			{
@@ -1169,10 +1217,12 @@ namespace OcclusionDebug
 		AddIntensityShot(S, TEXT("Channel"), G.Intensity, EHue::Interactable);
 		S.Add(Do(TEXT("F: measured"), []()
 		{
-			const FShotStats Off = StatsOf(TEXT("Channel_000"));
-			const FShotStats On = StatsOf(FString::Printf(TEXT("Channel_%03d"), FMath::RoundToInt32(G.Intensity * 100.f)));
+			// Brief 13: with local exposure off the interactables at 0.20 through the door are dim (about 13 levels at most),
+			// below the Interactable hue's 12-level floor; the check counts the interactables' hue down to 4 levels instead.
+			const FShotStats Off = StatsOf(TEXT("Channel_000_Dim"));
+			const FShotStats On = StatsOf(FString::Printf(TEXT("Channel_%03d_Dim"), FMath::RoundToInt32(G.Intensity * 100.f)));
 			Check(Off.Lit <= 5, FString::Printf(TEXT("F: at 0 the door's far face is hidden (%s)"), *Describe(Off)));
-			Check(On.Lit > 20, FString::Printf(TEXT("F: at %.2f it shows through the door in the interactables' colour (%s)"), G.Intensity, *Describe(On)));
+			Check(On.Lit > 200, FString::Printf(TEXT("F: at %.2f it shows through the door in the interactables' colour, dim pixels included (%s)"), G.Intensity, *Describe(On)));
 			SetOcclusion(1.f);
 			return 0.3f;
 		}));
@@ -1324,9 +1374,11 @@ namespace OcclusionDebug
 	static void StartShipCheck(bool bQuit)
 	{
 		StartRun(TEXT("OcclusionShipCheck"), bQuit, true);
+		LinesOffForRun();
 		G = FState();
 		GRun.Cleanup = []()
 		{
+			RestoreLines();
 			ShowGeometry();
 			HoldAgeFade(false);
 			GetMutableDefault<UTheLastShiftSettings>()->ScanOcclusion = GSavedOcclusion;

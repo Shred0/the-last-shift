@@ -82,6 +82,50 @@ struct THELASTSHIFT_API FScanOcclusion
 };
 
 /**
+ * Neighbour lines between scan points, in one place (Brief 13). The scan director pushes these values to the lidar; nothing
+ * copies them. Points show through geometry; lines show only on surfaces in the line of sight, and they are what tells a
+ * wall from what is behind it. The lines grow over ScanOcclusion.LinkSeconds. The values live in Config/DefaultGame.ini;
+ * the C++ defaults are only a fallback for a missing ini entry (lines off).
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FScanLinks
+{
+	GENERATED_BODY()
+
+	/** Each point is linked to at most this many of its nearest points of the same scan and channel; 0 = no lines. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0", ClampMax = "8"))
+	int32 Neighbours = 0;
+
+	/** Longest link between two points. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "1.0", ClampMax = "1000.0", Units = "cm"))
+	float MaxDistanceCm = 50.f;
+
+	/** Width of a line on screen, in pixels, at any depth. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0.5", ClampMax = "8.0"))
+	float PixelWidth = 1.5f;
+
+	/** Brightness of a line as a factor of its points'. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float Intensity = 0.5f;
+
+	/** Largest angle between the surface normals of two linked points (no link across a corner or a depth step); 180 = no limit. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0.0", ClampMax = "180.0", Units = "deg"))
+	float MaxNormalAngle = 180.f;
+
+	/** Most links one scan keeps. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0", ClampMax = "262144"))
+	int32 MaxLinksPerScan = 65536;
+
+	/** Lift of a line's ends off their surface, as a fraction of a capture texel's width at the point's depth from the scan; 0 = none. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float LiftTexels = 0.f;
+
+	/** Most a line's end is lifted. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0.0", ClampMax = "100.0", Units = "cm"))
+	float LiftMaxCm = 30.f;
+};
+
+/**
  * Every colour of the suit's text, in one place: the home AI's messages, the twin AI's messages, the translation of the
  * logs at a terminal, and the voices of the full-screen text scenes (prologue, endings). Barcode bars take the colour of
  * their voice. None of them is a scan colour. The values live in Config/DefaultGame.ini; the C++ defaults are only a
@@ -294,6 +338,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability")
 	FScanOcclusion ScanOcclusion;
 
+	/** Neighbour lines between scan points: neighbours, distance, width, intensity, angle limit, cap. The one owner of those values. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability")
+	FScanLinks ScanLinks;
+
 	/** The travel screen stays black at least this long, even when the next area is ready sooner. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float TravelHoldSeconds = 4.f;
@@ -494,6 +542,9 @@ public:
 
 	/** ScanOcclusion of the project settings (clamped where it is pushed, by the lidar). */
 	static const FScanOcclusion& GetScanOcclusion() { return Get()->ScanOcclusion; }
+
+	/** ScanLinks of the project settings (clamped where it is pushed, by the lidar). */
+	static const FScanLinks& GetScanLinks() { return Get()->ScanLinks; }
 
 	/** InteractableScanChannel of the project settings, clamped to [1, 4]. */
 	static int32 GetInteractableScanChannel() { return FMath::Clamp(Get()->InteractableScanChannel, 1, 4); }

@@ -2,6 +2,7 @@
 
 #include "LidarScanComponent.h"
 
+#include "LidarScanLinks.h"
 #include "LidarScanModule.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
@@ -24,10 +25,15 @@
 #include "NiagaraSystem.h"
 #include "NiagaraSystemInstance.h"
 #include "NiagaraSystemInstanceController.h"
+#include "RenderingThread.h"
+#include "RHIGPUReadback.h"
 #include "SceneView.h"
+#include "Tasks/Task.h"
 #include "TextureResource.h"
 #include "TimerManager.h"
 #include "UnrealClient.h"
+
+#include <atomic>
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(LidarScanComponent)
 
@@ -137,6 +143,56 @@
  * hidden behind geometry at every moment of the pulse. A channel only changes Base, so a hidden point keeps its
  * channel's colour.
  *
+ * Neighbour lines (LinkNeighbours > 0). At 0 nothing below runs: no write, no readback, no search, no line particle. What
+ * remains is the Lines emitter of each instance, with no particle, and the shared 1 x 1 placeholder target
+ * (PlaceholderSampleTarget) bound to User.SampleTarget with User.ExportSamples false, because the system's render target
+ * interface needs a bound target; with 16 scans alive these cost about 0.05 ms of GPU time.
+ * User parameters: User.ExportSamples (bool), User.SampleTarget (texture render target), User.SampleTargetDI (render
+ * target 2D interface bound to User.SampleTarget, inheriting its size and format), User.LinkSpawnCount and User.LinkCount
+ * (int), User.LinkStarts and User.LinkEnds (position arrays), User.LinkStartNormals and User.LinkEndNormals (colour arrays),
+ * User.LinkGrowth, User.LinePixelWidth and User.LineIntensity (float).
+ *
+ * The sample target, one layout shared by the spawn's write step and the search (LidarScanLinks): RGBA32f, 2W x H for a
+ * W x H capture. The last module of the Points emitter's spawn, LidarExportSample (a scratch pad whose Custom HLSL node
+ * sits on the parameter map's path), writes for spawn index i, x = i % W, y = i / W, when User.ExportSamples is true:
+ *   texel (x, y)     = (LidarSurfacePosition.xyz, DataInstance.Alive ? LidarChannel : -1),
+ *   texel (W + x, y) = (LidarNormal.xyz, 0).
+ * Every particle of the burst writes, alive or not, so every texel of the capture is written on every scan. The component
+ * creates the target per slot at run time (transient, not an asset), clears it to (0, 0, 0, -2) before each scan, binds the
+ * placeholder target to slots that have none, and sets User.ExportSamples false while lines are off. One frame after the
+ * scan's spawn has been issued (OnScanCompleted, then one frame) it queues one asynchronous GPU readback of the target:
+ * the search reads the points the system spawned and never rebuilds them. A scan whose readback was not yet queued when a
+ * newer scan started, or whose live samples (W >= 0) differ from its captured particles, gets no links (rejected). A
+ * result for a scan that is gone (slot reused, cleared, component destroyed) is dropped and touches nothing. A finished
+ * search waits LinkResultDelaySeconds (diagnostics, 0 in normal use) before it is handed to its scan, so that tests can make a
+ * result arrive after its scan is gone.
+ *
+ * The search (worker thread): for each live sample, its LinkNeighbours nearest live samples of the same channel among the
+ * samples within 3 texels in the capture (wider near the capture, where the thinning keeps few), within LinkMaxDistance
+ * and with normals at most LinkMaxNormalAngle apart; a link joins two samples when each is among the other's nearest
+ * (mutual nearest neighbours), so no point has more than LinkNeighbours links; each link once, at most MaxLinksPerScan.
+ *
+ * Lines emitter (third emitter of the same instance: ghost cap, ClearScans and eviction reach it as the others). Spawn:
+ * one burst (loop count 1) of User.LinkSpawnCount = min(MaxLinksPerScan, ceil(LinkNeighbours * W * H / 2)) particles
+ * with the points; particle i stores Particles.LidarLinkIndex = i. Update: while User.LinkCount is -1 (the search runs)
+ * every particle has size 0; once the links arrive, particles with LidarLinkIndex >= LinkCount die. Each reads A, B, NA, NB
+ * (LinkStarts, LinkEnds, LinkStartNormals with the channel in a, LinkEndNormals) at its index:
+ *   LineA = A + NA.rgb * (SurfaceOffset + LiftA), LineB = B + NB.rgb * (SurfaceOffset + LiftB), with
+ *   Lift = min(LineLiftMaxCm, LineLiftTexels * 2 * TanHalfFov.x / CaptureWidth * max(dot(P - CaptureOrigin, CaptureForward), 0))
+ *   for the end's surface position P (User.LineLiftTexels, User.LineLiftMaxCm; at 0 the ends are where the points are drawn),
+ *   Position = (LineA + LineB) / 2, SpriteAlignment = normalize(LineB - LineA),
+ *   SpriteSize = (LinePixelWidth * ViewPixelScale * max(dot(Position - ViewOrigin, ViewForward), 1), |LineB - LineA|),
+ *   Color.rgb = BaseColor(channel) * LineIntensity * clamp(DepthTerm * AngleTerm, DensityBoostMin, DensityBoostMax), the
+ *     points' compensation taken at the midpoint of A and B with the normal normalize(NA + NB) (term 1 if that is short),
+ *   Color.a = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration) (the points' alpha: fade and ClearScans fade-out),
+ *   DynamicMaterialParameter.x = User.LinkGrowth.
+ * The sprite renderer uses CustomAlignment and FaceCamera: the quad contains the segment and turns about it toward the
+ * camera, so along the line its depth is the segment's. M_LidarLine is unlit, additive, two-sided and depth tested, with no
+ * second renderer: lines never show through geometry, whatever OccludedIntensity. Its emissive is Color.rgb * Color.a
+ * where UV.y <= g / 2 or UV.y >= 1 - g / 2, g = DynamicMaterialParameter.x (all of it at g >= 0.999): a line grows from
+ * both of its points toward its middle. User.LinkGrowth = (world time since the scan) / LinkSeconds, clamped to [0, 1]: the
+ * pulse's clock, so it stands still behind the pause menu, and older scans stay at 1.
+ *
  * Slots and the ghost cap: one instance holds exactly one scan. At most MaxAliveScans instances exist; when a scan
  * needs a slot and none is idle, the oldest scan's slot is reused and that scan is evicted: the component completes
  * the instance (DeactivateImmediate, which kills every particle of both emitters) and re-activates it for the new
@@ -228,6 +284,20 @@ namespace LidarScanParams
 	static const FName PointMaterial(TEXT("User.PointMaterial"));
 	static const FName OcclusionDisplay(TEXT("User.OcclusionDisplay"));
 
+	static const FName LinkSpawnCount(TEXT("User.LinkSpawnCount"));
+	static const FName LinkCount(TEXT("User.LinkCount"));
+	static const FName LinkStarts(TEXT("User.LinkStarts"));
+	static const FName LinkEnds(TEXT("User.LinkEnds"));
+	static const FName LinkStartNormals(TEXT("User.LinkStartNormals"));
+	static const FName LinkEndNormals(TEXT("User.LinkEndNormals"));
+	static const FName LinkGrowth(TEXT("User.LinkGrowth"));
+	static const FName LinePixelWidth(TEXT("User.LinePixelWidth"));
+	static const FName LineIntensity(TEXT("User.LineIntensity"));
+	static const FName LineLiftTexels(TEXT("User.LineLiftTexels"));
+	static const FName LineLiftMaxCm(TEXT("User.LineLiftMaxCm"));
+	static const FName ExportSamples(TEXT("User.ExportSamples"));
+	static const FName SampleTarget(TEXT("User.SampleTarget"));
+
 	/** Scalar parameter of OccludedPointMaterial that carries the pulse factor. */
 	static const FName OccludedFactorParameter(TEXT("OccludedFactor"));
 
@@ -240,6 +310,43 @@ namespace LidarScanParams
 	/** Emitter names in the point system, used only by GetScanSlotStats. */
 	static const FName CapturedEmitterName(TEXT("Points"));
 	static const FName InjectedEmitterName(TEXT("Injected"));
+	static const FName LinesEmitterName(TEXT("Lines"));
+}
+
+/** One scan's neighbour search: the GPU readback of the samples its spawn wrote, then the search on a worker thread. */
+struct FLidarLinkJob
+{
+	enum EState : int32 { WaitingSpawn, Copying, Copied, Searching, Done, Failed };
+
+	int32 ScanIndex = INDEX_NONE;
+	double StartRealTime = 0.0;
+	double CopiedRealTime = -1.0;
+	double DoneRealTime = -1.0;
+	FLidarScanContext Context;
+	FTextureRenderTargetResource* TargetResource = nullptr;
+	/** Frame from which the sample copy may be queued (0 until the scan's spawn has been issued). */
+	uint64 CopyAfterFrame = 0;
+	FLidarLinkSearchInput Input;
+	FLidarLinkSearchOutput Output;
+	TUniquePtr<FRHIGPUTextureReadback> Readback;
+	std::atomic<int32> State{ WaitingSpawn };
+	std::atomic<bool> bPollInFlight{ false };
+};
+
+namespace LidarScanLinkTiming
+{
+	/** A readback not ready after this long is given up (its scan gets no lines). */
+	static constexpr double ReadbackTimeoutSeconds = 3.0;
+
+	/** How long the read-back live samples may wait for the GPU's particle count to match before the scan is rejected. */
+	static constexpr double CountMatchSeconds = 0.5;
+
+	/** Growth of a scan's lines Age seconds after it started. */
+	static float Growth(double Age, float LinkSeconds)
+	{
+		const double Link = FMath::Clamp(LinkSeconds, 0.f, 10.f);
+		return Link <= 0.0 ? 1.f : static_cast<float>(FMath::Clamp(Age / Link, 0.0, 1.0));
+	}
 }
 
 bool FLidarScanContext::IsInCoverage(const FVector& WorldPosition, double& OutDepth) const
@@ -347,6 +454,8 @@ void ULidarScanComponent::PrepareSlots()
 		FLidarScanSlot& Slot = Slots[Index];
 		Slot.Points->SetVariableInt(LidarScanParams::PointCount, 0);
 		Slot.Points->SetVariableInt(LidarScanParams::InjectedPointCount, 0);
+		Slot.Points->SetVariableInt(LidarScanParams::LinkSpawnCount, 0);
+		Slot.Points->SetVariableInt(LidarScanParams::LinkCount, 0);
 		Slot.Points->Activate(true);
 		Slot.WarmUntilRealTime = Now + LidarScanWarmUp::Seconds;
 		bWarming = true;
@@ -370,6 +479,9 @@ int32 ULidarScanComponent::CreateSlot()
 	Points->SetAutoDestroy(false);
 	Points->SetAsset(LoadedPointSystem);
 	Points->RegisterComponent();
+	// The point system's sample target interface needs a bound target even when lines are off: a shared 1 x 1 one.
+	Points->SetVariableTextureRenderTarget(LidarScanParams::SampleTarget, GetPlaceholderSampleTarget());
+	Points->SetVariableBool(LidarScanParams::ExportSamples, false);
 
 	const int32 Index = Slots.AddDefaulted();
 	Slots[Index].Points = Points;
@@ -385,6 +497,8 @@ void ULidarScanComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		DestroySlot(Slot);
 	}
 	Slots.Reset();
+	// Render commands and worker tasks hold their own references; whatever finishes later is dropped with them.
+	LinkJobs.Reset();
 	SetComponentTickEnabled(false);
 
 	if (const UWorld* World = GetWorld())
@@ -647,7 +761,29 @@ void ULidarScanComponent::Scan()
 	Slot.Context.ScanIndex = ScanIndex;
 	Slot.Context.Timestamp = World ? static_cast<float>(World->GetTimeSeconds()) : 0.f;
 	Slot.StartRealTime = World ? World->GetRealTimeSeconds() : 0.0;
+	Slot.StartWorldTime = World ? World->GetTimeSeconds() : 0.0;
 	Slot.SupersededRealTime = -1.0;
+
+	// Lines: the emitter spawns, with the points, as many line particles as the scan can have links (each point has at
+	// most LinkNeighbours, each link two points); they stay invisible until the search hands the links over (LinkCount
+	// -1), then those above LinkCount die. Off: nothing spawns, nothing is read back or searched.
+	const int32 Neighbours = FMath::Clamp(LinkNeighbours, 0, 8);
+	if (Neighbours > 0)
+	{
+		const int64 Bound = (static_cast<int64>(Neighbours) * Target->SizeX * Target->SizeY + 1) / 2;
+		Points->SetVariableInt(LidarScanParams::LinkSpawnCount, static_cast<int32>(FMath::Min<int64>(Bound, FMath::Clamp(MaxLinksPerScan, 0, 262144))));
+		Points->SetVariableInt(LidarScanParams::LinkCount, -1);
+		// A sample target created now is bound like a new depth target: the spawn waits one frame for it.
+		bNewTarget |= StartLinkSearch(Slot);
+	}
+	else
+	{
+		Points->SetVariableInt(LidarScanParams::LinkSpawnCount, 0);
+		Points->SetVariableInt(LidarScanParams::LinkCount, 0);
+		Points->SetVariableBool(LidarScanParams::ExportSamples, false);
+		Points->SetVariableTextureRenderTarget(LidarScanParams::SampleTarget, Slot.SampleTarget ? Slot.SampleTarget.Get() : GetPlaceholderSampleTarget());
+	}
+	Slot.PushedLinkGrowth = -1.f;
 
 	// Every other scan is no longer the newest: points that last until the next scan start vanishing now.
 	for (FLidarScanSlot& Other : Slots)
@@ -934,6 +1070,10 @@ TArray<FLidarScanSlotStats> ULidarScanComponent::GetScanSlotStats() const
 			{
 				Stats.CapturedParticles += Count;
 			}
+			else if (Name == LidarScanParams::LinesEmitterName)
+			{
+				Stats.LineParticles += Count;
+			}
 		}
 	}
 	return Result;
@@ -1002,6 +1142,8 @@ void ULidarScanComponent::ActivateScanPoints(int32 ScanIndex)
 
 void ULidarScanComponent::BroadcastScanCompleted(int32 ScanIndex)
 {
+	// The spawn burst (and its writes into the sample target) went to the GPU with the previous frame.
+	ReadBackSamples(ScanIndex);
 	const UWorld* World = GetWorld();
 	OnScanCompleted.Broadcast(ScanIndex, World ? static_cast<float>(World->GetTimeSeconds()) : 0.f);
 }
@@ -1069,6 +1211,7 @@ void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 				Slot.Points->SetVariableFloat(LidarScanParams::ScanRealAge, static_cast<float>(FMath::Max(Now - Slot.StartRealTime, 0.0)));
 				Slot.Points->SetVariableFloat(LidarScanParams::SupersededAge, Slot.SupersededRealTime < 0.0
 					? -1.f : static_cast<float>(FMath::Max(Now - Slot.SupersededRealTime, 0.0)));
+				PushLinkGrowth(Slot);
 			}
 			bAnyActive |= Slot.IsActive();
 			continue;
@@ -1085,6 +1228,9 @@ void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 			bAnyActive = true;
 		}
 	}
+
+	// Searches of scans already gone are dropped by TickLinkSearches itself; it only needs the tick while any is pending.
+	bAnyActive |= TickLinkSearches();
 
 	if (!bAnyActive)
 	{
@@ -1263,6 +1409,8 @@ void ULidarScanComponent::ApplyLiveSettings()
 			EnsureDepthTarget(Slot, bChannels, bCreated);
 			Slot.Points->SetVariableInt(LidarScanParams::PointCount, 0);
 			Slot.Points->SetVariableInt(LidarScanParams::InjectedPointCount, 0);
+			Slot.Points->SetVariableInt(LidarScanParams::LinkSpawnCount, 0);
+			Slot.Points->SetVariableInt(LidarScanParams::LinkCount, 0);
 			Slot.Points->Activate(true);
 			Slot.WarmUntilRealTime = Now + LidarScanWarmUp::Seconds;
 			bWarming = true;
@@ -1488,4 +1636,441 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 	Points->SetVariableFloat(LidarScanParams::ScanRealAge, static_cast<float>(FMath::Max(Now - Slot.StartRealTime, 0.0)));
 	Points->SetVariableFloat(LidarScanParams::SupersededAge, Slot.SupersededRealTime < 0.0
 		? -1.f : static_cast<float>(FMath::Max(Now - Slot.SupersededRealTime, 0.0)));
+
+	Points->SetVariableFloat(LidarScanParams::LinePixelWidth, FMath::Clamp(LinePixelWidth, 0.5f, 8.f));
+	Points->SetVariableFloat(LidarScanParams::LineIntensity, FMath::Clamp(LineIntensity, 0.f, 4.f));
+	Points->SetVariableFloat(LidarScanParams::LineLiftTexels, FMath::Clamp(LineLiftTexels, 0.f, 2.f));
+	Points->SetVariableFloat(LidarScanParams::LineLiftMaxCm, FMath::Clamp(LineLiftMaxCm, 0.f, 100.f));
+	if (Slot.IsActive())
+	{
+		const double WorldNow = World ? World->GetTimeSeconds() : Slot.StartWorldTime;
+		Points->SetVariableFloat(LidarScanParams::LinkGrowth, LidarScanLinkTiming::Growth(WorldNow - Slot.StartWorldTime, LinkSeconds));
+	}
+}
+
+// --- Links ---
+
+void ULidarScanComponent::SetLinks(int32 InNeighbours, float InMaxDistance, float InPixelWidth, float InIntensity, float InMaxNormalAngle)
+{
+	LinkNeighbours = FMath::Clamp(InNeighbours, 0, 8);
+	LinkMaxDistance = FMath::Clamp(InMaxDistance, 1.f, 1000.f);
+	LinePixelWidth = FMath::Clamp(InPixelWidth, 0.5f, 8.f);
+	LineIntensity = FMath::Clamp(InIntensity, 0.f, 4.f);
+	LinkMaxNormalAngle = FMath::Clamp(InMaxNormalAngle, 0.f, 180.f);
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.IsActive() && Slot.Points)
+		{
+			Slot.Points->SetVariableFloat(LidarScanParams::LinePixelWidth, LinePixelWidth);
+			Slot.Points->SetVariableFloat(LidarScanParams::LineIntensity, LineIntensity);
+		}
+	}
+}
+
+void ULidarScanComponent::SetLineLift(float InLiftTexels, float InLiftMaxCm)
+{
+	LineLiftTexels = FMath::Clamp(InLiftTexels, 0.f, 2.f);
+	LineLiftMaxCm = FMath::Clamp(InLiftMaxCm, 0.f, 100.f);
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.Points)
+		{
+			Slot.Points->SetVariableFloat(LidarScanParams::LineLiftTexels, LineLiftTexels);
+			Slot.Points->SetVariableFloat(LidarScanParams::LineLiftMaxCm, LineLiftMaxCm);
+		}
+	}
+}
+
+float ULidarScanComponent::GetLinkGrowth(int32 ScanIndex) const
+{
+	const UWorld* World = GetWorld();
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.IsActive() && Slot.ScanIndex == ScanIndex)
+		{
+			return LidarScanLinkTiming::Growth((World ? World->GetTimeSeconds() : Slot.StartWorldTime) - Slot.StartWorldTime, LinkSeconds);
+		}
+	}
+	return -1.f;
+}
+
+void ULidarScanComponent::PushLinkGrowth(FLidarScanSlot& Slot, bool bForce)
+{
+	if (!Slot.IsActive() || !Slot.Points)
+	{
+		return;
+	}
+	const UWorld* World = GetWorld();
+	const float Growth = LidarScanLinkTiming::Growth((World ? World->GetTimeSeconds() : Slot.StartWorldTime) - Slot.StartWorldTime, LinkSeconds);
+	if (bForce || Growth != Slot.PushedLinkGrowth)
+	{
+		Slot.Points->SetVariableFloat(LidarScanParams::LinkGrowth, Growth);
+		Slot.PushedLinkGrowth = Growth;
+	}
+}
+
+bool ULidarScanComponent::GetLastScanLinks(TArray<FLidarLink>& OutLinks, TArray<float>& OutPointDepths, TArray<int32>& OutDegrees, int32& OutWidth) const
+{
+	OutLinks = LastLinks;
+	OutPointDepths = LastLinkPointDepths;
+	OutDegrees = LastLinkDegrees;
+	OutWidth = LastLinkWidth;
+	return LastLinkStats.ScanIndex != INDEX_NONE;
+}
+
+bool ULidarScanComponent::GetLastScanSamples(TArray<FVector>& OutPositions, TArray<int32>& OutChannels, int32& OutWidth, FLidarScanContext& OutContext) const
+{
+	OutPositions = LastSamplePositions;
+	OutChannels = LastSampleChannels;
+	OutWidth = LastLinkWidth;
+	OutContext = LastSampleContext;
+	return LastLinkStats.ScanIndex != INDEX_NONE && LastSamplePositions.Num() > 0;
+}
+
+UTextureRenderTarget2D* ULidarScanComponent::GetPlaceholderSampleTarget()
+{
+	if (!PlaceholderSampleTarget)
+	{
+		UTextureRenderTarget2D* Target = NewObject<UTextureRenderTarget2D>(this, NAME_None, RF_Transient);
+		Target->RenderTargetFormat = RTF_RGBA32f;
+		Target->ClearColor = FLinearColor(0.f, 0.f, 0.f, LidarScanLinks::UnwrittenW);
+		Target->bAutoGenerateMips = false;
+		Target->Filter = TF_Nearest;
+		Target->bCanCreateUAV = true;
+		Target->InitAutoFormat(1, 1);
+		Target->UpdateResourceImmediate(true);
+		PlaceholderSampleTarget = Target;
+	}
+	return PlaceholderSampleTarget;
+}
+
+int32 ULidarScanComponent::GetCapturedParticles(const FLidarScanSlot& Slot) const
+{
+	const UNiagaraComponent* Points = Slot.Points;
+	const FNiagaraSystemInstanceControllerConstPtr Controller = Points ? Points->GetSystemInstanceController() : nullptr;
+	const FNiagaraSystemInstance* Instance = Controller.IsValid() ? Controller->GetSystemInstance_Unsafe() : nullptr;
+	if (!Instance)
+	{
+		return 0;
+	}
+	for (const FNiagaraEmitterInstanceRef& Emitter : Instance->GetEmitters())
+	{
+		if (Emitter->GetEmitterHandle().GetName() == LidarScanParams::CapturedEmitterName)
+		{
+			return Emitter->IsComplete() ? 0 : Emitter->GetNumParticles();
+		}
+	}
+	return 0;
+}
+
+bool ULidarScanComponent::StartLinkSearch(FLidarScanSlot& Slot)
+{
+	UNiagaraComponent* Points = Slot.Points;
+	UTextureRenderTarget2D* Depth = Slot.DepthTarget;
+	if (!Points || !Depth)
+	{
+		return false;
+	}
+
+	// One readback per scan: a scan whose samples are not yet being read back when a newer scan starts gets no links.
+	for (const TSharedPtr<FLidarLinkJob, ESPMode::ThreadSafe>& Older : LinkJobs)
+	{
+		if (Older->State == FLidarLinkJob::WaitingSpawn)
+		{
+			FLidarScanSlot* OlderSlot = Slots.FindByPredicate([&Older](const FLidarScanSlot& S) { return S.IsActive() && S.ScanIndex == Older->ScanIndex; });
+			RejectLinks(OlderSlot, *Older, 0, TEXT("a newer scan started before its samples were read back"));
+			Older->State = FLidarLinkJob::Failed;
+		}
+	}
+	LinkJobs.RemoveAll([](const TSharedPtr<FLidarLinkJob, ESPMode::ThreadSafe>& Job) { return Job->State == FLidarLinkJob::Failed; });
+
+	// The sample target: twice the capture's width (samples, then normals), float, cleared to "unwritten" before each scan.
+	bool bCreated = false;
+	const int32 Width = Depth->SizeX * 2;
+	const int32 Height = Depth->SizeY;
+	if (!Slot.SampleTarget || Slot.SampleTarget->SizeX != Width || Slot.SampleTarget->SizeY != Height)
+	{
+		UTextureRenderTarget2D* Target = NewObject<UTextureRenderTarget2D>(this, NAME_None, RF_Transient);
+		Target->RenderTargetFormat = RTF_RGBA32f;
+		Target->ClearColor = FLinearColor(0.f, 0.f, 0.f, LidarScanLinks::UnwrittenW);
+		Target->bAutoGenerateMips = false;
+		Target->Filter = TF_Nearest;
+		Target->AddressX = TA_Clamp;
+		Target->AddressY = TA_Clamp;
+		Target->bCanCreateUAV = true;
+		Target->InitAutoFormat(Width, Height);
+		Target->UpdateResourceImmediate(true);
+		Slot.SampleTarget = Target;
+		bCreated = true;
+	}
+	else
+	{
+		Slot.SampleTarget->UpdateResourceImmediate(true);
+	}
+	Points->SetVariableTextureRenderTarget(LidarScanParams::SampleTarget, Slot.SampleTarget);
+	Points->SetVariableBool(LidarScanParams::ExportSamples, true);
+
+	TSharedPtr<FLidarLinkJob, ESPMode::ThreadSafe> Job = MakeShared<FLidarLinkJob, ESPMode::ThreadSafe>();
+	Job->ScanIndex = Slot.Context.ScanIndex;
+	Job->Context = Slot.Context;
+	const UWorld* World = GetWorld();
+	Job->StartRealTime = World ? World->GetRealTimeSeconds() : 0.0;
+	Job->TargetResource = Slot.SampleTarget->GameThread_GetRenderTargetResource();
+
+	FLidarLinkSearchInput& In = Job->Input;
+	In.Width = Depth->SizeX;
+	In.Height = Depth->SizeY;
+	In.Origin = Slot.Context.CaptureOrigin;
+	In.Forward = Slot.Context.CaptureForward;
+	In.NearThinningDistance = FMath::Clamp(NearThinningDistance, 0.f, 1000.f);
+	In.Neighbours = FMath::Clamp(LinkNeighbours, 0, 8);
+	In.MaxDistance = FMath::Clamp(LinkMaxDistance, 1.f, 1000.f);
+	In.MinNormalDot = LinkMaxNormalAngle >= 180.f ? -2.f : FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(LinkMaxNormalAngle, 0.f, 180.f)));
+	In.MaxLinks = FMath::Clamp(MaxLinksPerScan, 0, 262144);
+	LinkJobs.Add(Job);
+	return bCreated;
+}
+
+void ULidarScanComponent::ReadBackSamples(int32 ScanIndex)
+{
+	for (const TSharedPtr<FLidarLinkJob, ESPMode::ThreadSafe>& Job : LinkJobs)
+	{
+		if (Job->ScanIndex == ScanIndex && Job->State == FLidarLinkJob::WaitingSpawn)
+		{
+			// One more frame, so the copy is queued after the frame that ran the spawn whatever the tick order.
+			Job->CopyAfterFrame = GFrameCounter + 1;
+		}
+	}
+}
+
+void ULidarScanComponent::EnqueueSampleCopy(const TSharedPtr<FLidarLinkJob, ESPMode::ThreadSafe>& Job)
+{
+	// The copy runs on the render thread after everything queued before it, the spawn's writes included.
+	Job->State = FLidarLinkJob::Copying;
+	Job->Readback = MakeUnique<FRHIGPUTextureReadback>(TEXT("LidarScanLinks"));
+	ENQUEUE_RENDER_COMMAND(LidarScanLinksReadback)([Job](FRHICommandListImmediate& RHICmdList)
+	{
+		FRHITexture* Texture = Job->TargetResource ? Job->TargetResource->GetRenderTargetTexture().GetReference() : nullptr;
+		if (Texture)
+		{
+			Job->Readback->EnqueueCopy(RHICmdList, Texture);
+		}
+		else
+		{
+			Job->State = FLidarLinkJob::Failed;
+		}
+	});
+}
+
+void ULidarScanComponent::RejectLinks(FLidarScanSlot* Slot, const FLidarLinkJob& Job, int32 Points, const TCHAR* Why)
+{
+	++RejectedLinkScans;
+	if (Slot && Slot->Points)
+	{
+		Slot->Points->SetVariableInt(LidarScanParams::LinkCount, 0);
+	}
+	LastLinkStats = FLidarLinkStats();
+	LastLinkStats.ScanIndex = Job.ScanIndex;
+	LastLinkStats.Points = Points;
+	LastLinkStats.bRejected = true;
+	LastLinks.Reset();
+	LastLinkPointDepths.Reset();
+	LastLinkDegrees.Reset();
+	LastSamplePositions.Reset();
+	LastSampleChannels.Reset();
+	UE_LOG(LogLidarScan, Warning, TEXT("%s: scan %d gets no lines: %s."), *GetName(), Job.ScanIndex, Why);
+}
+
+bool ULidarScanComponent::TickLinkSearches()
+{
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetRealTimeSeconds() : 0.0;
+	for (int32 Index = 0; Index < LinkJobs.Num();)
+	{
+		const TSharedPtr<FLidarLinkJob, ESPMode::ThreadSafe> Job = LinkJobs[Index];
+		FLidarScanSlot* Slot = Slots.FindByPredicate([&Job](const FLidarScanSlot& S)
+		{
+			return S.IsActive() && !S.IsFadingOut() && S.ScanIndex == Job->ScanIndex;
+		});
+		const int32 State = Job->State;
+		bool bRemove = false;
+
+		if (State == FLidarLinkJob::Searching)
+		{
+			// The worker thread holds the job; wait for it even if the scan is gone.
+		}
+		else if (!Slot)
+		{
+			// The scan is gone (slot reused, cleared): whatever this job holds is dropped and touches nothing.
+			++DiscardedLinkResults;
+			bRemove = true;
+		}
+		else if (State == FLidarLinkJob::WaitingSpawn || State == FLidarLinkJob::Copying)
+		{
+			if (Now - Job->StartRealTime > LidarScanLinkTiming::ReadbackTimeoutSeconds)
+			{
+				RejectLinks(Slot, *Job, 0, TEXT("its samples were not read back in time"));
+				bRemove = true;
+			}
+			else if (State == FLidarLinkJob::WaitingSpawn)
+			{
+				if (Job->CopyAfterFrame > 0 && GFrameCounter >= Job->CopyAfterFrame)
+				{
+					EnqueueSampleCopy(Job);
+				}
+			}
+			else if (!Job->bPollInFlight)
+			{
+				Job->bPollInFlight = true;
+				ENQUEUE_RENDER_COMMAND(LidarScanLinksPoll)([Job](FRHICommandListImmediate&)
+				{
+					if (Job->State == FLidarLinkJob::Copying && Job->Readback && Job->Readback->IsReady())
+					{
+						int32 RowPitch = 0;
+						const float* Data = static_cast<const float*>(Job->Readback->Lock(RowPitch));
+						FLidarLinkSearchInput& In = Job->Input;
+						if (Data && RowPitch >= In.Width * 2)
+						{
+							In.Samples.SetNumUninitialized(In.Width * In.Height);
+							In.Normals.SetNumUninitialized(In.Width * In.Height);
+							for (int32 Y = 0; Y < In.Height; ++Y)
+							{
+								const float* Row = Data + static_cast<int64>(Y) * RowPitch * 4;
+								for (int32 X = 0; X < In.Width; ++X)
+								{
+									const float* S = Row + X * 4;
+									const float* N = Row + (In.Width + X) * 4;
+									In.Samples[Y * In.Width + X] = FVector4f(S[0], S[1], S[2], S[3]);
+									In.Normals[Y * In.Width + X] = FVector3f(N[0], N[1], N[2]);
+								}
+							}
+							Job->State = FLidarLinkJob::Copied;
+						}
+						else
+						{
+							Job->State = FLidarLinkJob::Failed;
+						}
+						Job->Readback->Unlock();
+					}
+					Job->bPollInFlight = false;
+				});
+			}
+		}
+		else if (State == FLidarLinkJob::Copied)
+		{
+			// The live samples read back must be exactly the points the scan spawned, or the scan gets no links.
+			if (Job->CopiedRealTime < 0.0)
+			{
+				Job->CopiedRealTime = Now;
+			}
+			int32 Live = 0;
+			for (const FVector4f& Sample : Job->Input.Samples)
+			{
+				Live += Sample.W >= 0.f ? 1 : 0;
+			}
+			const int32 Captured = GetCapturedParticles(*Slot);
+			if (Live == Captured)
+			{
+				Job->State = FLidarLinkJob::Searching;
+				UE::Tasks::Launch(UE_SOURCE_LOCATION, [Job]()
+				{
+					LidarScanLinks::Find(Job->Input, Job->Output);
+					Job->State = FLidarLinkJob::Done;
+				});
+			}
+			else if (Now - Job->CopiedRealTime > LidarScanLinkTiming::CountMatchSeconds)
+			{
+				int32 Unwritten = 0, Dead = 0;
+				for (const FVector4f& Sample : Job->Input.Samples)
+				{
+					Unwritten += Sample.W <= LidarScanLinks::UnwrittenW + 0.5f ? 1 : 0;
+					Dead += (Sample.W < 0.f && Sample.W > LidarScanLinks::UnwrittenW + 0.5f) ? 1 : 0;
+				}
+				const FVector4f First = Job->Input.Samples.Num() > 0 ? Job->Input.Samples[Job->Input.Samples.Num() / 2] : FVector4f();
+				RejectLinks(Slot, *Job, Live, *FString::Printf(TEXT("%d live samples read back against %d captured points (%d texels unwritten, %d without a point; middle texel %.1f %.1f %.1f %.1f)"),
+					Live, Captured, Unwritten, Dead, First.X, First.Y, First.Z, First.W));
+				bRemove = true;
+			}
+		}
+		else if (State == FLidarLinkJob::Done)
+		{
+			if (Job->DoneRealTime < 0.0)
+			{
+				Job->DoneRealTime = Now;
+			}
+			if (Now - Job->DoneRealTime >= FMath::Clamp(LinkResultDelaySeconds, 0.f, 10.f))
+			{
+				const FLidarLinkSearchOutput& Out = Job->Output;
+				UNiagaraComponent* Points = Slot->Points;
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(Points, LidarScanParams::LinkStarts, Out.Starts);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(Points, LidarScanParams::LinkEnds, Out.Ends);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(Points, LidarScanParams::LinkStartNormals, Out.StartNormals);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(Points, LidarScanParams::LinkEndNormals, Out.EndNormals);
+				Points->SetVariableInt(LidarScanParams::LinkCount, Out.Starts.Num());
+
+				LastLinkStats = FLidarLinkStats();
+				LastLinkStats.ScanIndex = Job->ScanIndex;
+				LastLinkStats.Points = Out.Points;
+				LastLinkStats.Links = Out.Starts.Num();
+				LastLinkStats.Dropped = Out.Dropped;
+				LastLinkStats.MaxDegree = Out.MaxDegree;
+				LastLinkStats.LongestLink = Out.Longest;
+				LastLinkStats.SearchMilliseconds = static_cast<float>(Out.Milliseconds);
+				LastLinkStats.ReadySeconds = static_cast<float>(Now - Job->StartRealTime);
+				LastLinkStats.UnwrittenTexels = Out.Unwritten;
+				LastLinks.SetNum(Out.Starts.Num());
+				for (int32 Link = 0; Link < Out.Starts.Num(); ++Link)
+				{
+					FLidarLink& L = LastLinks[Link];
+					L.Start = Out.Starts[Link];
+					L.End = Out.Ends[Link];
+					L.StartTexel = Out.StartTexels[Link];
+					L.EndTexel = Out.EndTexels[Link];
+					L.StartChannel = FMath::RoundToInt32(Out.StartNormals[Link].A);
+					L.EndChannel = FMath::RoundToInt32(Out.EndNormals[Link].A);
+				}
+				LastLinkPointDepths = Out.PointDepths;
+				LastLinkDegrees.SetNum(Out.Degrees.Num());
+				for (int32 Texel = 0; Texel < Out.Degrees.Num(); ++Texel)
+				{
+					LastLinkDegrees[Texel] = Out.Degrees[Texel];
+				}
+				const int32 Texels = Job->Input.Samples.Num();
+				LastSamplePositions.SetNumUninitialized(Texels);
+				LastSampleChannels.SetNumUninitialized(Texels);
+				for (int32 Texel = 0; Texel < Texels; ++Texel)
+				{
+					const FVector4f& Sample = Job->Input.Samples[Texel];
+					LastSamplePositions[Texel] = FVector(Sample.X, Sample.Y, Sample.Z);
+					LastSampleChannels[Texel] = FMath::RoundToInt32(Sample.W);
+				}
+				LastSampleContext = Job->Context;
+				LastLinkWidth = Job->Input.Width;
+
+				if (Out.Dropped > 0)
+				{
+					UE_LOG(LogLidarScan, Warning, TEXT("%s: scan %d dropped %d links over the cap of %d per scan."),
+						*GetName(), Job->ScanIndex, Out.Dropped, Job->Input.MaxLinks);
+				}
+				UE_LOG(LogLidarScan, Log, TEXT("%s: scan %d links: %d points, %d links (%d dropped), at most %d per point, longest %.1f cm, %d texels unwritten, search %.2f ms, ready %.3f s after the scan."),
+					*GetName(), Job->ScanIndex, Out.Points, Out.Starts.Num(), Out.Dropped, Out.MaxDegree, Out.Longest, Out.Unwritten, Out.Milliseconds, Now - Job->StartRealTime);
+				bRemove = true;
+			}
+		}
+		else if (State == FLidarLinkJob::Failed)
+		{
+			RejectLinks(Slot, *Job, 0, TEXT("its samples could not be read back"));
+			bRemove = true;
+		}
+
+		if (bRemove)
+		{
+			LinkJobs.RemoveAt(Index);
+		}
+		else
+		{
+			++Index;
+		}
+	}
+	return LinkJobs.Num() > 0;
 }

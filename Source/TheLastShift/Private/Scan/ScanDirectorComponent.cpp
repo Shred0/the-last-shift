@@ -430,6 +430,18 @@ void UScanDirectorComponent::ApplyScanColor()
 		LidarScan->SetChannel(UTheLastShiftSettings::GetInteractableScanChannel(), Colors.Interactable, 1.f);
 	}
 	ApplyScanOcclusion();
+	ApplyScanLinks();
+}
+
+void UScanDirectorComponent::ApplyScanLinks()
+{
+	if (ULidarScanComponent* Lidar = ResolveLidarScan())
+	{
+		const FScanLinks& Links = UTheLastShiftSettings::GetScanLinks();
+		Lidar->MaxLinksPerScan = FMath::Clamp(Links.MaxLinksPerScan, 0, 262144);
+		Lidar->SetLinks(Links.Neighbours, Links.MaxDistanceCm, Links.PixelWidth, Links.Intensity, Links.MaxNormalAngle);
+		Lidar->SetLineLift(Links.LiftTexels, Links.LiftMaxCm);
+	}
 }
 
 void UScanDirectorComponent::ApplyScanOcclusion()

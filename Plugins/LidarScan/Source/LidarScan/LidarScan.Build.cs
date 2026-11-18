@@ -15,5 +15,12 @@ public class LidarScan : ModuleRules
 			"Engine",
 			"Niagara"
 		});
+
+		// Asynchronous GPU readback for the neighbour search (FRHIGPUTextureReadback, render commands).
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			"RenderCore",
+			"RHI"
+		});
 	}
 }

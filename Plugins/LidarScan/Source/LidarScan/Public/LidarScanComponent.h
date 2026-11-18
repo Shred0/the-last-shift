@@ -33,6 +33,13 @@ struct FLidarScanSlot
 	/** DepthTarget carries a channel per texel (RGBA32f: R depth, G channel) instead of depth alone (R32f). */
 	bool bDepthTargetHasChannels = false;
 
+	/**
+	 * Target the point system's spawn writes its samples into while lines are on (RGBA32f, twice the capture's width; layout
+	 * in the contract in LidarScanComponent.cpp). Created at run time, the first time the slot scans with lines on.
+	 */
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureRenderTarget2D> SampleTarget;
+
 	/** Monotonic scan index this slot currently shows, INDEX_NONE when idle. */
 	int32 ScanIndex = INDEX_NONE;
 
@@ -55,6 +62,12 @@ struct FLidarScanSlot
 
 	/** The slot's point system has its second renderer on (points behind geometry, occluded point material). */
 	bool bOccludedMaterial = false;
+
+	/** World time at which the scan was taken (the clock of the pulse and of the lines' growth). */
+	double StartWorldTime = 0.0;
+
+	/** Last growth fraction of the lines pushed to the slot's system, negative when none. */
+	float PushedLinkGrowth = -1.f;
 
 	bool IsActive() const { return ScanIndex != INDEX_NONE; }
 	bool IsWarming() const { return !IsActive() && WarmUntilRealTime >= 0.0; }
@@ -88,7 +101,88 @@ struct FLidarScanSlotStats
 	/** Live particles of the injected-points emitter, same latency. */
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Diagnostics")
 	int32 InjectedParticles = 0;
+
+	/** Live particles of the lines emitter (one per link once the scan's links are found), same latency. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Diagnostics")
+	int32 LineParticles = 0;
 };
+
+/** Counters of the neighbour search of one scan (see ULidarScanComponent::LinkNeighbours). */
+USTRUCT(BlueprintType)
+struct FLidarLinkStats
+{
+	GENERATED_BODY()
+
+	/** Scan the search ran for, -1 before the first search. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 ScanIndex = INDEX_NONE;
+
+	/** Captured points of the scan (samples that spawn a point). */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 Points = 0;
+
+	/** Links handed to the point system (at most MaxLinksPerScan). */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 Links = 0;
+
+	/** Links found over MaxLinksPerScan and dropped. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 Dropped = 0;
+
+	/** Most links on one point (never above LinkNeighbours). */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 MaxDegree = 0;
+
+	/** Longest link, cm (never above LinkMaxDistance). */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	float LongestLink = 0.f;
+
+	/** Time of the search on its worker thread, ms. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	float SearchMilliseconds = 0.f;
+
+	/** Real time from the scan to the links reaching its point system, s. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	float ReadySeconds = 0.f;
+
+	/**
+	 * The scan got no links because its samples could not be trusted: a newer scan started before its samples were read
+	 * back, or the read-back live samples did not match its captured points (Points then holds the read-back count).
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	bool bRejected = false;
+
+	/** Texels of the sample target the spawn did not write (0 when every texel of the capture was written). */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 UnwrittenTexels = 0;
+};
+
+/** One link of a scan (diagnostics): the two points' surface positions, their texels in the capture and their channels. */
+USTRUCT(BlueprintType)
+struct FLidarLink
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	FVector Start = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	FVector End = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 StartTexel = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 EndTexel = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 StartChannel = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 EndChannel = 0;
+};
+
+struct FLidarLinkJob;
 
 /**
  * Look of one colour channel: captured points whose surface carries the channel's custom depth stencil value take this
@@ -393,6 +487,111 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Lidar|Diagnostics")
 	int32 GetOccludedMaterialSlotCount() const;
 
+	// --- Links (neighbours, distance, angle and cap applied on the next scan; width and intensity live) ---
+
+	/**
+	 * Neighbour lines. 0 = off: no search, no line, and the capture, the points and the cost are those of a component
+	 * without lines. Above 0, each captured point of a scan is linked to at most this many of its nearest points of the
+	 * same scan and channel within LinkMaxDistance: a link joins two points when each is among the other's nearest
+	 * (mutual nearest neighbours), so no point has more links than this. Links are found once per scan, on a worker
+	 * thread, from the scan's depth capture read back from the GPU a few frames after the scan; they never join two scans
+	 * and never touch injected points. A scan's lines grow from both of their points toward each other over LinkSeconds,
+	 * fade, clear and are removed with the scan, and are depth-tested against the real geometry whatever OccludedIntensity.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0", ClampMax = "8", UIMin = "0", UIMax = "8"))
+	int32 LinkNeighbours = 0;
+
+	/** Longest link, between the two points' surface positions. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "1.0", ClampMax = "1000.0", UIMin = "1.0", UIMax = "1000.0", Units = "cm"))
+	float LinkMaxDistance = 50.f;
+
+	/**
+	 * Largest angle between the surface normals of two linked points. A link across a convex corner would pass inside
+	 * the solid and one across a depth discontinuity would hang in the air; both have normals far apart. 180 = no limit.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0.0", ClampMax = "180.0", UIMin = "0.0", UIMax = "180.0", Units = "deg"))
+	float LinkMaxNormalAngle = 180.f;
+
+	/** Most links one scan keeps; links found beyond it are dropped (GetLastLinkStats().Dropped). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0", ClampMax = "262144", UIMin = "0", UIMax = "262144"))
+	int32 MaxLinksPerScan = 65536;
+
+	/** Width of a line in screen pixels, the same at every depth (taken at the line's middle). Live. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0.5", ClampMax = "8.0", UIMin = "0.5", UIMax = "8.0"))
+	float LinePixelWidth = 1.5f;
+
+	/** Brightness of a line as a factor of the brightness of its points (same colour, compensation and fade). Live. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0.0", ClampMax = "4.0", UIMin = "0.0", UIMax = "4.0"))
+	float LineIntensity = 0.5f;
+
+	/**
+	 * Lift of a line's two ends off their surface, on top of SurfaceOffset, along the points' normals, as a fraction of the
+	 * width of one capture texel at the point's depth from the scan (depth * 2 tan(HFOV/2) / CaptureResolution). A sample
+	 * takes its texel's depth with a jittered ray, so on a surface seen at an angle it can sit behind the surface by up to
+	 * half a texel's depth step, which grows with depth; a depth-tested line ending there is hidden near that end. 0 = off
+	 * (lines end where their points are drawn). Points are not moved. Live.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0.0", ClampMax = "2.0", UIMin = "0.0", UIMax = "2.0"))
+	float LineLiftTexels = 0.f;
+
+	/** Most a line's end is lifted by LineLiftTexels. Live. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0.0", ClampMax = "100.0", UIMin = "0.0", UIMax = "100.0", Units = "cm"))
+	float LineLiftMaxCm = 30.f;
+
+	/** Sets the lift of the lines' ends (clamped), at once. */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Links")
+	void SetLineLift(float InLiftTexels, float InLiftMaxCm);
+
+	/** Sets the link values (clamped). Neighbours, distance and angle apply from the next scan; width and intensity at once. */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Links")
+	void SetLinks(int32 InNeighbours, float InMaxDistance, float InPixelWidth, float InIntensity, float InMaxNormalAngle = 180.f);
+
+	/** Counters of the last scan whose links reached its point system. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Links")
+	FLidarLinkStats GetLastLinkStats() const { return LastLinkStats; }
+
+	/** Links the last searched scan dropped over MaxLinksPerScan. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Links")
+	int32 GetLastDroppedLinks() const { return LastLinkStats.Dropped; }
+
+	/** Growth of the lines of an alive scan, 0 to 1 over LinkSeconds of world time; -1 when no alive scan has that index. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Links")
+	float GetLinkGrowth(int32 ScanIndex) const;
+
+	/** Searches started and not yet handed to their scan (diagnostics). */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Diagnostics")
+	int32 GetPendingLinkSearches() const { return LinkJobs.Num(); }
+
+	/** Scans that got no links because their samples could not be trusted (see FLidarLinkStats::bRejected), since BeginPlay. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Diagnostics")
+	int32 GetRejectedLinkScans() const { return RejectedLinkScans; }
+
+	/** Search results that arrived for a scan already gone (slot reused, cleared) and were dropped untouched, since BeginPlay. */
+	UFUNCTION(BlueprintPure, Category = "Lidar|Diagnostics")
+	int32 GetDiscardedLinkResults() const { return DiscardedLinkResults; }
+
+	/**
+	 * Diagnostics: a finished search waits this long (real time) before it is handed to its scan, so that tests can make a
+	 * result arrive after its scan is gone. 0 in normal use.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Diagnostics", meta = (ClampMin = "0.0", ClampMax = "10.0", Units = "s"))
+	float LinkResultDelaySeconds = 0.f;
+
+	/**
+	 * Diagnostics: the samples the point system spawned for the last searched scan, as read back: per texel its surface
+	 * position and its channel (-1 where the texel spawned no live point, -2 where the spawn did not write it), with the
+	 * capture's width and the scan's capture pose. False before the first search.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Diagnostics")
+	bool GetLastScanSamples(TArray<FVector>& OutPositions, TArray<int32>& OutChannels, int32& OutWidth, FLidarScanContext& OutContext) const;
+
+	/**
+	 * Diagnostics: the links of the last searched scan, and per texel of its capture the planar depth of its point (-1
+	 * without one) and its number of links. False before the first search.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Diagnostics")
+	bool GetLastScanLinks(TArray<FLidarLink>& OutLinks, TArray<float>& OutPointDepths, TArray<int32>& OutDegrees, int32& OutWidth) const;
+
 	// --- Injected (applied on the next scan) ---
 
 	/** Upper bound on the points all sources together add to one scan; points beyond it are dropped. */
@@ -520,6 +719,46 @@ private:
 	void RefreshOcclusion();
 	/** Pushes GetOccludedFactor() to the occluded material instance when it changed. */
 	void PushOccludedFactor();
+
+	/** Prepares the neighbour search of the scan just captured into the slot; true when the slot's sample target was created now. */
+	bool StartLinkSearch(FLidarScanSlot& Slot);
+	/** Marks a scan's samples for readback, once its spawn has been issued (from BroadcastScanCompleted). */
+	void ReadBackSamples(int32 ScanIndex);
+	/** Queues the GPU copy of a job's sample target. */
+	void EnqueueSampleCopy(const TSharedPtr<FLidarLinkJob, ESPMode::ThreadSafe>& Job);
+	/** Live particles of the captured-points emitter of a slot (GPU count, read back with a frame or two of latency). */
+	int32 GetCapturedParticles(const FLidarScanSlot& Slot) const;
+	/** Ends a scan's search without links: its lines die, the scan is counted as rejected. */
+	void RejectLinks(FLidarScanSlot* Slot, const FLidarLinkJob& Job, int32 Points, const TCHAR* Why);
+
+	/**
+	 * 1 x 1 target bound as the sample target of every slot that has none of its own (lines never on in it): the point
+	 * system's render target interface needs a bound target, and with User.ExportSamples false nothing is written to it.
+	 */
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureRenderTarget2D> PlaceholderSampleTarget;
+
+	/** The placeholder sample target, created on first use. */
+	UTextureRenderTarget2D* GetPlaceholderSampleTarget();
+
+	int32 RejectedLinkScans = 0;
+	int32 DiscardedLinkResults = 0;
+	TArray<FVector> LastSamplePositions;
+	TArray<int32> LastSampleChannels;
+	FLidarScanContext LastSampleContext;
+	/** Advances the searches (readback ready, search launched, links handed to their slot); true while any is pending. */
+	bool TickLinkSearches();
+	/** Pushes the growth of the lines of every alive scan when it changed. */
+	void PushLinkGrowth(FLidarScanSlot& Slot, bool bForce = false);
+
+	/** Neighbour searches in flight, oldest first. */
+	TArray<TSharedPtr<FLidarLinkJob, ESPMode::ThreadSafe>> LinkJobs;
+
+	FLidarLinkStats LastLinkStats;
+	TArray<FLidarLink> LastLinks;
+	TArray<float> LastLinkPointDepths;
+	TArray<int32> LastLinkDegrees;
+	int32 LastLinkWidth = 0;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInterface> LoadedOccludedMaterial;
