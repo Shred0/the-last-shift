@@ -417,7 +417,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
 	bool bPrologueMaps = true;
 
-	/** The home: print room, monitor room with the hologram, hangar and ship. Outside the run (act 0). */
+	/**
+	 * The home: print room, one corridor to the hangar, the monitor room with the hologram off the corridor's side, the
+	 * hangar entered from its side, and the ship. Outside the run (act 0).
+	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
 	TSoftObjectPtr<UWorld> PrologueHomeMap;
 
@@ -439,6 +442,18 @@ public:
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float ExitDoorDelaySeconds = 2.f;
+
+	/** Normal-time seconds the home hangar's entry door takes to close behind the player once wholly inside the hangar. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
+	float HomeDoorCloseSeconds = 2.f;
+
+	/** Normal-time seconds the home hangar's hatch takes to open once the entry door is closed. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
+	float HomeHatchOpenSeconds = 4.f;
+
+	/** Normal-time seconds the home ship's hatch takes to open once the hangar's hatch is open. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
+	float ShipHatchOpenSeconds = 3.f;
 
 	/** In PrologueHomeMap the flashlight works (true) or is off with its input ignored (false). */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
@@ -463,6 +478,15 @@ public:
 
 	/** ExitDoorDelaySeconds, clamped. */
 	float GetExitDoorDelaySeconds() const { return FMath::Clamp(ExitDoorDelaySeconds, 0.f, 30.f); }
+
+	/** HomeDoorCloseSeconds, clamped. */
+	float GetHomeDoorCloseSeconds() const { return FMath::Clamp(HomeDoorCloseSeconds, 0.5f, 30.f); }
+
+	/** HomeHatchOpenSeconds, clamped. */
+	float GetHomeHatchOpenSeconds() const { return FMath::Clamp(HomeHatchOpenSeconds, 0.5f, 30.f); }
+
+	/** ShipHatchOpenSeconds, clamped. */
+	float GetShipHatchOpenSeconds() const { return FMath::Clamp(ShipHatchOpenSeconds, 0.5f, 30.f); }
 
 	/**
 	 * The flashlight of a map, by its prologue stage (GetPrologueStageOfMap): returns whether it works there, and sets

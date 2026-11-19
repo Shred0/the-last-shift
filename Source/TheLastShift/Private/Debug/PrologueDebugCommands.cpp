@@ -1,26 +1,37 @@
 // SPDX-License-Identifier: MIT
 
-// Brief 11: the prologue's two hand-built maps. tls.PrologueTest [Quit] (run from MainMenu, in PIE and in a package):
-// C) the prologue's maps switched off: "New game" goes from the text scene to area 1, as before; the input and the first
-// snapshot there are the baseline. A) "New game" read through: the text scene, Prologue_Home (outside the run: no act,
-// entity, residue or snapshot, the save untouched; the input as in area 1; lights lit in Normal time and dark while
-// Stopped; the two free terminals and their doors; the hologram: points, size, colour, hidden while Stopped and in scans,
-// no collision, frame time with and without it; the walk from the start to the ship), the flight with the first Flight
-// line, Prologue_Arrival (the ship's lights, the hatch started by leaving the ship and closing in HatchCloseSeconds of
-// Normal time, still while Stopped and behind the pause menu, the Hatch lines, the Door lines, then the exit door after
+// Briefs 11 and 14: the prologue's two hand-built maps. tls.PrologueTest [Quit] (run from MainMenu, in PIE and in a
+// package): C) the prologue's maps switched off: "New game" goes from the text scene to area 1, as before; the input and
+// the first snapshot there are the baseline. A) "New game" read through: the text scene, Prologue_Home (outside the run:
+// no act, entity, residue or snapshot, the save untouched; the input as in area 1; its spaces measured and its lights by
+// space, lit in Normal time and dark while Stopped; the one corridor with the monitor room's doorway at its middle on the
+// right and the hangar's entry door at its end; the hangar's terminal locked before the briefing (no prompt, Interact does
+// nothing), usable from the moment the last Hologram row is typed out; the hologram: points, size, colour, hidden while
+// Stopped and in scans, no collision, frame time with and without it; the departure scene: the entry door closing behind
+// the player once wholly inside, never on the player, then the hangar's hatch, then the ship's hatch, each in its time of
+// Normal time and still while Stopped and behind the pause menu; the ship closed until then; nothing beyond the open
+// hatch and no way out through it; the walk from the start to the ship), the flight with the first Flight line,
+// Prologue_Arrival (the ship's lights, the hatch started by leaving the ship and closing in HatchCloseSeconds of Normal
+// time, still while Stopped and behind the pause menu, the Hatch lines, the Door lines, then the exit door after
 // ExitDoorDelaySeconds of Normal time, still while Stopped and behind the pause menu), and area 1 with the same run state
 // and first snapshot as C. The flashlight: off and unavailable at home (its key does nothing), available and off at the
-// start of the arrival, as without the prologue's maps in area 1. The home's two corridors: measured, walked, shot.
-// B) skipped, with no Hangar and no Hatch rows: they say nothing and block nothing; the door's delay measured without
-// a Stop. D) Continue and Select act never load a prologue map. E) with a saved run in act 2, New game, quit to the main
-// menu from inside Prologue_Home: nothing saved or deleted, and Continue restores that saved run. F) no Door rows: the
-// door opens the delay after the last Hatch row. G) neither group: the delay after the hatch has closed. The lines are
-// the test's own fixture rows. tls.Prologue.Report logs the prologue map's doors, terminals, lights, hatch, hologram,
-// triggers, corridors and flashlight. Development builds only.
+// start of the arrival, as without the prologue's maps in area 1. B) skipped, the home crossed by teleports (the hangar's
+// terminal locked before and during the briefing), with no Hangar and no Hatch rows: they say nothing and block nothing;
+// the door's delay measured without a Stop. D) Continue and Select act never load a prologue map. E) with a saved run in
+// act 2, New game, quit to the main menu from inside Prologue_Home: nothing saved or deleted, and Continue restores that
+// saved run. F) no Hologram and no Door rows: the hangar's terminal works as soon as the monitor room is entered; the
+// exit door opens the delay after the last Hatch row. G) neither Hatch nor Door: the delay after the hatch has closed.
+// The lines are the test's own fixture rows; the shots go to Saved/Screenshots/Brief14. tls.Prologue.Report logs the
+// prologue map's doors, terminals, lights, hatch, sliding panels, departure scene, hologram, triggers, corridor and its
+// doorways, and flashlight. Development builds only.
 
 #include "Area/AreaExit.h"
 #include "Area/AreaGenerator.h"
+#include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Components/LightComponent.h"
+#include "Components/PointLightComponent.h"
 #include "Containers/Ticker.h"
 #include "Debug/NarrativeFixture.h"
 #include "Debug/TestLidarCharacter.h"
@@ -50,9 +61,13 @@
 #include "Misc/Paths.h"
 #include "Misc/SecureHash.h"
 #include "Narrative/NarrativeRows.h"
+#include "Prologue/PrologueBriefingTerminal.h"
+#include "Prologue/PrologueDeparture.h"
+#include "Prologue/PrologueEntryDoor.h"
 #include "Prologue/PrologueHatch.h"
 #include "Prologue/PrologueHologram.h"
 #include "Prologue/PrologueLineTrigger.h"
+#include "Prologue/PrologueSlidingPanel.h"
 #include "Residue/Residue.h"
 #include "Run/HomeAIComponent.h"
 #include "Run/RunSubsystem.h"
@@ -274,6 +289,24 @@ namespace PrologueDebug
 		bool bAreaFlashlightAvailable = false;
 		bool bAreaFlashlightOn = false;
 		float DelayMark = 0.f;
+
+		// The home's departure scene, sampled every frame (Brief 14).
+		EPrologueDepartureState LastDepart = EPrologueDepartureState::Waiting;
+		double DepartNormalSeconds[3] = { 0.0, 0.0, 0.0 };
+		bool bWhollyInsideAtClose = false;
+		bool bDoorwayClearAtClose = false;
+		FVector PawnAtClose = FVector::ZeroVector;
+		float MinPawnXWhileClosing = TNumericLimits<float>::Max();
+		bool bTravelBeforeBoardable = false;
+		bool bInShipBeforeBoardable = false;
+		bool bPushing = false;
+		bool bPushArrived = false;
+		double PushStartReal = 0.0;
+		double PushSeconds = 0.0;
+		double WalkMark = 0.0;
+		double TriggerFiredRun = -1.0;
+		float Progress = 0.f;
+		float PhaseMark = 0.f;
 	};
 	static FRun GRun;
 
@@ -396,6 +429,60 @@ namespace PrologueDebug
 		{
 			GRun.LastHatch = EPrologueHatchState::Open;
 		}
+		// The home's departure scene.
+		if (const APrologueDeparture* Dep = First<APrologueDeparture>())
+		{
+			const EPrologueDepartureState State = Dep->GetDepartureState();
+			const UTimeStateSubsystem* T = Time();
+			const bool bNormal = T && !T->IsStopped() && !T->IsRunFrozen();
+			const int32 Phase = State == EPrologueDepartureState::DoorClosing ? 0 : State == EPrologueDepartureState::HatchOpening ? 1
+				: State == EPrologueDepartureState::ShipHatchOpening ? 2 : INDEX_NONE;
+			if (Phase != INDEX_NONE && bNormal)
+			{
+				GRun.DepartNormalSeconds[Phase] += Delta;
+			}
+			const APawn* P = Pawn();
+			if (State != GRun.LastDepart)
+			{
+				Note(FString::Printf(TEXT("departure: %s, run clock %.3f s, pawn at %s"), *StaticEnum<EPrologueDepartureState>()->GetNameStringByValue(static_cast<int64>(State)),
+					T ? T->GetRunSeconds() : -1.0, P ? *P->GetActorLocation().ToCompactString() : TEXT("-")));
+				if (State == EPrologueDepartureState::DoorClosing && P)
+				{
+					GRun.bWhollyInsideAtClose = Dep->IsWhollyInside(P);
+					GRun.bDoorwayClearAtClose = Dep->EntryDoor && !Dep->EntryDoor->IsDoorwayOccupied();
+					GRun.PawnAtClose = P->GetActorLocation();
+				}
+				GRun.LastDepart = State;
+			}
+			if (State == EPrologueDepartureState::DoorClosing && P)
+			{
+				GRun.MinPawnXWhileClosing = FMath::Min(GRun.MinPawnXWhileClosing, static_cast<float>(P->GetActorLocation().X));
+			}
+			if (State != EPrologueDepartureState::Boardable)
+			{
+				GRun.bTravelBeforeBoardable |= Transitioning();
+				if (P && Dep->ShipHatch)
+				{
+					const FBox Opening = Dep->ShipHatch->GetOpeningBox();
+					GRun.bInShipBeforeBoardable |= P->GetActorLocation().X > Opening.Min.X && FMath::Abs(P->GetActorLocation().Y - Opening.GetCenter().Y) < Opening.GetExtent().Y;
+				}
+			}
+			// The push toward the ship: the moment the pawn is up against its hatch.
+			if (GRun.bPushing && !GRun.bPushArrived && P && Dep->ShipHatch && P->GetActorLocation().X >= Dep->ShipHatch->GetOpeningBox().Min.X - 60.f)
+			{
+				GRun.bPushArrived = true;
+				GRun.PushSeconds = Now - GRun.PushStartReal;
+				Note(FString::Printf(TEXT("the push reached the ship's hatch in %.2f s (departure %s)"), GRun.PushSeconds,
+					*StaticEnum<EPrologueDepartureState>()->GetNameStringByValue(static_cast<int64>(State))));
+			}
+		}
+		if (const APrologueBriefingTerminal* Briefing = First<APrologueBriefingTerminal>())
+		{
+			if (Briefing->HasBriefingStarted() && GRun.TriggerFiredRun < 0.0)
+			{
+				GRun.TriggerFiredRun = Time() ? Time()->GetRunSeconds() : -1.0;
+			}
+		}
 	}
 
 	static bool TickRun(float)
@@ -467,7 +554,7 @@ namespace PrologueDebug
 
 	static void Shot(const FString& ShotName)
 	{
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief11"), ShotName + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief14"), ShotName + TEXT(".png")));
 		FScreenshotRequest::RequestScreenshot(Path, true, false);
 		Note(FString::Printf(TEXT("screenshot %s"), *Path));
 	}
@@ -492,7 +579,7 @@ namespace PrologueDebug
 	static float Dist2D(const FVector& A, const FVector& B) { return static_cast<float>(FVector::Dist2D(A, B)); }
 
 	/** Walks the pawn (movement input every frame) to Target(), within Radius; the legs add up to the walk time. */
-	static void AddWalk(TArray<FStep>& S, const FString& Label, TFunction<FVector()> Target, float Radius = 60.f, float Timeout = 30.f)
+	static void AddWalk(TArray<FStep>& S, const FString& Label, TFunction<FVector()> Target, float Radius = 60.f, float Timeout = 30.f, TFunction<bool()> EndEarly = nullptr)
 	{
 		S.Add(Do(Label + TEXT(": walk"), [Target]()
 		{
@@ -501,8 +588,11 @@ namespace PrologueDebug
 			GRun.WalkStartReal = FPlatformTime::Seconds();
 			return 0.f;
 		}));
-		// An exit reached on the way ends the leg too (the travel has started).
-		S.Add(WaitFor(Label + TEXT(": reached"), [Radius]() { return Transitioning() || (Pawn() && Dist2D(Pawn()->GetActorLocation(), GRun.WalkTarget) <= Radius); }, Timeout, [Label]()
+		// An exit reached on the way ends the leg too (the travel has started), and so does EndEarly.
+		S.Add(WaitFor(Label + TEXT(": reached"), [Radius, EndEarly]()
+		{
+			return Transitioning() || (EndEarly && EndEarly()) || (Pawn() && Dist2D(Pawn()->GetActorLocation(), GRun.WalkTarget) <= Radius);
+		}, Timeout, [Label]()
 		{
 			GRun.bWalking = false;
 			const double Took = FPlatformTime::Seconds() - GRun.WalkStartReal;
@@ -553,11 +643,72 @@ namespace PrologueDebug
 		return nullptr;
 	}
 
-	/** Inside cm into the room whose entrance holds Group's line trigger, on the trigger's centre line. */
+	/**
+	 * Inside cm into the room of Group's line trigger, from the corridor: a room off the corridor's side (the trigger wholly
+	 * at +Y of the corridor, the monitor room) is entered across its -Y face, any other room (the hangar) across its -X face.
+	 */
 	static FVector RoomEntry(FName Group, float Inside)
 	{
 		const APrologueLineTrigger* T = TriggerOf(Group);
-		return T ? FVector(T->GetActorLocation().X - T->Extent.X + Inside, T->GetActorLocation().Y, 0.f) : FVector::ZeroVector;
+		if (!T)
+		{
+			return FVector::ZeroVector;
+		}
+		const FVector C = T->GetActorLocation();
+		if (C.Y - T->Extent.Y > 100.f)
+		{
+			return FVector(C.X, C.Y - T->Extent.Y + Inside, 0.f);
+		}
+		return FVector(C.X - T->Extent.X + Inside, C.Y, 0.f);
+	}
+
+	static APrologueDeparture* Departure() { return First<APrologueDeparture>(); }
+	static APrologueBriefingTerminal* Briefing() { return First<APrologueBriefingTerminal>(); }
+	static APrologueEntryDoor* EntryDoor() { return First<APrologueEntryDoor>(); }
+
+	static float PawnRadius()
+	{
+		const ACharacter* C = Cast<ACharacter>(Pawn());
+		return C ? C->GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.f;
+	}
+
+	static FString DepartName(EPrologueDepartureState State)
+	{
+		return StaticEnum<EPrologueDepartureState>()->GetNameStringByValue(static_cast<int64>(State));
+	}
+
+	static bool DepartAtLeast(EPrologueDepartureState State)
+	{
+		const APrologueDeparture* D = Departure();
+		return D && static_cast<uint8>(D->GetDepartureState()) >= static_cast<uint8>(State);
+	}
+
+	static void StopWalking()
+	{
+		GRun.bWalking = false;
+		GRun.bPushing = false;
+		if (ACharacter* C = Cast<ACharacter>(Pawn()))
+		{
+			C->GetCharacterMovement()->StopMovementImmediately();
+		}
+	}
+
+	/** A box of the home map measured by traces from Centre, wall to wall, floor to ceiling (Ignore left out). */
+	static FVector MeasureSpace(const FVector& Centre, const AActor* Ignore = nullptr)
+	{
+		FCollisionQueryParams Params;
+		Params.AddIgnoredActor(Pawn());
+		if (Ignore)
+		{
+			Params.AddIgnoredActor(Ignore);
+		}
+		auto Dist = [&Centre, &Params](const FVector& Dir)
+		{
+			FHitResult Hit;
+			return W()->LineTraceSingleByChannel(Hit, Centre, Centre + Dir * 10000.f, ECC_Visibility, Params) ? Hit.Distance : -1.f;
+		};
+		return FVector(Dist(FVector::ForwardVector) + Dist(-FVector::ForwardVector), Dist(FVector::RightVector) + Dist(-FVector::RightVector),
+			Dist(FVector::UpVector) + Dist(-FVector::UpVector));
 	}
 
 	/** A corridor of the home map, measured: its pieces are the actors tagged Corridor<Index>. */
@@ -571,8 +722,55 @@ namespace PrologueDebug
 		float Height = 0.f;
 		float StartX = 0.f;
 		float EndX = 0.f;
+		float CentreY = 0.f;
 		int32 Lights = 0;
 	};
+
+	/** A doorway in one side wall of a corridor (Side +1: +Y, the right of a player walking +X; -1: -Y), found by traces at 150 cm. */
+	struct FDoorway
+	{
+		int32 Gaps = 0;
+		float StartX = 0.f;
+		float EndX = 0.f;
+		float Height = 0.f;
+		float Width() const { return Gaps > 0 ? EndX - StartX : 0.f; }
+		float CentreX() const { return (StartX + EndX) * 0.5f; }
+	};
+
+	static FDoorway MeasureDoorway(const FCorridor& C, float Side)
+	{
+		FDoorway D;
+		FCollisionQueryParams Params;
+		Params.AddIgnoredActor(Pawn());
+		bool bInGap = false;
+		for (float X = C.StartX + 20.f; X <= C.EndX - 20.f; X += 5.f)
+		{
+			const FVector From(X, C.CentreY, 150.f);
+			FHitResult Hit;
+			const bool bHit = W()->LineTraceSingleByChannel(Hit, From, From + FVector(0.f, Side * 1000.f, 0.f), ECC_Visibility, Params);
+			const bool bOpen = !bHit || Hit.Distance > 200.f;
+			if (bOpen && !bInGap)
+			{
+				++D.Gaps;
+				D.StartX = X;
+			}
+			if (bOpen)
+			{
+				D.EndX = X;
+			}
+			bInGap = bOpen;
+		}
+		if (D.Gaps > 0)
+		{
+			// The traces step 5 cm: the gap's edges lie half a step outside the first and the last open trace.
+			D.StartX -= 2.5f;
+			D.EndX += 2.5f;
+			const FVector From(D.CentreX(), C.CentreY + Side * 160.f, 10.f);
+			FHitResult Hit;
+			D.Height = W()->LineTraceSingleByChannel(Hit, From, From + FVector(0.f, 0.f, 1000.f), ECC_Visibility, Params) ? Hit.Distance + 10.f : -1.f;
+		}
+		return D;
+	}
 
 	static FCorridor MeasureCorridor(int32 Index)
 	{
@@ -607,7 +805,9 @@ namespace PrologueDebug
 		C.Length = static_cast<float>(Walls.GetSize().X);
 		C.StartX = static_cast<float>(Walls.Min.X);
 		C.EndX = static_cast<float>(Walls.Max.X);
-		const FVector Mid(Walls.GetCenter().X, Walls.GetCenter().Y, 150.f);
+		C.CentreY = static_cast<float>(Walls.GetCenter().Y);
+		// A quarter of the way along: the monitor room's doorway is at the middle.
+		const FVector Mid(Walls.Min.X + Walls.GetSize().X * 0.25, Walls.GetCenter().Y, 150.f);
 		FCollisionQueryParams Params;
 		Params.AddIgnoredActor(Pawn());
 		FHitResult L, R, D, U;
@@ -813,26 +1013,40 @@ namespace PrologueDebug
 	// --- Corridors ---
 
 	/**
-	 * Through door DoorIndex and down corridor Index to the room of NextGroup's trigger: measured (20 m x 3 m x 3.5 m), its
-	 * lights in the home's light group, shot from its start, walked; the next room's line not said in the corridor.
+	 * Through the print room's door and into the home's one corridor: measured (20 m x 3 m x 3.5 m), its lights, the
+	 * monitor room's doorway (2 m x 3 m, at the middle of its length, on the right of a player walking from the print room;
+	 * no opening on the left), the hangar's entry door at its end, the Hologram trigger off its side, not fired yet; shot
+	 * from its start.
 	 */
-	static void AddCorridor(TArray<FStep>& S, int32 Index, int32 DoorIndex, FName NextGroup)
+	static void AddCorridor(TArray<FStep>& S)
 	{
-		const FString Label = FString::Printf(TEXT("A: corridor %d"), Index);
-		AddWalk(S, FString::Printf(TEXT("A: through door %d"), DoorIndex + 1), [DoorIndex]() { return All<ADoorDevice>()[DoorIndex]->GetActorLocation() + FVector(-150.f, 0.f, 0.f); }, 60.f);
-		AddWalk(S, Label + TEXT(": its start"), [DoorIndex]() { return All<ADoorDevice>()[DoorIndex]->GetActorLocation() + FVector(120.f, 0.f, 0.f); }, 40.f);
-		S.Add(Do(Label + TEXT(": measured"), [Label, Index, DoorIndex, NextGroup]()
+		const FString Label = TEXT("A: the corridor");
+		AddWalk(S, TEXT("A: through door 1"), []() { return All<ADoorDevice>()[0]->GetActorLocation() + FVector(-150.f, 0.f, 0.f); }, 60.f);
+		AddWalk(S, Label + TEXT(": its start"), []() { return All<ADoorDevice>()[0]->GetActorLocation() + FVector(120.f, 0.f, 0.f); }, 40.f);
+		S.Add(Do(Label + TEXT(": measured"), [Label]()
 		{
-			const FCorridor C = MeasureCorridor(Index);
-			const ADoorDevice* Door = All<ADoorDevice>()[DoorIndex];
-			const APrologueLineTrigger* Next = TriggerOf(NextGroup);
+			const FCorridor C = MeasureCorridor(1);
+			const ADoorDevice* Door = All<ADoorDevice>()[0];
+			const APrologueEntryDoor* Entry = EntryDoor();
+			const APrologueLineTrigger* Holo = TriggerOf(PrologueGroups::Hologram);
 			Check(C.bFound && FMath::IsNearlyEqual(C.Length, 2000.f, 2.f) && FMath::IsNearlyEqual(C.Width, 300.f, 2.f) && FMath::IsNearlyEqual(C.Height, 350.f, 2.f),
 				FString::Printf(TEXT("%s: %.0f cm long, %.0f cm wide, %.0f cm high (%d pieces, X %.0f..%.0f)"), *Label, C.Length, C.Width, C.Height, C.Pieces, C.StartX, C.EndX));
+			Check(!MeasureCorridor(2).bFound, FString::Printf(TEXT("%s: the only corridor (no piece tagged Corridor2)"), *Label));
 			Check(Door && FMath::Abs(Door->GetActorLocation().X - C.StartX) <= 30.f,
-				FString::Printf(TEXT("%s: its door stands at its start (door X %.0f, corridor from %.0f)"), *Label, Door ? Door->GetActorLocation().X : 0.f, C.StartX));
-			Check(Next && Next->GetActorLocation().X - Next->Extent.X >= C.EndX - 30.f && !Next->HasFired(),
-				FString::Printf(TEXT("%s: the %s trigger starts at the room past its end (trigger from %.0f), not fired yet"), *Label, *NextGroup.ToString(),
-					Next ? Next->GetActorLocation().X - Next->Extent.X : 0.f));
+				FString::Printf(TEXT("%s: the print room's door at its start (door X %.0f, corridor from %.0f)"), *Label, Door ? Door->GetActorLocation().X : 0.f, C.StartX));
+			Check(Entry && FMath::Abs(Entry->GetActorLocation().X - C.EndX) <= 30.f && FMath::Abs(Entry->GetActorLocation().Y - C.CentreY) <= 5.f,
+				FString::Printf(TEXT("%s: the hangar's entry door at its end, on its axis (door at %s, corridor to %.0f)"), *Label,
+					Entry ? *Entry->GetActorLocation().ToCompactString() : TEXT("-"), C.EndX));
+			const FDoorway Right = MeasureDoorway(C, 1.f);
+			const FDoorway Left = MeasureDoorway(C, -1.f);
+			const float Middle = (C.StartX + C.EndX) * 0.5f;
+			Check(Right.Gaps == 1 && FMath::Abs(Right.Width() - 200.f) <= 6.f && FMath::Abs(Right.Height - 300.f) <= 3.f && FMath::Abs(Right.CentreX() - Middle) <= 5.f,
+				FString::Printf(TEXT("%s: one doorway on the right (+Y): %d gap(s), X %.0f..%.0f, %.0f cm wide, %.0f cm high, centre %.0f (corridor middle %.0f)"), *Label,
+					Right.Gaps, Right.StartX, Right.EndX, Right.Width(), Right.Height, Right.CentreX(), Middle));
+			Check(Left.Gaps == 0, FString::Printf(TEXT("%s: no opening on the left (-Y): %d gap(s)"), *Label, Left.Gaps));
+			Check(Holo && Holo->GetActorLocation().Y - Holo->Extent.Y >= C.CentreY + 150.f && !Holo->HasFired(),
+				FString::Printf(TEXT("%s: the Hologram trigger is in the room off its right side (from Y %.0f), not fired yet"), *Label,
+					Holo ? Holo->GetActorLocation().Y - Holo->Extent.Y : 0.f));
 			Check(C.Lights > 0, FString::Printf(TEXT("%s: %d lights of the home's light group in it"), *Label, C.Lights));
 			if (APawn* P = Pawn())
 			{
@@ -840,10 +1054,262 @@ namespace PrologueDebug
 			}
 			return 0.4f;
 		}));
-		S.Add(Do(Label + TEXT(": shot"), [Index]()
+		S.Add(Do(Label + TEXT(": shot"), []()
 		{
-			Shot(FString::Printf(TEXT("Home_Corridor_%d"), Index));
+			Shot(TEXT("Home_Corridor"));
 			return 0.3f;
+		}));
+	}
+
+	/** The home map's spaces, measured (criterion 2 of Brief 14), and its lights by space. */
+	static void CheckHomeLayout(const FString& Label)
+	{
+		const FVector Print = MeasureSpace(FVector(400.f, 0.f, 150.f));
+		// Unchanged since Brief 11: its door wall stands inside the floor's 8 m, so the room is 7.9 m to the wall's face.
+		Check(Print.Equals(FVector(790.f, 800.f, 400.f), 3.f), FString::Printf(TEXT("%s: the print room is %s cm, as in Brief 11"), *Label, *Print.ToCompactString()));
+
+		const APrologueLineTrigger* HoloTrigger = TriggerOf(PrologueGroups::Hologram);
+		const FVector RoomCentre = HoloTrigger ? HoloTrigger->GetActorLocation() : FVector::ZeroVector;
+		// Above the doorway's 3 m, so the trace toward the corridor meets the room's own wall.
+		const FVector Monitor = MeasureSpace(FVector(RoomCentre.X, RoomCentre.Y, 450.f));
+		Check(Monitor.Equals(FVector(1400.f, 1400.f, 600.f), 3.f),
+			FString::Printf(TEXT("%s: the monitor room is %s cm, centred at %s"), *Label, *Monitor.ToCompactString(), *RoomCentre.ToCompactString()));
+		const APrologueHologram* Holo = First<APrologueHologram>();
+		Check(Holo && FVector::Dist2D(Holo->GetActorLocation(), RoomCentre) <= 5.f, FString::Printf(TEXT("%s: the hologram at the room's centre (%s)"), *Label,
+			Holo ? *Holo->GetActorLocation().ToCompactString() : TEXT("-")));
+
+		const APrologueDeparture* Dep = Departure();
+		const FBox HangarBox = Dep ? Dep->GetHangarBox() : FBox(ForceInit);
+		const FVector Hangar = MeasureSpace(FVector(HangarBox.Min.X + 500.f, HangarBox.GetCenter().Y, 1000.f));
+		Check(Dep && Hangar.Equals(FVector(3000.f, 4000.f, 1400.f), 3.f) && HangarBox.GetSize().Equals(FVector(3000.f, 4000.f, 1400.f), 1.f),
+			FString::Printf(TEXT("%s: the hangar is %s cm (measured), its box %s"), *Label, *Hangar.ToCompactString(), *HangarBox.GetSize().ToCompactString()));
+		const APrologueEntryDoor* Entry = EntryDoor();
+		Check(Entry && FMath::Abs(Entry->GetActorLocation().Y - HangarBox.GetCenter().Y) <= 5.f && FMath::Abs(Entry->GetActorLocation().X - (HangarBox.Min.X - 10.f)) <= 15.f,
+			FString::Printf(TEXT("%s: the corridor meets the middle of the hangar's 40 m wall (entry door at %s, hangar from X %.0f, centre Y %.0f)"), *Label,
+				Entry ? *Entry->GetActorLocation().ToCompactString() : TEXT("-"), HangarBox.Min.X, HangarBox.GetCenter().Y));
+
+		FBox Ship(ForceInit);
+		for (TActorIterator<AActor> It(W()); It; ++It)
+		{
+			if (It->ActorHasTag(TEXT("Ship")))
+			{
+				Ship += It->GetComponentsBoundingBox(true);
+			}
+		}
+		Check(Ship.IsValid && Ship.GetSize().Equals(FVector(600.f, 1200.f, 500.f), 2.f) && FVector::Dist2D(Ship.GetCenter(), HangarBox.GetCenter()) <= 10.f,
+			FString::Printf(TEXT("%s: the ship is %s cm (long axis across the entry's view), centred at %s (hangar %s)"), *Label,
+				Ship.IsValid ? *Ship.GetSize().ToCompactString() : TEXT("-"), Ship.IsValid ? *Ship.GetCenter().ToCompactString() : TEXT("-"), *HangarBox.GetCenter().ToCompactString()));
+		const FBox ShipOpening = Dep && Dep->ShipHatch ? Dep->ShipHatch->GetOpeningBox() : FBox(ForceInit);
+		Check(ShipOpening.IsValid && FMath::Abs(ShipOpening.Min.X - Ship.Min.X) <= 2.f && ShipOpening.GetSize().Y >= 1000.f && Entry && Entry->GetActorLocation().X < ShipOpening.Min.X,
+			FString::Printf(TEXT("%s: the ship's hatch closes its side facing the entry door (opening %s, X from %.0f)"), *Label,
+				ShipOpening.IsValid ? *ShipOpening.GetSize().ToCompactString() : TEXT("-"), ShipOpening.Min.X));
+		const FBox HatchOpening = Dep && Dep->HangarHatch ? Dep->HangarHatch->GetOpeningBox() : FBox(ForceInit);
+		Check(HatchOpening.IsValid && FMath::Abs(HatchOpening.Max.Y - HangarBox.Min.Y) <= 2.f && HatchOpening.GetSize().X > HatchOpening.GetSize().Y,
+			FString::Printf(TEXT("%s: the hangar's hatch is in the 30 m wall on the left (-Y) of a player entering: opening %s, Y from %.0f (hangar from %.0f)"), *Label,
+				HatchOpening.IsValid ? *HatchOpening.GetSize().ToCompactString() : TEXT("-"), HatchOpening.Max.Y, HangarBox.Min.Y));
+
+		// The lights by space: print room, corridor, monitor room, hangar.
+		const FBox Spaces[4] = {
+			FBox(FVector(0.f, -400.f, 0.f), FVector(800.f, 400.f, 400.f)),
+			FBox(FVector(810.f, -150.f, 0.f), FVector(2810.f, 150.f, 350.f)),
+			FBox(FVector(RoomCentre.X - 700.f, RoomCentre.Y - 700.f, 0.f), FVector(RoomCentre.X + 700.f, RoomCentre.Y + 700.f, 600.f)),
+			HangarBox };
+		const TCHAR* Names[4] = { TEXT("print room"), TEXT("corridor"), TEXT("monitor room"), TEXT("hangar") };
+		int32 Count[4] = { 0, 0, 0, 0 };
+		int32 Total = 0;
+		bool bHangar6000 = true;
+		for (const ALightGroupDevice* Group : All<ALightGroupDevice>())
+		{
+			for (const TObjectPtr<ALight>& Light : Group->Lights)
+			{
+				if (!Light)
+				{
+					continue;
+				}
+				++Total;
+				const ULightComponent* LC = Light->GetLightComponent();
+				FString Space = TEXT("none");
+				for (int32 I = 0; I < 4; ++I)
+				{
+					if (Spaces[I].ExpandBy(1.f).IsInside(Light->GetActorLocation()))
+					{
+						++Count[I];
+						Space = Names[I];
+						bHangar6000 &= I != 3 || (LC && FMath::IsNearlyEqual(LC->Intensity, 6000.f));
+						break;
+					}
+				}
+				Note(FString::Printf(TEXT("%s: light %s in the %s at %s, %.0f %s"), *Label, *Light->GetName(), *Space, *Light->GetActorLocation().ToCompactString(),
+					LC ? LC->Intensity : -1.f, LC && Cast<UPointLightComponent>(LC) && Cast<UPointLightComponent>(LC)->IntensityUnits == ELightUnits::Lumens ? TEXT("lm") : TEXT("(units)")));
+			}
+		}
+		Check(Total == 10 && Count[0] == 1 && Count[1] == 3 && Count[2] == 2 && Count[3] == 4 && bHangar6000,
+			FString::Printf(TEXT("%s: %d lights: print room %d, corridor %d, monitor room %d, hangar %d (6000 lm each: %d)"), *Label, Total, Count[0], Count[1], Count[2], Count[3],
+				bHangar6000 ? 1 : 0));
+	}
+
+	/** Stop for 1 s, then the pause menu for 1 s: Progress() and the departure's phase stand still in both. */
+	static void AddFreeze(TArray<FStep>& S, const FString& Label, TFunction<float()> Progress)
+	{
+		S.Add(Do(Label + TEXT(": Stop"), [Label]()
+		{
+			StopWalking();
+			Check(PressPawnKey(TEXT("TimeStopAction")), Label + TEXT(": Stop key pressed"));
+			return 0.f;
+		}));
+		S.Add(WaitFor(Label + TEXT(": Stopped"), []() { return Time() && Time()->IsStopped(); }, 3.f, [Progress]()
+		{
+			GRun.Progress = Progress();
+			GRun.PhaseMark = Departure() ? Departure()->GetPhaseSeconds() : 0.f;
+			return 1.f;
+		}));
+		S.Add(Do(Label + TEXT(": still while Stopped"), [Label, Progress]()
+		{
+			const float Now = Progress();
+			const float Phase = Departure() ? Departure()->GetPhaseSeconds() : 0.f;
+			Check(Now == GRun.Progress && Phase == GRun.PhaseMark && GRun.Progress > 0.f && GRun.Progress < 1.f,
+				FString::Printf(TEXT("%s: stood still for 1 s while Stopped (%.4f -> %.4f, phase %.3f -> %.3f s)"), *Label, GRun.Progress, Now, GRun.PhaseMark, Phase));
+			Check(PressPawnKey(TEXT("TimeStopAction")), Label + TEXT(": Resume key pressed"));
+			return 0.f;
+		}));
+		S.Add(WaitFor(Label + TEXT(": Normal again"), []() { return Time() && !Time()->IsStopped(); }, 3.f, [Label, Progress]()
+		{
+			AStdPlayerController* StdPC = Cast<AStdPlayerController>(PC());
+			Check(StdPC && StdPC->PauseGame(), Label + TEXT(": the pause menu opens"));
+			GRun.Progress = Progress();
+			GRun.PhaseMark = Departure() ? Departure()->GetPhaseSeconds() : 0.f;
+			return 1.f;
+		}));
+		S.Add(Do(Label + TEXT(": still behind the pause menu"), [Label, Progress]()
+		{
+			const float Now = Progress();
+			const float Phase = Departure() ? Departure()->GetPhaseSeconds() : 0.f;
+			Check(Now == GRun.Progress && Phase == GRun.PhaseMark && GRun.Progress < 1.f,
+				FString::Printf(TEXT("%s: stood still for 1 s behind the pause menu (%.4f -> %.4f, phase %.3f -> %.3f s)"), *Label, GRun.Progress, Now, GRun.PhaseMark, Phase));
+			AStdPlayerController* StdPC = Cast<AStdPlayerController>(PC());
+			Check(StdPC && StdPC->ResumeGame(), Label + TEXT(": the pause menu closes"));
+			return 0.f;
+		}));
+	}
+
+	/** At the hangar's terminal before the briefing is said: no prompt, an Interact does nothing, its door stays closed. */
+	static void AddBriefingLocked(TArray<FStep>& S, const FString& Label)
+	{
+		S.Add(Do(Label + TEXT(": the hangar's terminal before the briefing"), [Label]()
+		{
+			APrologueBriefingTerminal* T = Briefing();
+			const UInteractPromptWidget* P = Prompt();
+			Check(T && T->IsInRange(Pawn()) && !T->IsBriefed() && !T->AcceptsPayment() && !T->OffersPayment(),
+				FString::Printf(TEXT("%s: at the hangar's terminal %s, the briefing not said (started %d): it takes and offers no payment"), *Label, *GetNameSafe(T),
+					T && T->HasBriefingStarted() ? 1 : 0));
+			Check(P && P->GetMode() == EInteractPromptMode::Hidden && P->GetShownText().IsEmpty(),
+				FString::Printf(TEXT("%s: no Interact prompt there (\"%s\")"), *Label, P ? *P->GetShownText() : TEXT("-")));
+			GRun.BankedBefore = Energy()->GetBankedEnergy();
+			Check(PressPawnKey(TEXT("InteractAction")), FString::Printf(TEXT("%s: Interact pressed at the locked terminal"), *Label));
+			return 0.3f;
+		}));
+		S.Add(Do(Label + TEXT(": nothing happened"), [Label]()
+		{
+			const APrologueEntryDoor* Door = EntryDoor();
+			const UInteractPromptWidget* P = Prompt();
+			Check(Door && !Door->IsOpen() && !Door->IsPowered() && Briefing() && !Briefing()->HasBeenPaid() && Energy()->GetBankedEnergy() == GRun.BankedBefore,
+				FString::Printf(TEXT("%s: Interact did nothing: the hangar's door %s stays closed, nothing paid"), *Label, *GetNameSafe(Door)));
+			Check(P && P->GetMode() == EInteractPromptMode::Hidden, FString::Printf(TEXT("%s: still no prompt, no refusal shown"), *Label));
+			return 0.f;
+		}));
+	}
+
+	/** The hangar's terminal became usable when the last Hologram row was typed out (bRows), or when the monitor room was entered (no row). */
+	static void CheckBriefed(const FString& Label, bool bRows)
+	{
+		const APrologueBriefingTerminal* T = Briefing();
+		const double Works = T ? T->GetBriefedRunSeconds() : -1.0;
+		if (bRows)
+		{
+			const FLine* Last = nullptr;
+			for (const FLine& Line : GRun.Lines)
+			{
+				Last = Line.Row == TEXT("Hologram_1") ? &Line : Last;
+			}
+			Check(T && T->IsBriefed() && Last && Last->TypedRun >= 0.0 && FMath::Abs(Works - Last->TypedRun) <= 0.05,
+				FString::Printf(TEXT("%s: the hangar's terminal works from the moment Hologram_1, the briefing's last row, is typed out (typed out %.3f s, works %.3f s, run clock)"),
+					*Label, Last ? Last->TypedRun : -1.0, Works));
+		}
+		else
+		{
+			Check(T && T->IsBriefed() && GRun.TriggerFiredRun >= 0.0 && FMath::Abs(Works - GRun.TriggerFiredRun) <= 0.05 && !RowSeen(TEXT("Hologram_1"), GRun.MapsAtMark),
+				FString::Printf(TEXT("%s: no Hologram row: the hangar's terminal works as soon as the monitor room is entered (entered %.3f s, works %.3f s), nothing said"),
+					*Label, GRun.TriggerFiredRun, Works));
+		}
+	}
+
+	/**
+	 * The home crossed by teleports up to the hangar: terminal 1, the hangar's terminal before the briefing (locked), the
+	 * monitor room and its briefing (with Hologram rows: the terminal still locked while it is said), the hangar's terminal,
+	 * then into the hangar.
+	 */
+	static void AddHomeToHangar(TArray<FStep>& S, const FString& Label, bool bHologramRows)
+	{
+		AddTerminal(S, Label + TEXT(": terminal 1"), 0, false);
+		S.Add(Do(Label + TEXT(": to the hangar's terminal"), []() { Teleport(StandAt(Briefing())); return 0.5f; }));
+		AddBriefingLocked(S, Label + TEXT(" (before the monitor room)"));
+		S.Add(Do(Label + TEXT(": into the monitor room"), []()
+		{
+			GRun.TriggerFiredRun = -1.0;
+			GRun.MapsAtMark = GRun.Lines.Num();
+			Teleport(RoomEntry(PrologueGroups::Hologram, 300.f));
+			return 0.1f;
+		}));
+		S.Add(WaitFor(Label + TEXT(": the Hologram trigger"), []() { const APrologueLineTrigger* T = TriggerOf(PrologueGroups::Hologram); return T && T->HasFired(); }, 5.f,
+			[Label, bHologramRows]()
+		{
+			if (bHologramRows)
+			{
+				Check(Briefing() && Briefing()->HasBriefingStarted() && !Briefing()->IsBriefed(),
+					FString::Printf(TEXT("%s: the briefing asked for, not said yet: the hangar's terminal does not work"), *Label));
+				Teleport(StandAt(Briefing()));
+				return 0.3f;
+			}
+			return 0.2f;
+		}));
+		if (bHologramRows)
+		{
+			AddBriefingLocked(S, Label + TEXT(" (during the briefing)"));
+			S.Add(WaitFor(Label + TEXT(": the briefing said"), []() { return Briefing() && Briefing()->IsBriefed(); }, 20.f, [Label]()
+			{
+				CheckBriefed(Label, true);
+				return 0.3f;
+			}));
+		}
+		else
+		{
+			S.Add(Do(Label + TEXT(": no briefing row"), [Label]()
+			{
+				CheckBriefed(Label, false);
+				return 0.f;
+			}));
+		}
+		AddTerminal(S, Label + TEXT(": the hangar's terminal"), 1, false);
+		S.Add(Do(Label + TEXT(": into the hangar"), []()
+		{
+			GRun.MapsAtMark = GRun.Lines.Num();
+			Teleport(RoomEntry(PrologueGroups::Hangar, 500.f));
+			return 1.f;
+		}));
+	}
+
+	/** Waits for the departure scene to end, then into the ship. */
+	static void AddBoard(TArray<FStep>& S, const FString& Label)
+	{
+		S.Add(WaitFor(Label + TEXT(": the ship can be boarded"), []() { return Departure() && Departure()->IsBoardable(); }, 25.f, [Label]()
+		{
+			const APrologueDeparture* D = Departure();
+			Check(!GRun.bTravelBeforeBoardable && EntryDoor() && !EntryDoor()->IsOpen(),
+				FString::Printf(TEXT("%s: the door closed, both hatches open (%.2f, %.2f, %.2f s), no travel before"), *Label,
+					D->GetPhaseTook(EPrologueDepartureState::DoorClosing), D->GetPhaseTook(EPrologueDepartureState::HatchOpening),
+					D->GetPhaseTook(EPrologueDepartureState::ShipHatchOpening)));
+			Teleport(D->ShipExit->GetActorLocation());
+			return 0.f;
 		}));
 	}
 
@@ -881,7 +1347,22 @@ namespace PrologueDebug
 				Hatch ? Hatch->GetDoorDelaySeconds() : -1.f, GRun.DelayNormalSeconds, Want));
 	}
 
-	/** New game skipped with the groups in Without left out of the fixture, the home crossed by teleports, then the arrival's hatch closing in front of the player. */
+	/** The departure scene's samples start again (a new visit of the home map). */
+	static void ResetDepartureSamples()
+	{
+		GRun.LastDepart = EPrologueDepartureState::Waiting;
+		GRun.DepartNormalSeconds[0] = GRun.DepartNormalSeconds[1] = GRun.DepartNormalSeconds[2] = 0.0;
+		GRun.bWhollyInsideAtClose = GRun.bDoorwayClearAtClose = false;
+		GRun.MinPawnXWhileClosing = TNumericLimits<float>::Max();
+		GRun.bTravelBeforeBoardable = GRun.bInShipBeforeBoardable = false;
+		GRun.bPushing = GRun.bPushArrived = false;
+		GRun.TriggerFiredRun = -1.0;
+	}
+
+	/**
+	 * New game skipped with the groups in Without left out of the fixture, the home crossed by teleports (the briefing,
+	 * the departure scene), then the arrival's hatch closing in front of the player.
+	 */
 	static void AddSkipToArrival(TArray<FStep>& S, const FString& Label, TArray<FName> Without)
 	{
 		S.Add(Do(Label + TEXT(": New game, skipped"), [Label, Without]()
@@ -893,9 +1374,11 @@ namespace PrologueDebug
 		}));
 		S.Add(WaitFor(Label + TEXT(": in Prologue_Home"), []() { return InStage(1); }, 60.f, []()
 		{
-			Teleport(First<AAreaExit>()->GetActorLocation());
-			return 0.f;
+			ResetDepartureSamples();
+			return 0.5f;
 		}));
+		AddHomeToHangar(S, Label, !Without.Contains(PrologueGroups::Hologram));
+		AddBoard(S, Label);
 		S.Add(WaitFor(Label + TEXT(": in Prologue_Arrival"), []() { return InStage(2); }, 90.f, []()
 		{
 			GRun.HatchClosedReal = GRun.DoorOpenedReal = GRun.HatchClosedRun = GRun.DoorOpenedRun = -1.0;
@@ -1010,6 +1493,12 @@ namespace PrologueDebug
 			Check(Start && Doors.Num() == 2 && Start->GetActorLocation().X < Doors[0]->GetActorLocation().X,
 				FString::Printf(TEXT("A: the player starts in the print room, before the first of %d doors"), Doors.Num()));
 			CheckLightsLit(TEXT("A: home"));
+			CheckHomeLayout(TEXT("A: home"));
+			ResetDepartureSamples();
+			const APrologueDeparture* Dep = Departure();
+			Check(Dep && Dep->GetDepartureState() == EPrologueDepartureState::Waiting && Dep->ShipExit && Dep->ShipExit->GetVolume()->GetCollisionEnabled() == ECollisionEnabled::NoCollision
+				&& Dep->ShipHatch && Dep->ShipHatch->IsBlocking() && Dep->ShipHatch->GetOpenFraction() == 0.f && Dep->HangarHatch && Dep->HangarHatch->GetOpenFraction() == 0.f,
+				TEXT("A: home: the departure waits, both hatches closed, the ship's exit switched off"));
 			Check(Char() && !Char()->IsFlashlightAvailable() && !Char()->IsFlashlightOn(), FString::Printf(TEXT("A: home: the flashlight is off and unavailable (%s)"), *FlashlightState()));
 			if (Start)
 			{
@@ -1046,13 +1535,34 @@ namespace PrologueDebug
 			return 0.f;
 		}));
 		AddTerminal(S, TEXT("A: terminal 1 (print room)"), 0, true);
-		AddCorridor(S, 1, 0, PrologueGroups::Hologram);
+		AddCorridor(S);
+		AddWalk(S, TEXT("A: the corridor's middle"), []() { const FCorridor C = MeasureCorridor(1); return FVector((C.StartX + C.EndX) * 0.5f, C.CentreY, 0.f); }, 40.f);
+		// Out of the way to the hangar's terminal before the briefing, and back: left out of the walk time.
+		S.Add(Do(TEXT("A: detour to the hangar's terminal"), []() { GRun.WalkMark = GRun.WalkSeconds; return 0.f; }));
+		AddWalk(S, TEXT("A: detour: to the hangar's terminal"), []() { return StandAt(Briefing()); }, 40.f);
+		AddBriefingLocked(S, TEXT("A (before the monitor room)"));
+		S.Add(Do(TEXT("A: the hangar's terminal before the briefing, shot"), []()
+		{
+			LookAt(EntryDoor()->GetActorLocation() + FVector(0.f, 0.f, 150.f));
+			return 0.3f;
+		}));
+		S.Add(Do(TEXT("A: shot"), []() { Shot(TEXT("Home_4_HangarTerminal_Locked")); return 0.3f; }));
+		AddWalk(S, TEXT("A: detour: back to the corridor's middle"), []() { const FCorridor C = MeasureCorridor(1); return FVector((C.StartX + C.EndX) * 0.5f, C.CentreY, 0.f); }, 40.f);
+		S.Add(Do(TEXT("A: detour done"), []()
+		{
+			Note(FString::Printf(TEXT("A: the detour took %.2f s of walking, left out of the walk time"), GRun.WalkSeconds - GRun.WalkMark));
+			GRun.WalkSeconds = GRun.WalkMark;
+			GRun.TriggerFiredRun = -1.0;
+			return 0.f;
+		}));
 		AddWalk(S, TEXT("A: into the monitor room"), []() { return RoomEntry(PrologueGroups::Hologram, 300.f); }, 60.f);
 		S.Add(WaitFor(TEXT("A: the Hologram line on entering the monitor room"), []() { return RowSeen(TEXT("Hologram_1")); }, 30.f, []()
 		{
 			const APrologueHologram* Holo = First<APrologueHologram>();
 			const FHologramTuning Tuning = UTheLastShiftSettings::Get()->GetHologramTuning();
 			Check(Holo && Holo->IsShown(), TEXT("A: the hologram is shown in Normal time"));
+			Check(Briefing() && Briefing()->HasBriefingStarted() && !Briefing()->IsBriefed(),
+				TEXT("A: the briefing has started on entering the monitor room; the hangar's terminal does not work yet"));
 			if (!Holo)
 			{
 				return -1.f;
@@ -1115,27 +1625,203 @@ namespace PrologueDebug
 			return 0.3f;
 		}));
 		AddStopResume(S, TEXT("A: home, monitor room"), true, TEXT("Home_3_MonitorRoom_Scan"));
-		AddTerminal(S, TEXT("A: terminal 2 (monitor room)"), 1, true);
-		AddCorridor(S, 2, 1, PrologueGroups::Hangar);
-		AddWalk(S, TEXT("A: into the hangar"), []() { return RoomEntry(PrologueGroups::Hangar, 400.f); }, 60.f);
-		S.Add(WaitFor(TEXT("A: the Hangar line on entering the hangar"), []() { return RowSeen(TEXT("Hangar_1")); }, 30.f, []()
+		S.Add(WaitFor(TEXT("A: the briefing said"), []() { return Briefing() && Briefing()->IsBriefed(); }, 30.f, []()
 		{
-			if (const AAreaExit* Exit = First<AAreaExit>())
-			{
-				LookAt(Exit->GetActorLocation());
-			}
+			CheckBriefed(TEXT("A"), true);
+			return 0.f;
+		}));
+		AddWalk(S, TEXT("A: out of the monitor room"), []() { const FCorridor C = MeasureCorridor(1); return FVector((C.StartX + C.EndX) * 0.5f, C.CentreY, 0.f); }, 40.f);
+		AddTerminal(S, TEXT("A: the hangar's terminal"), 1, true);
+		AddWalk(S, TEXT("A: to the hangar's entry"), []() { return EntryDoor()->GetActorLocation() + FVector(50.f, 0.f, 0.f); }, 15.f);
+		S.Add(Do(TEXT("A: at the hangar's entry"), []()
+		{
+			const APrologueDeparture* Dep = Departure();
+			Check(Dep && Dep->GetDepartureState() == EPrologueDepartureState::Waiting && EntryDoor()->IsOpen() && EntryDoor()->IsDoorwayOccupied(),
+				FString::Printf(TEXT("A: in the doorway (X %.0f) the door stays open: the departure waits for the player wholly inside, past it"), Pawn()->GetActorLocation().X));
+			const FBox Ship = Dep->ShipHatch->GetOpeningBox();
+			LookAt(FVector(Ship.Max.X, Ship.GetCenter().Y, Pawn()->GetPawnViewLocation().Z));
 			return 0.4f;
 		}));
-		S.Add(Do(TEXT("A: the hangar and the ship"), []()
+		S.Add(Do(TEXT("A: the hangar from its entry, shot"), []() { Shot(TEXT("Home_5_HangarEntry_EyeHeight_ShipHatchClosed")); return 0.3f; }));
+		S.Add(Do(TEXT("A: the hangar's hatch closed"), []()
 		{
-			Shot(TEXT("Home_4_Hangar_Ship"));
-			return 0.5f;
+			LookAt(Departure()->HangarHatch->GetOpeningBox().GetCenter());
+			return 0.4f;
 		}));
-		AddWalk(S, TEXT("A: into the ship"), []() { return First<AAreaExit>()->GetActorLocation(); }, 60.f, 30.f);
+		S.Add(Do(TEXT("A: the hangar's hatch closed, shot"), []() { Shot(TEXT("Home_6_HangarHatch_Closed")); return 0.3f; }));
+		AddWalk(S, TEXT("A: into the hangar"), []() { return RoomEntry(PrologueGroups::Hangar, 300.f); }, 60.f, 30.f,
+			[]() { return DepartAtLeast(EPrologueDepartureState::DoorClosing); });
+		S.Add(Do(TEXT("A: the door starts to close"), []()
+		{
+			const APrologueDeparture* Dep = Departure();
+			const APrologueEntryDoor* Door = EntryDoor();
+			Check(Dep && Dep->GetDepartureState() == EPrologueDepartureState::DoorClosing && GRun.bWhollyInsideAtClose && GRun.bDoorwayClearAtClose,
+				FString::Printf(TEXT("A: the door started to close when the player was wholly inside the hangar and out of the doorway (at %s)"), *GRun.PawnAtClose.ToCompactString()));
+			Check(Door && Door->IsClosingBehind() && Door->IsBlocking(), TEXT("A: from that moment the way back is shut (the door's blocker blocks)"));
+			return 0.3f;
+		}));
+		AddFreeze(S, TEXT("A: the door closing"), []() { return EntryDoor() ? EntryDoor()->GetClosedFraction() : -1.f; });
+		S.Add(Do(TEXT("A: back toward the corridor while the door closes"), []()
+		{
+			GRun.WalkTarget = EntryDoor()->GetActorLocation() - FVector(500.f, 0.f, 0.f);
+			GRun.bWalking = true;
+			return 0.7f;
+		}));
+		S.Add(Do(TEXT("A: stopped before the doorway"), []()
+		{
+			StopWalking();
+			const float Face = EntryDoor()->GetActorLocation().X + 10.f;
+			Check(GRun.MinPawnXWhileClosing >= Face + PawnRadius() - 2.f && Pawn()->GetActorLocation().X > Face && DepartAtLeast(EPrologueDepartureState::DoorClosing),
+				FString::Printf(TEXT("A: walking back while the door closes, the player never reaches the doorway: it never closes on the player (nearest X %.1f, the door's hangar face %.0f, radius %.0f)"),
+					GRun.MinPawnXWhileClosing, Face, PawnRadius()));
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("A: the door closed"), []() { return DepartAtLeast(EPrologueDepartureState::HatchOpening); }, 10.f, []()
+		{
+			const APrologueDeparture* Dep = Departure();
+			const APrologueEntryDoor* Door = EntryDoor();
+			const float Want = UTheLastShiftSettings::Get()->GetHomeDoorCloseSeconds();
+			const float Took = Dep->GetPhaseTook(EPrologueDepartureState::DoorClosing);
+			Check(FMath::Abs(Took - Want) <= 0.1f && FMath::Abs(GRun.DepartNormalSeconds[0] - Want) <= 0.25,
+				FString::Printf(TEXT("A: the door closed in %.2f s of the run's Normal time, %.2f s of unfrozen Normal real time (HomeDoorCloseSeconds %.2f)"), Took,
+					GRun.DepartNormalSeconds[0], Want));
+			Check(Door && !Door->IsOpen() && !Door->IsPowered() && Door->HasClosedBehind() && Door->IsBlocking() && Door->GetClosedFraction() == 1.f,
+				TEXT("A: the door is closed, switched off, and blocks"));
+			Check(Briefing() && Briefing()->HasBeenPaid() && !Briefing()->OffersPayment() && !Briefing()->AcceptsPayment(), TEXT("A: the hangar's terminal offers nothing again"));
+			GRun.WalkTarget = Door->GetActorLocation() - FVector(500.f, 0.f, 0.f);
+			GRun.bWalking = true;
+			return 1.f;
+		}));
+		S.Add(Do(TEXT("A: the way back stays shut"), []()
+		{
+			StopWalking();
+			const float Face = EntryDoor()->GetActorLocation().X + 10.f;
+			Check(Pawn()->GetActorLocation().X >= Face + PawnRadius() - 2.f && !EntryDoor()->IsOpen(),
+				FString::Printf(TEXT("A: walking at the closed door for 1 s the player stays in the hangar (X %.1f, the door's face %.0f)"), Pawn()->GetActorLocation().X, Face));
+			Check(Prompt() && Prompt()->GetMode() == EInteractPromptMode::Hidden, TEXT("A: no prompt at the closed door"));
+			return 0.f;
+		}));
+		AddFreeze(S, TEXT("A: the hangar's hatch opening"), []() { const APrologueDeparture* D = Departure(); return D && D->HangarHatch ? D->HangarHatch->GetOpenFraction() : -1.f; });
+		// Across the hangar and up against the ship before its hatch is open: the hatch blocks, nothing starts.
+		S.Add(Do(TEXT("A: toward the ship"), []()
+		{
+			GRun.WalkTarget = Departure()->ShipExit->GetActorLocation();
+			GRun.bWalking = true;
+			GRun.bPushing = true;
+			GRun.bPushArrived = false;
+			GRun.PushStartReal = FPlatformTime::Seconds();
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("A: the hangar's hatch open"), []() { return DepartAtLeast(EPrologueDepartureState::ShipHatchOpening); }, 15.f, []()
+		{
+			const APrologueDeparture* Dep = Departure();
+			const float Want = UTheLastShiftSettings::Get()->GetHomeHatchOpenSeconds();
+			const float Took = Dep->GetPhaseTook(EPrologueDepartureState::HatchOpening);
+			const double Gap = Dep->GetPhaseStartRun(EPrologueDepartureState::HatchOpening) - Dep->GetPhaseStartRun(EPrologueDepartureState::DoorClosing) - Dep->GetPhaseTook(EPrologueDepartureState::DoorClosing);
+			Check(FMath::Abs(Took - Want) <= 0.1f && FMath::Abs(GRun.DepartNormalSeconds[1] - Want) <= 0.25,
+				FString::Printf(TEXT("A: the hangar's hatch opened in %.2f s of the run's Normal time, %.2f s of unfrozen Normal real time (HomeHatchOpenSeconds %.2f)"), Took,
+					GRun.DepartNormalSeconds[1], Want));
+			Check(Dep->HangarHatch->IsFullyOpen() && Dep->HangarHatch->IsBlocking(), TEXT("A: the hangar's hatch is fully open, its opening still blocked"));
+			Note(FString::Printf(TEXT("A: the hatch started %.3f s of the run's clock after the door's Normal-time close (the Stop and the pause menu in between)"), Gap));
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("A: up against the ship's hatch"), []() { return GRun.bPushArrived; }, 10.f, []() { return 0.5f; }));
+		S.Add(Do(TEXT("A: against the closed ship"), []()
+		{
+			StopWalking();
+			const APrologueDeparture* Dep = Departure();
+			const FBox Opening = Dep->ShipHatch->GetOpeningBox();
+			Check(!GRun.bTravelBeforeBoardable && !GRun.bInShipBeforeBoardable && !Transitioning() && !Dep->IsBoardable() && Dep->ShipHatch->IsBlocking()
+				&& Pawn()->GetActorLocation().X < Opening.Min.X,
+				FString::Printf(TEXT("A: walking into the ship before its hatch is open starts nothing: the player stays outside (X %.1f, the hatch from %.0f, its hatch %.2f open)"),
+					Pawn()->GetActorLocation().X, Opening.Min.X, Dep->ShipHatch->GetOpenFraction()));
+			// The crossing of the hangar, counted as walked up to the ship's hatch.
+			GRun.WalkSeconds += GRun.PushSeconds;
+			// The open hatch shot from 8 m in front of it (the walk resumes from in front of the ship later).
+			const FBox Hatch = Dep->HangarHatch->GetOpeningBox();
+			Teleport(FVector(Hatch.GetCenter().X, Hatch.Max.Y + 800.f, 0.f));
+			LookAt(FVector(Hatch.GetCenter().X, Hatch.GetCenter().Y, 350.f));
+			return 0.4f;
+		}));
+		S.Add(Do(TEXT("A: the hangar's hatch open, shot"), []() { Shot(TEXT("Home_7_HangarHatch_Open")); return 0.f; }));
+		AddFreeze(S, TEXT("A: the ship's hatch opening"), []() { const APrologueDeparture* D = Departure(); return D && D->ShipHatch ? D->ShipHatch->GetOpenFraction() : -1.f; });
+		S.Add(WaitFor(TEXT("A: the ship's hatch open"), []() { return Departure() && Departure()->IsBoardable(); }, 15.f, []()
+		{
+			const APrologueDeparture* Dep = Departure();
+			const float Want = UTheLastShiftSettings::Get()->GetShipHatchOpenSeconds();
+			const float Took = Dep->GetPhaseTook(EPrologueDepartureState::ShipHatchOpening);
+			Check(FMath::Abs(Took - Want) <= 0.1f && FMath::Abs(GRun.DepartNormalSeconds[2] - Want) <= 0.25,
+				FString::Printf(TEXT("A: the ship's hatch opened in %.2f s of the run's Normal time, %.2f s of unfrozen Normal real time (ShipHatchOpenSeconds %.2f)"), Took,
+					GRun.DepartNormalSeconds[2], Want));
+			Check(Dep->ShipHatch->IsFullyOpen() && !Dep->ShipHatch->IsBlocking() && Dep->ShipExit->GetVolume()->GetCollisionEnabled() != ECollisionEnabled::NoCollision
+				&& !GRun.bTravelBeforeBoardable && !GRun.bInShipBeforeBoardable,
+				TEXT("A: the ship's hatch is fully open, the ship can be entered, its exit switched on; no travel before"));
+			Note(FString::Printf(TEXT("A: the departure's three times, Normal time: door %.3f s, hangar's hatch %.3f s, ship's hatch %.3f s (unfrozen real %.3f, %.3f, %.3f s)"),
+				Dep->GetPhaseTook(EPrologueDepartureState::DoorClosing), Dep->GetPhaseTook(EPrologueDepartureState::HatchOpening), Took,
+				GRun.DepartNormalSeconds[0], GRun.DepartNormalSeconds[1], GRun.DepartNormalSeconds[2]));
+			const FBox Opening = Dep->ShipHatch->GetOpeningBox();
+			Teleport(FVector(Opening.Min.X - 600.f, Opening.GetCenter().Y - 300.f, 0.f));
+			LookAt(FVector(Opening.Max.X + 300.f, Opening.GetCenter().Y, 200.f));
+			return 0.4f;
+		}));
+		S.Add(Do(TEXT("A: the ship's hatch open, shot"), []() { Shot(TEXT("Home_9_ShipHatch_Open")); return 0.3f; }));
+		// The open hatch: no way out, nothing beyond.
+		S.Add(Do(TEXT("A: at the open hatch"), []()
+		{
+			const FBox Opening = Departure()->HangarHatch->GetOpeningBox();
+			Teleport(FVector(Opening.GetCenter().X, Opening.Max.Y + 400.f, 0.f));
+			LookAt(FVector(Opening.GetCenter().X, Opening.GetCenter().Y, 350.f));
+			GRun.WalkTarget = FVector(Opening.GetCenter().X, Opening.Min.Y - 600.f, 0.f);
+			GRun.bWalking = true;
+			return 1.5f;
+		}));
+		S.Add(Do(TEXT("A: the opening holds the player in"), []()
+		{
+			StopWalking();
+			const APrologueSlidingPanel* Hatch = Departure()->HangarHatch;
+			const FBox Opening = Hatch->GetOpeningBox();
+			Check(Pawn()->GetActorLocation().Y >= Opening.Max.Y + PawnRadius() - 2.f,
+				FString::Printf(TEXT("A: walking into the open hatch for 1.5 s the player stays in the hangar (Y %.1f, the opening's inner face %.0f)"), Pawn()->GetActorLocation().Y, Opening.Max.Y));
+			// Nothing beyond: traces from the eye, 4 m back (so that none grazes the opening's edge), through the opening (its
+			// own blocker left out) meet nothing within 300 m. The scan that follows is taken from there too.
+			Teleport(FVector(Opening.GetCenter().X, Opening.Max.Y + 400.f, 0.f));
+			FCollisionQueryParams Params;
+			Params.AddIgnoredActor(Pawn());
+			Params.AddIgnoredActor(Hatch);
+			const FVector Eye = Pawn()->GetPawnViewLocation();
+			int32 Rays = 0;
+			int32 Hits = 0;
+			FString FirstHit;
+			for (int32 I = 0; I < 5; ++I)
+			{
+				for (int32 J = 0; J < 3; ++J)
+				{
+					const FVector Through(FMath::Lerp(Opening.Min.X + 100.f, Opening.Max.X - 100.f, I / 4.f), Opening.GetCenter().Y, FMath::Lerp(100.f, Opening.Max.Z - 100.f, J / 2.f));
+					FHitResult Hit;
+					++Rays;
+					if (W()->LineTraceSingleByChannel(Hit, Eye, Eye + (Through - Eye).GetSafeNormal() * 30000.f, ECC_Visibility, Params))
+					{
+						++Hits;
+						FirstHit = FirstHit.IsEmpty() ? FString::Printf(TEXT("%s at %.0f cm"), *GetNameSafe(Hit.GetActor()), Hit.Distance) : FirstHit;
+					}
+				}
+			}
+			Check(Hits == 0, FString::Printf(TEXT("A: beyond the open hatch there is nothing: %d of %d traces through it hit %s"), Hits, Rays, FirstHit.IsEmpty() ? TEXT("nothing") : *FirstHit));
+			LookAt(FVector(Opening.GetCenter().X, Opening.GetCenter().Y, 350.f));
+			return 0.3f;
+		}));
+		AddStopResume(S, TEXT("A: home, the hangar facing the open hatch"), false, TEXT("Home_10_Scan_HatchOpening"));
+		S.Add(Do(TEXT("A: back in front of the ship"), []()
+		{
+			const FBox Opening = Departure()->ShipHatch->GetOpeningBox();
+			Teleport(FVector(Opening.Min.X - 100.f, Opening.GetCenter().Y, 0.f));
+			return 0.3f;
+		}));
+		AddWalk(S, TEXT("A: into the ship"), []() { return Departure()->ShipExit->GetActorLocation(); }, 60.f, 30.f);
 		S.Add(WaitFor(TEXT("A: the ship starts the flight"), []() { return Transitioning(); }, 10.f, []()
 		{
 			GRun.bWalking = false;
-			Note(FString::Printf(TEXT("A: walk from the start to the ship: %.2f s at walk speed %.0f cm/s (terminal stops left out)"), GRun.WalkSeconds,
+			Note(FString::Printf(TEXT("A: walk from the start to the ship through the monitor room: %.2f s at walk speed %.0f cm/s (the waits, the detour and the scene's checks left out)"), GRun.WalkSeconds,
 				Cast<ACharacter>(Pawn()) ? Cast<ACharacter>(Pawn())->GetCharacterMovement()->MaxWalkSpeed : 0.f));
 			Check(GRun.WalkSeconds < 45.0, FString::Printf(TEXT("A: the home map is walked in under 45 s (%.2f s)"), GRun.WalkSeconds));
 			const FString Label = Run()->GetLastTravelLabel().ToString();
@@ -1406,29 +2092,20 @@ namespace PrologueDebug
 		{
 			CheckOutsideRun(TEXT("B: home"));
 			CheckInput(TEXT("B: menu to home after a skip"));
+			ResetDepartureSamples();
 			return 0.f;
 		}));
-		AddTerminal(S, TEXT("B: terminal 1"), 0, false);
-		S.Add(Do(TEXT("B: into the monitor room"), []() { Teleport(RoomEntry(PrologueGroups::Hologram, 300.f)); return 0.5f; }));
-		AddTerminal(S, TEXT("B: terminal 2"), 1, false);
-		S.Add(Do(TEXT("B: into the hangar"), []()
-		{
-			GRun.MapsAtMark = GRun.Lines.Num();
-			Teleport(RoomEntry(PrologueGroups::Hangar, 400.f));
-			return 1.f;
-		}));
+		AddHomeToHangar(S, TEXT("B"), true);
 		S.Add(Do(TEXT("B: the Hangar group has no row"), []()
 		{
-			const APrologueLineTrigger* Hangar = nullptr;
-			for (const APrologueLineTrigger* T : All<APrologueLineTrigger>())
-			{
-				Hangar = T->Group == PrologueGroups::Hangar ? T : Hangar;
-			}
+			const APrologueLineTrigger* Hangar = TriggerOf(PrologueGroups::Hangar);
 			Check(Hangar && Hangar->HasFired() && HomeAI() && HomeAI()->HasSaidPrologueGroup(PrologueGroups::Hangar) && !RowSeen(TEXT("Hangar_1"), GRun.MapsAtMark),
 				TEXT("B: entering the hangar asks for Hangar, which has no row: nothing is said"));
-			Teleport(First<AAreaExit>()->GetActorLocation());
+			Check(Departure() && Departure()->GetDepartureState() != EPrologueDepartureState::Waiting,
+				FString::Printf(TEXT("B: an empty Hangar group blocks nothing: the departure goes on (%s)"), *DepartName(Departure()->GetDepartureState())));
 			return 0.f;
 		}));
+		AddBoard(S, TEXT("B"));
 		S.Add(WaitFor(TEXT("B: the flight starts"), []() { return Transitioning(); }, 10.f, []()
 		{
 			Check(Run()->GetLastTravelLabel().ToString() == NarrativeFixture::GetPrologueLineText(PrologueGroups::Flight, 1), TEXT("B: the flight's line"));
@@ -1566,8 +2243,8 @@ namespace PrologueDebug
 		}));
 		AddBackToMenu(S, TEXT("E"));
 
-		// --- F: no Door rows: the door opens the delay after the last Hatch row ---
-		AddSkipToArrival(S, TEXT("F"), { PrologueGroups::Door });
+		// --- F: no Hologram rows (the hangar's terminal works on entering the monitor room), no Door rows (the door opens the delay after the last Hatch row) ---
+		AddSkipToArrival(S, TEXT("F"), { PrologueGroups::Door, PrologueGroups::Hologram });
 		S.Add(WaitFor(TEXT("F: the exit door opens"), []() { return First<APrologueHatch>()->GetHatchState() == EPrologueHatchState::DoorOpened; }, 40.f, []()
 		{
 			CheckDoorDelay(TEXT("F"), GRun.MapsAtMark, TEXT("Hatch_2"), true);
@@ -1643,6 +2320,34 @@ namespace PrologueDebug
 				*StaticEnum<EPrologueHatchState>()->GetNameStringByValue(static_cast<int64>(Hatch->GetHatchState())), Hatch->GetClosedFraction(),
 				*Hatch->OpeningSize.ToCompactString(), *Hatch->GetShipBox().ToString(), *GetNameSafe(Hatch->ExitDoor));
 		}
+		for (const APrologueBriefingTerminal* Terminal : All<APrologueBriefingTerminal>())
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("  briefing terminal %s: group %s, started %d, briefed %d (run clock %.3f s), paid %d, offers payment %d"), *Terminal->GetName(),
+				*Terminal->BriefingGroup.ToString(), Terminal->HasBriefingStarted() ? 1 : 0, Terminal->IsBriefed() ? 1 : 0, Terminal->GetBriefedRunSeconds(),
+				Terminal->HasBeenPaid() ? 1 : 0, Terminal->OffersPayment() ? 1 : 0);
+		}
+		for (const APrologueEntryDoor* Door : All<APrologueEntryDoor>())
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("  entry door %s: closing behind %d, closed behind %d, closed %.3f, blocking %d"), *Door->GetName(), Door->IsClosingBehind() ? 1 : 0,
+				Door->HasClosedBehind() ? 1 : 0, Door->GetClosedFraction(), Door->IsBlocking() ? 1 : 0);
+		}
+		for (const APrologueSlidingPanel* Panel : All<APrologueSlidingPanel>())
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("  sliding panel %s at %s: opening %s (box %s), slides %s, open %.3f, blocking %d%s"), *Panel->GetName(),
+				*Panel->GetActorLocation().ToCompactString(), *Panel->OpeningSize.ToCompactString(), *Panel->GetOpeningBox().ToString(),
+				Panel->Slide == EProloguePanelSlide::Up ? TEXT("up") : TEXT("down"), Panel->GetOpenFraction(), Panel->IsBlocking() ? 1 : 0,
+				Panel->bBlockWhenOpen ? TEXT(", blocked when open") : TEXT(""));
+		}
+		for (const APrologueDeparture* Dep : All<APrologueDeparture>())
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("  departure %s: %s, hangar box %s, door %s, hatch %s, ship's hatch %s, exit %s (%s); phases took %.3f / %.3f / %.3f s (settings %.2f / %.2f / %.2f s)"),
+				*Dep->GetName(), *DepartName(Dep->GetDepartureState()), *Dep->GetHangarBox().ToString(), *GetNameSafe(Dep->EntryDoor), *GetNameSafe(Dep->HangarHatch),
+				*GetNameSafe(Dep->ShipHatch), *GetNameSafe(Dep->ShipExit),
+				Dep->ShipExit && Dep->ShipExit->GetVolume()->GetCollisionEnabled() != ECollisionEnabled::NoCollision ? TEXT("on") : TEXT("off"),
+				Dep->GetPhaseTook(EPrologueDepartureState::DoorClosing), Dep->GetPhaseTook(EPrologueDepartureState::HatchOpening),
+				Dep->GetPhaseTook(EPrologueDepartureState::ShipHatchOpening), UTheLastShiftSettings::Get()->GetHomeDoorCloseSeconds(),
+				UTheLastShiftSettings::Get()->GetHomeHatchOpenSeconds(), UTheLastShiftSettings::Get()->GetShipHatchOpenSeconds());
+		}
 		for (const APrologueHologram* Holo : All<APrologueHologram>())
 		{
 			UE_LOG(LogTheLastShift, Log, TEXT("  hologram %s: %d points, box %s, colour %s, shown %d"), *Holo->GetName(), Holo->GetPointCount(), *Holo->GetPointsBox().ToString(),
@@ -1663,6 +2368,12 @@ namespace PrologueDebug
 			{
 				UE_LOG(LogTheLastShift, Log, TEXT("  corridor %d: %d pieces, X %.0f..%.0f, %.0f cm long, %.0f cm wide, %.0f cm high, %d lights"), Index, C.Pieces, C.StartX, C.EndX,
 					C.Length, C.Width, C.Height, C.Lights);
+				for (const float Side : { 1.f, -1.f })
+				{
+					const FDoorway D = MeasureDoorway(C, Side);
+					UE_LOG(LogTheLastShift, Log, TEXT("    %s side (%s): %d doorway(s)%s"), Side > 0.f ? TEXT("right") : TEXT("left"), Side > 0.f ? TEXT("+Y") : TEXT("-Y"), D.Gaps,
+						D.Gaps > 0 ? *FString::Printf(TEXT(", X %.0f..%.0f, %.0f cm wide, %.0f cm high"), D.StartX, D.EndX, D.Width(), D.Height) : TEXT(""));
+				}
 			}
 		}
 		UE_LOG(LogTheLastShift, Log, TEXT("  flashlight: %s; exit door delay %.2f s"), *FlashlightState(), UTheLastShiftSettings::Get()->GetExitDoorDelaySeconds());
@@ -1670,12 +2381,12 @@ namespace PrologueDebug
 
 	static FAutoConsoleCommandWithWorldAndArgs GPrologueTestCmd(
 		TEXT("tls.PrologueTest"),
-		TEXT("Brief 11: New game through the text scene, Prologue_Home, the flight, Prologue_Arrival and into area 1 (read, skipped, switched off), Continue and Select act, quit inside the prologue, the exit door without Door or Hatch rows. Run in MainMenu. Args: [Quit]. Clears the save."),
+		TEXT("Briefs 11 and 14: New game through the text scene, Prologue_Home (its corridor, the briefing before the hangar, the departure scene), the flight, Prologue_Arrival and into area 1 (read, skipped, switched off), Continue and Select act, quit inside the prologue, the exit door without Door or Hatch rows. Run in MainMenu. Args: [Quit]. Clears the save."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunTest));
 
 	static FAutoConsoleCommandWithWorldAndArgs GPrologueReportCmd(
 		TEXT("tls.Prologue.Report"),
-		TEXT("Logs the prologue map's doors, terminals, lights, line triggers, hatch, hologram, exit, corridors and flashlight."),
+		TEXT("Logs the prologue map's doors, terminals (the briefing terminal's state), lights, line triggers, hatch, sliding panels, departure scene, hologram, exit, corridor and its doorways, and flashlight."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&Report));
 }
 
