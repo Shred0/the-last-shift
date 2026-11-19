@@ -131,10 +131,12 @@ void APrologueHatch::ApplyPanel()
 	using namespace PrologueHatchImpl;
 	const FVector Opening = OpeningSize.ComponentMax(FVector(10.f)).ComponentMin(FVector(5000.f));
 	const FVector Size(Opening.X * PanelDepthShare, Opening.Y + 2.f * PanelOverlap, Opening.Z + PanelOverlap);
-	Panel->SetRelativeScale3D(Size / CubeMeshSize);
+	// A modelled panel (PanelMesh) is shown at scale 1 and placed by its bottom centre; otherwise the cube is scaled.
+	const bool bModelled = ADoorDevice::ApplyPanelMesh(Panel, PanelMesh);
+	Panel->SetRelativeScale3D(bModelled ? FVector::OneVector : Size / CubeMeshSize);
 	// Open: raised by the opening's height into the wall above it. Closed: its bottom just below the floor line.
 	const float Raised = (1.f - GetClosedFraction()) * Opening.Z;
-	Panel->SetRelativeLocation(FVector(0.f, 0.f, Size.Z * 0.5f - PanelOverlap + Raised));
+	Panel->SetRelativeLocation(FVector(0.f, 0.f, (bModelled ? 0.f : Size.Z * 0.5f) - PanelOverlap + Raised));
 }
 
 bool APrologueHatch::IsChannelTypedOut() const

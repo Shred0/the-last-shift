@@ -8,6 +8,7 @@
 
 class ADoorDevice;
 class UBoxComponent;
+class UStaticMesh;
 class UStaticMeshComponent;
 class UTimeStateSubsystem;
 
@@ -54,6 +55,15 @@ public:
 	/** Size of the opening the panel closes (X thickness, Y width, Z height); the actor's origin is the opening's bottom centre. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hatch", meta = (ClampMin = "10.0", ClampMax = "5000.0", Units = "cm"))
 	FVector OpeningSize = FVector(30.f, 1600.f, 700.f);
+
+	/**
+	 * Optional modelled panel, made at the panel's size (the opening's width plus 20 cm on each side, its height plus
+	 * 20 cm, 75% of its depth) with its pivot at its bottom centre: when set, the panel shows it at scale 1 instead of the
+	 * engine's cube scaled to that size. Only the look changes: it moves and blocks as before. Empty (the default):
+	 * nothing changes.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hatch")
+	TObjectPtr<UStaticMesh> PanelMesh;
 
 	/** The ship's inside, relative to the actor: the player starts in it; leaving it starts the hatch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hatch")

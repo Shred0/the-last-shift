@@ -53,10 +53,12 @@ void APrologueEntryDoor::ApplyPanelFraction()
 		return;
 	}
 	const FVector Size = Blocker->GetUnscaledBoxExtent() * 2.f;
-	Panel->SetRelativeScale3D(FVector(Size.X * PanelDepthShare, Size.Y, Size.Z) / CubeMeshSize);
+	// A modelled panel (PanelMesh) is shown at scale 1 and placed by its bottom centre; otherwise the cube is scaled.
+	const bool bModelled = ApplyPanelMesh(Panel, PanelMesh);
+	Panel->SetRelativeScale3D(bModelled ? FVector::OneVector : FVector(Size.X * PanelDepthShare, Size.Y, Size.Z) / CubeMeshSize);
 	// Panel is attached to Blocker, whose centre is the doorway's centre: closed at 0, raised by its height and a gap.
 	const float Raise = bClosingBehind ? (1.f - ClosedFraction) * (Size.Z + ClearGap) : 0.f;
-	Panel->SetRelativeLocation(FVector(0.f, 0.f, Raise));
+	Panel->SetRelativeLocation(FVector(0.f, 0.f, Raise - (bModelled ? Size.Z * 0.5f : 0.f)));
 }
 
 bool APrologueEntryDoor::BeginCloseBehind()

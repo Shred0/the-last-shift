@@ -1343,16 +1343,18 @@ namespace OcclusionDebug
 		Launch();
 	}
 
-	// Prologue_Arrival: the ship is a 12 x 6 x 5 m box (X 300..1500, Y -300..300, walls 20 cm thick, open at X = 1500)
-	// in a 40 x 30 m hangar (X 0..4000, Y -1500..1500). Two scans, one from the ship's entrance into the ship and one from
-	// outside its right side (+Y), then views of that side's outer face from inside the ship, through the other side
-	// and from across the hangar.
+	// Prologue_Arrival (Brief 15): the ship is the modelled 6 x 12 x 5 m ship (X 600..1200, Y -600..600), its 4 x 3 m
+	// opening in the middle of its long side at X = 1200, facing the exit door, in a 40 x 30 m hangar (X 0..4000,
+	// Y -1500..1500). Two scans, one from the ship's entrance into the ship and one from 4 m in front of its closed long
+	// side (X = 600, facing the hatch's wall), then views of that side's outer face from inside the ship, from 20 m
+	// beyond its open side and from across the hangar, each of them through the ship. (Brief 12 to 14: a 12 x 6 m box
+	// X 300..1500, Y -300..300, open at its +X end, and its +Y long side, scanned from 7 m.)
 	namespace ShipPoses
 	{
-		static const FVector Entrance(1750.f, 0.f, 0.f);
-		static const FVector ShipBack(300.f, 0.f, 200.f);
-		static const FVector OutsideRight(900.f, 1000.f, 0.f);
-		static const FVector RightWallOuter(900.f, 300.f, 250.f);
+		static const FVector Entrance(1450.f, 0.f, 0.f);
+		static const FVector ShipBack(600.f, 0.f, 200.f);
+		static const FVector OutsideRight(200.f, 0.f, 0.f);
+		static const FVector RightWallOuter(600.f, 0.f, 250.f);
 	}
 
 	static void AddShipView(TArray<FStep>& S, const FString& Label, const FVector& Floor)
@@ -1361,7 +1363,7 @@ namespace OcclusionDebug
 		{
 			StandAt(Floor, ShipPoses::RightWallOuter);
 			const float Distance = FVector::Dist2D(Floor, ShipPoses::RightWallOuter);
-			Note(FString::Printf(TEXT("%s: eye at (%.0f, %.0f), %.1f m from the right wall's outer face"), *Label, Floor.X, Floor.Y, Distance / 100.f));
+			Note(FString::Printf(TEXT("%s: eye at (%.0f, %.0f), %.1f m from the closed long side's outer face"), *Label, Floor.X, Floor.Y, Distance / 100.f));
 			SetOcclusion(1.f);
 			return 0.4f;
 		}));
@@ -1392,8 +1394,8 @@ namespace OcclusionDebug
 		TArray<FStep>& S = GRun.Steps;
 		S.Add(WaitFor(TEXT("a game world with the player's lidar and time states"), []() { return Lidar() && Pawn() && TS(); }, 15.f));
 		AddStopAndScanAt(S, TEXT("Ship"), ShipPoses::Entrance, ShipPoses::ShipBack, 1.f);
-		S.Add(Do(TEXT("Ship: outside its right side"), []() { StandAt(ShipPoses::OutsideRight, ShipPoses::RightWallOuter); return 0.3f; }));
-		S.Add(Do(TEXT("Ship: scan its right side"), []()
+		S.Add(Do(TEXT("Ship: in front of its closed long side"), []() { StandAt(ShipPoses::OutsideRight, ShipPoses::RightWallOuter); return 0.3f; }));
+		S.Add(Do(TEXT("Ship: scan its closed long side"), []()
 		{
 			if (ULidarScanComponent* L = Lidar())
 			{
@@ -1406,11 +1408,11 @@ namespace OcclusionDebug
 			Check(AliveScans() >= 2, FString::Printf(TEXT("Ship: two scans alive (%d)"), AliveScans()));
 			return 0.f;
 		}));
-		AddShipView(S, TEXT("Ship_Inside_5m"), FVector(900.f, -200.f, 0.f));
-		AddShipView(S, TEXT("Ship_BehindLeftWall_20m"), FVector(900.f, -1400.f, 0.f));
-		AddShipView(S, TEXT("Ship_InsideBack_8m"), FVector(400.f, -150.f, 0.f));
-		AddShipView(S, TEXT("Ship_Hangar_30m"), FVector(3800.f, -1000.f, 0.f));
-		AddShipView(S, TEXT("Ship_HangarFar_37m"), FVector(3900.f, -1450.f, 0.f));
+		AddShipView(S, TEXT("Ship_Inside_5m"), FVector(1100.f, 250.f, 0.f));
+		AddShipView(S, TEXT("Ship_BeyondOpenSide_20m"), FVector(2600.f, -400.f, 0.f));
+		AddShipView(S, TEXT("Ship_InsideFront_5m"), FVector(1150.f, -250.f, 0.f));
+		AddShipView(S, TEXT("Ship_Hangar_33m"), FVector(3900.f, -600.f, 0.f));
+		AddShipView(S, TEXT("Ship_HangarFar_34m"), FVector(3900.f, 700.f, 0.f));
 		Launch();
 	}
 
@@ -1483,7 +1485,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsOcclusionHiddenCompareCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsOcclusionShipCheckCommand(
 	TEXT("tls.Occlusion.ShipCheck"),
-	TEXT("tls.Occlusion.ShipCheck [Quit=0]: (PIE or a package, in Prologue_Arrival) at occluded intensity 1, a scan from the ship's entrance and one from outside its right side; the right side's outer face seen from inside the ship, through the other side and from across the hangar must look the same with the geometry visible and hidden. Also measures the attenuated path at 0.99. Shots to Saved/Screenshots/Brief12."),
+	TEXT("tls.Occlusion.ShipCheck [Quit=0]: (PIE or a package, in Prologue_Arrival) at occluded intensity 1, a scan from the ship's entrance and one from 4 m in front of its closed long side; that side's outer face seen through the ship from inside it, from 20 m beyond its open side and from across the hangar must look the same with the geometry visible and hidden. Also measures the attenuated path at 0.99. Shots to Saved/Screenshots/Brief12."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		OcclusionDebug::StartShipCheck(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);

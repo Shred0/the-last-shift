@@ -724,6 +724,10 @@ namespace PrologueDebug
 		float EndX = 0.f;
 		float CentreY = 0.f;
 		int32 Lights = 0;
+		/** The narrowest free width along it (traces across, both sides, at heights up to 3 m, the side doorway left out). */
+		float FreeWidth = 0.f;
+		float FreeWidthX = 0.f;
+		float FreeWidthZ = 0.f;
 	};
 
 	/** A doorway in one side wall of a corridor (Side +1: +Y, the right of a player walking +X; -1: -Y), found by traces at 150 cm. */
@@ -806,8 +810,10 @@ namespace PrologueDebug
 		C.StartX = static_cast<float>(Walls.Min.X);
 		C.EndX = static_cast<float>(Walls.Max.X);
 		C.CentreY = static_cast<float>(Walls.GetCenter().Y);
-		// A quarter of the way along: the monitor room's doorway is at the middle.
-		const FVector Mid(Walls.Min.X + Walls.GetSize().X * 0.25, Walls.GetCenter().Y, 150.f);
+		// A quarter of the way along (the monitor room's doorway is at the middle), plus half a wall panel (Brief 15): the
+		// modelled walls are 1 m panels with ribs at their joints, and a quarter of the way along is a joint; half a panel
+		// on, the traces meet the walls' faces, the corridor's sides.
+		const FVector Mid(Walls.Min.X + Walls.GetSize().X * 0.25 + 50.0, Walls.GetCenter().Y, 150.f);
 		FCollisionQueryParams Params;
 		Params.AddIgnoredActor(Pawn());
 		FHitResult L, R, D, U;
@@ -817,6 +823,30 @@ namespace PrologueDebug
 		const bool bU = World->LineTraceSingleByChannel(U, Mid, Mid + FVector(0.f, 0.f, 1000.f), ECC_Visibility, Params);
 		C.Width = bL && bR ? L.Distance + R.Distance : -1.f;
 		C.Height = bD && bU ? D.Distance + U.Distance : -1.f;
+		// The free width (Brief 15): everything that stands out of the walls (ribs, conduits, frames, terminals) counted,
+		// every 5 cm from 30 cm inside one end to 30 cm inside the other (the end doors' frames left out), at nine heights
+		// up to 3 m; where the right-hand trace runs more than 2 m (the monitor room's doorway) the X is left out.
+		C.FreeWidth = 1.e6f;
+		for (double X = Walls.Min.X + 30.0; X <= Walls.Max.X - 30.0; X += 5.0)
+		{
+			for (const double Z : { 20.0, 60.0, 100.0, 150.0, 200.0, 250.0, 280.0, 300.0, 310.0 })
+			{
+				const FVector From(X, Walls.GetCenter().Y, Z);
+				FHitResult A, B;
+				const bool bA = World->LineTraceSingleByChannel(A, From, From - FVector(0.f, 1000.f, 0.f), ECC_Visibility, Params);
+				const bool bB = World->LineTraceSingleByChannel(B, From, From + FVector(0.f, 1000.f, 0.f), ECC_Visibility, Params);
+				if (!bA || !bB || B.Distance > 200.f)
+				{
+					continue;
+				}
+				if (A.Distance + B.Distance < C.FreeWidth)
+				{
+					C.FreeWidth = A.Distance + B.Distance;
+					C.FreeWidthX = static_cast<float>(X);
+					C.FreeWidthZ = static_cast<float>(Z);
+				}
+			}
+		}
 		for (const ALightGroupDevice* Group : All<ALightGroupDevice>())
 		{
 			for (const TObjectPtr<ALight>& Light : Group->Lights)
@@ -1031,6 +1061,8 @@ namespace PrologueDebug
 			const APrologueLineTrigger* Holo = TriggerOf(PrologueGroups::Hologram);
 			Check(C.bFound && FMath::IsNearlyEqual(C.Length, 2000.f, 2.f) && FMath::IsNearlyEqual(C.Width, 300.f, 2.f) && FMath::IsNearlyEqual(C.Height, 350.f, 2.f),
 				FString::Printf(TEXT("%s: %.0f cm long, %.0f cm wide, %.0f cm high (%d pieces, X %.0f..%.0f)"), *Label, C.Length, C.Width, C.Height, C.Pieces, C.StartX, C.EndX));
+			Check(C.FreeWidth >= 240.f && C.FreeWidth < 1.e5f, FString::Printf(TEXT("%s: at least 2.40 m free everywhere along it: the narrowest %.0f cm, at X %.0f, %.0f cm up"), *Label,
+				C.FreeWidth, C.FreeWidthX, C.FreeWidthZ));
 			Check(!MeasureCorridor(2).bFound, FString::Printf(TEXT("%s: the only corridor (no piece tagged Corridor2)"), *Label));
 			Check(Door && FMath::Abs(Door->GetActorLocation().X - C.StartX) <= 30.f,
 				FString::Printf(TEXT("%s: the print room's door at its start (door X %.0f, corridor from %.0f)"), *Label, Door ? Door->GetActorLocation().X : 0.f, C.StartX));
@@ -1064,14 +1096,19 @@ namespace PrologueDebug
 	/** The home map's spaces, measured (criterion 2 of Brief 14), and its lights by space. */
 	static void CheckHomeLayout(const FString& Label)
 	{
-		const FVector Print = MeasureSpace(FVector(400.f, 0.f, 150.f));
+		// Brief 15: the rooms are measured half a wall panel off the panels' joints, where the traces meet the walls' faces
+		// and not their ribs (1 m panels in the rooms, 2 m in the hangar), and off the printer; Brief 14 measured from the
+		// print room's centre (400, 0), the monitor room's centre and the hangar's middle 5 m from its entry wall.
+		// Brief 15 measures at (450, 250), the monitor room's centre + (50, -250) and the hangar's middle + (0, 100).
+		const FVector Print = MeasureSpace(FVector(450.f, 250.f, 150.f));
 		// Unchanged since Brief 11: its door wall stands inside the floor's 8 m, so the room is 7.9 m to the wall's face.
 		Check(Print.Equals(FVector(790.f, 800.f, 400.f), 3.f), FString::Printf(TEXT("%s: the print room is %s cm, as in Brief 11"), *Label, *Print.ToCompactString()));
 
 		const APrologueLineTrigger* HoloTrigger = TriggerOf(PrologueGroups::Hologram);
 		const FVector RoomCentre = HoloTrigger ? HoloTrigger->GetActorLocation() : FVector::ZeroVector;
 		// Above the doorway's 3 m, so the trace toward the corridor meets the room's own wall.
-		const FVector Monitor = MeasureSpace(FVector(RoomCentre.X, RoomCentre.Y, 450.f));
+		// Off the hologram's base (2 m round its centre, its plinth 12 cm high) too.
+		const FVector Monitor = MeasureSpace(FVector(RoomCentre.X + 50.f, RoomCentre.Y - 250.f, 450.f));
 		Check(Monitor.Equals(FVector(1400.f, 1400.f, 600.f), 3.f),
 			FString::Printf(TEXT("%s: the monitor room is %s cm, centred at %s"), *Label, *Monitor.ToCompactString(), *RoomCentre.ToCompactString()));
 		const APrologueHologram* Holo = First<APrologueHologram>();
@@ -1080,7 +1117,7 @@ namespace PrologueDebug
 
 		const APrologueDeparture* Dep = Departure();
 		const FBox HangarBox = Dep ? Dep->GetHangarBox() : FBox(ForceInit);
-		const FVector Hangar = MeasureSpace(FVector(HangarBox.Min.X + 500.f, HangarBox.GetCenter().Y, 1000.f));
+		const FVector Hangar = MeasureSpace(FVector(HangarBox.Min.X + 500.f, HangarBox.GetCenter().Y + 100.f, 1000.f));
 		Check(Dep && Hangar.Equals(FVector(3000.f, 4000.f, 1400.f), 3.f) && HangarBox.GetSize().Equals(FVector(3000.f, 4000.f, 1400.f), 1.f),
 			FString::Printf(TEXT("%s: the hangar is %s cm (measured), its box %s"), *Label, *Hangar.ToCompactString(), *HangarBox.GetSize().ToCompactString()));
 		const APrologueEntryDoor* Entry = EntryDoor();
@@ -1100,9 +1137,12 @@ namespace PrologueDebug
 			FString::Printf(TEXT("%s: the ship is %s cm (long axis across the entry's view), centred at %s (hangar %s)"), *Label,
 				Ship.IsValid ? *Ship.GetSize().ToCompactString() : TEXT("-"), Ship.IsValid ? *Ship.GetCenter().ToCompactString() : TEXT("-"), *HangarBox.GetCenter().ToCompactString()));
 		const FBox ShipOpening = Dep && Dep->ShipHatch ? Dep->ShipHatch->GetOpeningBox() : FBox(ForceInit);
-		Check(ShipOpening.IsValid && FMath::Abs(ShipOpening.Min.X - Ship.Min.X) <= 2.f && ShipOpening.GetSize().Y >= 1000.f && Entry && Entry->GetActorLocation().X < ShipOpening.Min.X,
-			FString::Printf(TEXT("%s: the ship's hatch closes its side facing the entry door (opening %s, X from %.0f)"), *Label,
-				ShipOpening.IsValid ? *ShipOpening.GetSize().ToCompactString() : TEXT("-"), ShipOpening.Min.X));
+		// Brief 15: the ship's one opening, 4 m wide and 3 m high, at the middle of its long side facing the entry door
+		// (Brief 14: the hatch closed that whole side, at least 10 m wide).
+		Check(ShipOpening.IsValid && FMath::Abs(ShipOpening.Min.X - Ship.Min.X) <= 2.f && FMath::Abs(ShipOpening.GetSize().Y - 400.f) <= 2.f
+			&& FMath::Abs(ShipOpening.GetSize().Z - 300.f) <= 2.f && FMath::Abs(ShipOpening.GetCenter().Y - Ship.GetCenter().Y) <= 2.f && Entry && Entry->GetActorLocation().X < ShipOpening.Min.X,
+			FString::Printf(TEXT("%s: the ship's hatch closes its 4 x 3 m opening in the middle of the side facing the entry door (opening %s, X from %.0f, centre Y %.0f, ship's centre Y %.0f)"), *Label,
+				ShipOpening.IsValid ? *ShipOpening.GetSize().ToCompactString() : TEXT("-"), ShipOpening.Min.X, ShipOpening.GetCenter().Y, Ship.GetCenter().Y));
 		const FBox HatchOpening = Dep && Dep->HangarHatch ? Dep->HangarHatch->GetOpeningBox() : FBox(ForceInit);
 		Check(HatchOpening.IsValid && FMath::Abs(HatchOpening.Max.Y - HangarBox.Min.Y) <= 2.f && HatchOpening.GetSize().X > HatchOpening.GetSize().Y,
 			FString::Printf(TEXT("%s: the hangar's hatch is in the 30 m wall on the left (-Y) of a player entering: opening %s, Y from %.0f (hangar from %.0f)"), *Label,
@@ -1117,7 +1157,9 @@ namespace PrologueDebug
 		const TCHAR* Names[4] = { TEXT("print room"), TEXT("corridor"), TEXT("monitor room"), TEXT("hangar") };
 		int32 Count[4] = { 0, 0, 0, 0 };
 		int32 Total = 0;
-		bool bHangar6000 = true;
+		// Brief 15: every light of the home's light group is a movable light without shadows (so it goes dark while
+		// Stopped); Brief 14 also required the hangar's four lights at 6000 lm each.
+		bool bNoShadows = true;
 		for (const ALightGroupDevice* Group : All<ALightGroupDevice>())
 		{
 			for (const TObjectPtr<ALight>& Light : Group->Lights)
@@ -1135,7 +1177,7 @@ namespace PrologueDebug
 					{
 						++Count[I];
 						Space = Names[I];
-						bHangar6000 &= I != 3 || (LC && FMath::IsNearlyEqual(LC->Intensity, 6000.f));
+						bNoShadows &= LC && !LC->CastShadows && LC->Mobility == EComponentMobility::Movable;
 						break;
 					}
 				}
@@ -1143,9 +1185,10 @@ namespace PrologueDebug
 					LC ? LC->Intensity : -1.f, LC && Cast<UPointLightComponent>(LC) && Cast<UPointLightComponent>(LC)->IntensityUnits == ELightUnits::Lumens ? TEXT("lm") : TEXT("(units)")));
 			}
 		}
-		Check(Total == 10 && Count[0] == 1 && Count[1] == 3 && Count[2] == 2 && Count[3] == 4 && bHangar6000,
-			FString::Printf(TEXT("%s: %d lights: print room %d, corridor %d, monitor room %d, hangar %d (6000 lm each: %d)"), *Label, Total, Count[0], Count[1], Count[2], Count[3],
-				bHangar6000 ? 1 : 0));
+		// Brief 15: 20 lights, print room 3, corridor 5, monitor room 4, hangar 8 (Brief 14: 10, 1 / 3 / 2 / 4).
+		Check(Total == 20 && Count[0] == 3 && Count[1] == 5 && Count[2] == 4 && Count[3] == 8 && bNoShadows,
+			FString::Printf(TEXT("%s: %d lights: print room %d, corridor %d, monitor room %d, hangar %d (all movable, no shadows: %d)"), *Label, Total, Count[0], Count[1], Count[2], Count[3],
+				bNoShadows ? 1 : 0));
 	}
 
 	/** Stop for 1 s, then the pause menu for 1 s: Progress() and the departure's phase stand still in both. */

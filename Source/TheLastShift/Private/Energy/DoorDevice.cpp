@@ -59,9 +59,29 @@ void ADoorDevice::FitPanelToBlocker()
 {
 	if (Blocker && Panel)
 	{
+		if (ApplyPanelMesh(Panel, PanelMesh))
+		{
+			// Panel is attached to Blocker, whose centre is the doorway's centre; the modelled panel's pivot is its bottom.
+			Panel->SetRelativeLocation(FVector(0.f, 0.f, -Blocker->GetUnscaledBoxExtent().Z));
+			Panel->SetRelativeScale3D(FVector::OneVector);
+			return;
+		}
 		Panel->SetRelativeLocation(FVector::ZeroVector);
 		Panel->SetRelativeScale3D(Blocker->GetUnscaledBoxExtent() * 2.f / DoorDevice::CubeMeshSize);
 	}
+}
+
+bool ADoorDevice::ApplyPanelMesh(UStaticMeshComponent* InPanel, UStaticMesh* Modelled)
+{
+	if (!InPanel || !Modelled)
+	{
+		return false;
+	}
+	if (InPanel->GetStaticMesh() != Modelled)
+	{
+		InPanel->SetStaticMesh(Modelled);
+	}
+	return true;
 }
 
 void ADoorDevice::BeginPlay()

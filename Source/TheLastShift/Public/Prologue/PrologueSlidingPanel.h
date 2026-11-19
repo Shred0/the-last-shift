@@ -7,6 +7,7 @@
 #include "PrologueSlidingPanel.generated.h"
 
 class UBoxComponent;
+class UStaticMesh;
 class UStaticMeshComponent;
 
 /** Where a sliding panel goes when it opens. */
@@ -45,6 +46,15 @@ public:
 	/** The panel reaches this far into the frame on each side and on the side it slides to, so no light shows at its edges. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panel", meta = (ClampMin = "0.0", ClampMax = "100.0", Units = "cm"))
 	float PanelOverlap = 20.f;
+
+	/**
+	 * Optional modelled panel, made at the panel's size (the opening's width plus PanelOverlap on each side, its height plus
+	 * PanelOverlap, 75% of its depth) with its pivot at its bottom centre: when set, Panel shows it at scale 1 instead of
+	 * the engine's cube scaled to that size. Only the look changes: it moves and blocks as before. Empty (the default):
+	 * nothing changes.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panel")
+	TObjectPtr<UStaticMesh> PanelMesh;
 
 	/** The opening stays blocked when the panel is open (true: the void beyond the hangar's hatch). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panel")

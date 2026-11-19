@@ -4,6 +4,7 @@
 
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Energy/DoorDevice.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
 #include "TheLastShift.h"
@@ -110,13 +111,15 @@ void APrologueSlidingPanel::ApplyPanel()
 	const FVector Opening = GetOpening();
 	const float Overlap = FMath::Clamp(PanelOverlap, 0.f, 100.f);
 	const FVector Size(Opening.X * PanelDepthShare, Opening.Y + 2.f * Overlap, Opening.Z + Overlap);
-	Panel->SetRelativeScale3D(Size / CubeMeshSize);
+	// A modelled panel (PanelMesh) is shown at scale 1 and placed by its bottom centre; otherwise the cube is scaled.
+	const bool bModelled = ADoorDevice::ApplyPanelMesh(Panel, PanelMesh);
+	Panel->SetRelativeScale3D(bModelled ? FVector::OneVector : Size / CubeMeshSize);
 	// Closed: the overlap is on the side the panel slides to (into the lintel, or into the floor). Open: moved by its
 	// whole height and a gap, out of the opening.
 	const float Travel = OpenFraction * (Size.Z + ClearGap);
 	const float ClosedCentre = Slide == EProloguePanelSlide::Up ? Size.Z * 0.5f - Overlap : Size.Z * 0.5f;
 	const float Centre = Slide == EProloguePanelSlide::Up ? ClosedCentre + Travel : ClosedCentre - Travel;
-	Panel->SetRelativeLocation(FVector(0.f, 0.f, Centre));
+	Panel->SetRelativeLocation(FVector(0.f, 0.f, Centre - (bModelled ? Size.Z * 0.5f : 0.f)));
 
 	const bool bBlock = bBlockWhenOpen || !IsFullyOpen();
 	Blocker->SetCollisionEnabled(bBlock ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);

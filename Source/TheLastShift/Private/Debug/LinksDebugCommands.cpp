@@ -1554,20 +1554,22 @@ namespace LinksDebug
 	// tls.Links.ShipCheck (Prologue_Arrival)
 	// =====================================================================================================
 
-	// Prologue_Arrival: the ship is a 12 x 6 x 5 m box (X 300..1500, Y -300..300, walls 20 cm thick, open at X = 1500).
+	// Prologue_Arrival (Brief 15): the ship is the modelled 6 x 12 x 5 m ship (X 600..1200, Y -600..600), open in the
+	// middle of its long side at X = 1200; the face measured is the outer face of its closed long side (X = 600, facing
+	// the hatch's wall). (Brief 13 and 14: a 12 x 6 m box X 300..1500, Y -300..300, and its +Y long side.)
 	namespace ShipPoses
 	{
 		// 4 m from the face: the scan covers the face and the floor strip at its foot, which the ship hides from every view.
-		static const FVector OutsideRight(900.f, 700.f, 0.f);
-		static const FVector RightWallOuter(900.f, 300.f, 250.f);
+		static const FVector OutsideRight(200.f, 0.f, 0.f);
+		static const FVector RightWallOuter(600.f, 0.f, 250.f);
 	}
 
-	/** Screen rectangle of the right wall's outer face (X 300..1500, Y 320, Z 0..500) from the current view. */
+	/** Screen rectangle of the closed long side's outer face (X 600, Y -600..600, Z 0..500) from the current view. */
 	static FRect ShipRect(int32 Width, int32 Height)
 	{
 		FRect R;
 		R.X0 = Width; R.Y0 = Height; R.X1 = 0; R.Y1 = 0;
-		for (const float X : { 300.f, 1500.f }) for (const float Y : { 320.f }) for (const float Z : { 0.f, 500.f })
+		for (const float X : { 600.f }) for (const float Y : { -600.f, 600.f }) for (const float Z : { 0.f, 500.f })
 		{
 			FVector2D P;
 			const APlayerController* C = PC();
@@ -1588,7 +1590,7 @@ namespace LinksDebug
 		S.Add(Do(Label + TEXT(": view"), [Label, Floor]()
 		{
 			StandAt(Floor, ShipPoses::RightWallOuter);
-			Note(FString::Printf(TEXT("%s: eye at (%.0f, %.0f), %.1f m from the right wall's outer face"), *Label, Floor.X, Floor.Y, FVector::Dist2D(Floor, ShipPoses::RightWallOuter) / 100.f));
+			Note(FString::Printf(TEXT("%s: eye at (%.0f, %.0f), %.1f m from the closed long side's outer face"), *Label, Floor.X, Floor.Y, FVector::Dist2D(Floor, ShipPoses::RightWallOuter) / 100.f));
 			return 0.4f;
 		}));
 		AddViewShots(S, Label, [Label, bWholeFrame](const FViewResult& V)
@@ -1608,7 +1610,7 @@ namespace LinksDebug
 		GRun.Cleanup = []() { CommonCleanup(); ResumeTime(); };
 		TArray<FStep>& S = GRun.Steps;
 		S.Add(WaitFor(TEXT("a game world with the player's lidar"), []() { return Lidar() && Pawn() && TS(); }, 15.f));
-		AddStopAndScanAt(S, TEXT("Ship: a scan of the right side's outer face"), ShipPoses::OutsideRight, ShipPoses::RightWallOuter);
+		AddStopAndScanAt(S, TEXT("Ship: a scan of the closed long side's outer face"), ShipPoses::OutsideRight, ShipPoses::RightWallOuter);
 		S.Add(Do(TEXT("Ship: the samples read back"), []() { CheckSamplesOfLastScan(TEXT("Ship")); return 0.f; }));
 		S.Add(Do(TEXT("Ship: wait for the growth"), []()
 		{
@@ -1616,9 +1618,9 @@ namespace LinksDebug
 			Note(FString::Printf(TEXT("Ship: scan %d, %d points, %d links"), Stats.ScanIndex, Stats.Points, Stats.Links));
 			return WaitGrowthDone();
 		}));
-		AddShipView(S, TEXT("Ship_Inside_5m"), FVector(900.f, -200.f, 0.f), true);
-		AddShipView(S, TEXT("Ship_BehindLeftWall_20m"), FVector(900.f, -1400.f, 0.f), false);
-		AddShipView(S, TEXT("Ship_HangarFar_35m"), FVector(3900.f, -1450.f, 0.f), false);
+		AddShipView(S, TEXT("Ship_Inside_5m"), FVector(1100.f, 250.f, 0.f), true);
+		AddShipView(S, TEXT("Ship_BeyondOpenSide_20m"), FVector(2600.f, -400.f, 0.f), false);
+		AddShipView(S, TEXT("Ship_HangarFar_34m"), FVector(3900.f, 700.f, 0.f), false);
 		Launch();
 	}
 
@@ -1841,7 +1843,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLinksTestCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLinksShipCheckCommand(
 	TEXT("tls.Links.ShipCheck"),
-	TEXT("tls.Links.ShipCheck [Quit=0]: (PIE or a package, in Prologue_Arrival) a scan of the ship's right side from outside, then views of that outer face from inside the ship (about 5 m), behind its left wall (about 20 m) and across the hangar (about 35 m): its points show, its lines show no pixel. Shots to Saved/Screenshots/Brief13."),
+	TEXT("tls.Links.ShipCheck [Quit=0]: (PIE or a package, in Prologue_Arrival) a scan of the ship's closed long side from 4 m, then views of that outer face through the ship: from inside it (5 m), from 20 m beyond its open side and from across the hangar (about 34 m): its points show, its lines show no pixel. Shots to Saved/Screenshots/Brief13."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		LinksDebug::StartShipCheck(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);

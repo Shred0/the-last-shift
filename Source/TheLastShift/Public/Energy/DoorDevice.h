@@ -7,6 +7,7 @@
 #include "DoorDevice.generated.h"
 
 class UBoxComponent;
+class UStaticMesh;
 class UStaticMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDoorOpenChanged, bool, bOpen);
@@ -49,6 +50,20 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Door|Events")
 	FOnDoorOpenChanged OnOpenChanged;
 
+	/**
+	 * Optional modelled panel, made at the panel's size with its pivot at its bottom centre: when set, Panel shows it at
+	 * scale 1 instead of the engine's cube scaled to the door. Only the look changes: Panel keeps its visibility, its scan
+	 * channel and its place, and Blocker blocks as before. Empty (the default): nothing changes.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door")
+	TObjectPtr<UStaticMesh> PanelMesh;
+
+	/**
+	 * Gives InPanel the modelled mesh when Modelled is set (and returns true: the caller then places it by its bottom
+	 * centre at scale 1); does nothing and returns false when it is empty. Shared by the prologue's moving panels.
+	 */
+	static bool ApplyPanelMesh(UStaticMeshComponent* InPanel, UStaticMesh* Modelled);
+
 protected:
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
@@ -59,7 +74,7 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door")
 	TObjectPtr<UBoxComponent> Blocker;
 
-	/** Visual panel, shown while closed; scaled to Blocker's extent (a 100 cm cube mesh); tagged for the interactable scan channel at BeginPlay. */
+	/** Visual panel, shown while closed; scaled to Blocker's extent (a 100 cm cube mesh), or PanelMesh at scale 1; tagged for the interactable scan channel at BeginPlay. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door")
 	TObjectPtr<UStaticMeshComponent> Panel;
 
