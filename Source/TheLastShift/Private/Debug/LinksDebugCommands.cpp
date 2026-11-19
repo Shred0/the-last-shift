@@ -17,6 +17,8 @@
 #include "Engine/PostProcessVolume.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Entity/Entity.h"
+#include "Residue/Residue.h"
 #include "Framework/StdPlayerController.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/Character.h"
@@ -337,6 +339,10 @@ namespace LinksDebug
 	};
 	static FShot GShot;
 	static bool bShotReady = false;
+	/** Folder under Saved/Screenshots the shots go to (tls.Links.DistanceCheck uses Brief13b). */
+	static FString GShotFolder = TEXT("Brief13");
+	/** Prefix of the shots' file names (tls.Links.DistanceCheck's Tag: Before, After), none by default. */
+	static FString GShotTag;
 	static FDelegateHandle GShotHandle;
 
 	static int32 Level(const FColor& C) { return FMath::Max3(C.R, C.G, C.B); }
@@ -351,7 +357,7 @@ namespace LinksDebug
 		GShot.Growth = L ? L->GetLinkGrowth(NewestScan()) : -1.f;
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief13"), GShot.Label + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), GShotFolder, GShot.Label + TEXT(".png")));
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 		FFileHelper::SaveArrayToFile(Png, *Path);
 		bShotReady = true;
@@ -364,7 +370,7 @@ namespace LinksDebug
 			GShotHandle = UGameViewportClient::OnScreenshotCaptured().AddStatic(&HandleShot);
 		}
 		GShot = FShot();
-		GShot.Label = Label;
+		GShot.Label = GShotTag.IsEmpty() ? Label : GShotTag + TEXT("_") + Label;
 		bShotReady = false;
 		FScreenshotRequest::RequestScreenshot(FString(), false, false);
 	}
@@ -751,6 +757,8 @@ namespace LinksDebug
 		GRun.Name = Name;
 		GRun.bQuit = bQuit;
 		GStandZ = -1.e30;
+		GShotFolder = TEXT("Brief13");
+		GShotTag.Reset();
 		SaveLinks();
 	}
 
@@ -2150,8 +2158,10 @@ namespace LinksDebug
 
 	struct FLevels
 	{
-		int32 Points = 0, Lines = 0;
-		double PointP50 = 0, PointP90 = 0, LineP50 = 0, LineP90 = 0;
+		int32 Points = 0, Lines = 0, RectPixels = 0;
+		double PointP50 = 0, PointP90 = 0, PointP99 = 0, LineP50 = 0, LineP90 = 0, LineP99 = 0;
+		/** Share of the rectangle's pixels at 250 levels or above: points alone (lines off) and the game's look (lines on). */
+		double Share250Points = 0, Share250Lines = 0;
 	};
 
 	/** On-screen levels in Rect: points (lines off) and lines alone (lines on, where no point is lit). */
@@ -2159,6 +2169,7 @@ namespace LinksDebug
 	{
 		FLevels R;
 		TArray<double> P, Ln;
+		int32 Bright = 0, BrightLines = 0;
 		const int32 Width = V.VisibleLines.Width;
 		for (int32 Index = 0; Index < V.VisibleNoLines.Pixels.Num() && Index < V.VisibleLines.Pixels.Num(); ++Index)
 		{
@@ -2166,8 +2177,11 @@ namespace LinksDebug
 			{
 				continue;
 			}
+			++R.RectPixels;
 			const int32 Off = Level(V.VisibleNoLines.Pixels[Index]);
 			const int32 On = Level(V.VisibleLines.Pixels[Index]);
+			Bright += Off >= 250 ? 1 : 0;
+			BrightLines += On >= 250 ? 1 : 0;
 			if (Off > 6)
 			{
 				P.Add(Off);
@@ -2181,12 +2195,51 @@ namespace LinksDebug
 		R.Lines = Ln.Num();
 		R.PointP50 = Percentile(P, 0.5);
 		R.PointP90 = Percentile(P, 0.9);
+		R.PointP99 = Percentile(P, 0.99);
 		R.LineP50 = Percentile(Ln, 0.5);
 		R.LineP90 = Percentile(Ln, 0.9);
+		R.LineP99 = Percentile(Ln, 0.99);
+		R.Share250Points = R.RectPixels > 0 ? 100.0 * Bright / R.RectPixels : 0.0;
+		R.Share250Lines = R.RectPixels > 0 ? 100.0 * BrightLines / R.RectPixels : 0.0;
 		return R;
 	}
 
-	/** The points' density compensation in Rect, from the newest scan's samples: medians of the depths, the raw term and the clamped factor. */
+	/**
+	 * ViewPixelScale of the current view (2 tan(HFOV / 2) / viewport width: the player's camera with the horizontal FOV
+	 * constraint), the same value the lidar pushes to its point system, computed here from the camera.
+	 */
+	static double ViewPixelScaleNow(int32 ViewWidth)
+	{
+		const APlayerController* C = PC();
+		const double Fov = C && C->PlayerCameraManager ? C->PlayerCameraManager->GetFOVAngle() : 90.0;
+		return 2.0 * FMath::Tan(FMath::DegreesToRadians(Fov * 0.5)) / FMath::Max(ViewWidth, 1);
+	}
+
+	/**
+	 * The depth factor of one point, by the rule before Brief 13b (clamp((SampleDepth / ViewDepth)^DensityCompensation,
+	 * DensityBoostMin, DensityBoostMax)) and by the rule after it (clamp((spacing / PointPixelSize)^DensityCompensation,
+	 * DensityBoostMin, 1)), and the lines' factor after it (min(1, spacing / LinePixelWidth); before, the lines took the
+	 * points' old factor). Spacing: the on-screen spacing between the scan's samples, SampleDepth * 2 TanHalfFov.x /
+	 * CaptureWidth, times max(1, NearThinningDistance / SampleDepth) for captured points, over ViewPixelScale * ViewDepth.
+	 * Angle term not included.
+	 */
+	struct FFactor
+	{
+		double Old = 1.0, New = 1.0, Line = 1.0, SpacingPx = 0.0;
+	};
+	static FFactor DepthFactor(const ULidarScanComponent* L, double SampleDepth, double ViewDepthHere, double TanX, int32 CaptureWidth, double ViewScale, bool bCaptured)
+	{
+		FFactor F;
+		const double N = L->DensityCompensation;
+		F.Old = FMath::Clamp(FMath::Pow(SampleDepth / ViewDepthHere, N), static_cast<double>(L->DensityBoostMin), static_cast<double>(L->DensityBoostMax));
+		const double Thin = bCaptured && L->NearThinningDistance > 0.f ? FMath::Max(1.0, L->NearThinningDistance / SampleDepth) : 1.0;
+		F.SpacingPx = SampleDepth * 2.0 * TanX / FMath::Max(CaptureWidth, 1) * Thin / FMath::Max(ViewScale * ViewDepthHere, 1.e-6);
+		F.New = FMath::Clamp(FMath::Pow(F.SpacingPx / FMath::Max(static_cast<double>(L->PointPixelSize), 0.01), N), static_cast<double>(L->DensityBoostMin), 1.0);
+		F.Line = FMath::Min(1.0, F.SpacingPx / FMath::Max(static_cast<double>(L->LinePixelWidth), 0.01));
+		return F;
+	}
+
+	/** The points' density compensation in Rect, from the newest scan's samples: medians of the depths, the spacing and the factors by both rules. */
 	static FString CompensationIn(const FRect& Rect, int32 Width, int32 Height)
 	{
 		const ULidarScanComponent* L = Lidar();
@@ -2201,7 +2254,8 @@ namespace LinksDebug
 		}
 		const FVector ViewOrigin = C->PlayerCameraManager->GetCameraLocation();
 		const FVector ViewForward = C->PlayerCameraManager->GetCameraRotation().Vector();
-		TArray<double> Raw, Clamped, SampleDepths, ViewDepths;
+		const double ViewScale = ViewPixelScaleNow(Width);
+		TArray<double> Old, New, Line, Spacing, SampleDepths, ViewDepths;
 		for (int32 Texel = 0; Texel < Positions.Num() && Texel < Channels.Num(); ++Texel)
 		{
 			FVector2D Screen;
@@ -2211,14 +2265,16 @@ namespace LinksDebug
 			}
 			const double SampleDepth = FMath::Max(FVector::DotProduct(Positions[Texel] - Context.CaptureOrigin, Context.CaptureForward), 1.0);
 			const double ViewDepthHere = FMath::Max(FVector::DotProduct(Positions[Texel] - ViewOrigin, ViewForward), 1.0);
-			const double Term = FMath::Pow(SampleDepth / ViewDepthHere, static_cast<double>(L->DensityCompensation));
-			Raw.Add(Term);
-			Clamped.Add(FMath::Clamp(Term, static_cast<double>(L->DensityBoostMin), static_cast<double>(L->DensityBoostMax)));
+			const FFactor F = DepthFactor(L, SampleDepth, ViewDepthHere, Context.TanHalfFOV.X, CaptureWidth, ViewScale, true);
+			Old.Add(F.Old);
+			New.Add(F.New);
+			Line.Add(F.Line);
+			Spacing.Add(F.SpacingPx);
 			SampleDepths.Add(SampleDepth);
 			ViewDepths.Add(ViewDepthHere);
 		}
-		return FString::Printf(TEXT("%d samples in the middle: sample depth %.0f cm, view depth %.0f cm, depth term %.4f, clamped to [%.3f, %.2f] %.4f (medians; angle term not included)"),
-			Raw.Num(), Percentile(SampleDepths, 0.5), Percentile(ViewDepths, 0.5), Percentile(Raw, 0.5), L->DensityBoostMin, L->DensityBoostMax, Percentile(Clamped, 0.5));
+		return FString::Printf(TEXT("%d samples in the middle: sample depth %.0f cm, view depth %.0f cm, spacing %.2f px; points' depth factor %.4f by the old rule, %.4f by the new; lines' %.4f by the old rule, %.4f by the new (medians; angle term not included)"),
+			Old.Num(), Percentile(SampleDepths, 0.5), Percentile(ViewDepths, 0.5), Percentile(Spacing, 0.5), Percentile(Old, 0.5), Percentile(New, 0.5), Percentile(Old, 0.5), Percentile(Line, 0.5));
 	}
 
 	static void AddDistanceViews(TArray<FStep>& S, const FString& Prefix, TFunction<FVector(double)> Floor, TFunction<FVector()> LookAt, const TArray<double>& Distances)
@@ -2231,21 +2287,337 @@ namespace LinksDebug
 			{
 				const FRect Rect = CenterRect(V.VisibleLines, 0.1);
 				const FLevels Lv = LevelsIn(V, Rect);
-				Note(FString::Printf(TEXT("%s: points %d pixels, median %.0f, p90 %.0f levels; lines alone %d pixels, median %.0f, p90 %.0f levels; %s"),
-					*Label, Lv.Points, Lv.PointP50, Lv.PointP90, Lv.Lines, Lv.LineP50, Lv.LineP90, *CompensationIn(Rect, V.VisibleLines.Width, V.VisibleLines.Height)));
+				Note(FString::Printf(TEXT("%s: points %d pixels, median %.0f, p90 %.0f, p99 %.0f levels; lines alone %d pixels, median %.0f, p90 %.0f, p99 %.0f levels; at 250 or above %.2f%% of the %d pixels (points alone), %.2f%% (lines on); %s"),
+					*Label, Lv.Points, Lv.PointP50, Lv.PointP90, Lv.PointP99, Lv.Lines, Lv.LineP50, Lv.LineP90, Lv.LineP99, Lv.Share250Points, Lv.RectPixels, Lv.Share250Lines,
+					*CompensationIn(Rect, V.VisibleLines.Width, V.VisibleLines.Height)));
 			});
 		}
+	}
+
+	/** Two shots of the alive scans from the current view, geometry visible (age fade held): lines on, then off. */
+	static void AddPairShots(TArray<FStep>& S, const FString& Label, TFunction<void(const FViewResult&)> Then = nullptr)
+	{
+		S.Add(Do(Label + TEXT(": hold the age fade, lines on"), []() { HoldAgeFade(true); ShowLines(true); return 0.3f; }));
+		AddShot(S, Label + TEXT("_Lines"), [](const FShot& Shot) { GView.VisibleLines = Shot; });
+		S.Add(Do(Label + TEXT(": lines off"), []() { ShowLines(false); return 0.2f; }));
+		AddShot(S, Label + TEXT("_NoLines"), [Label, Then](const FShot& Shot)
+		{
+			GView.VisibleNoLines = Shot;
+			HoldAgeFade(false);
+			ShowLines(true);
+			Note(FString::Printf(TEXT("%s: %d lit pixels with lines, %d without"), *Label, CountLit(GView.VisibleLines).Pixels, CountLit(GView.VisibleNoLines).Pixels));
+			if (Then)
+			{
+				Then(GView);
+			}
+		});
+	}
+
+	// --- Overlap: one wall covered by many scans taken from nearby poses ---
+
+	static FVector HallFront(double D) { return FVector(GHall.WallPoint.X, GHall.WallPoint.Y, GHall.FloorZ) - GHall.Forward * D; }
+
+	/** Scan I of an overlap run: up to 60 cm to either side of the pose 2 m in front of the wall and up to 30 cm nearer or farther. */
+	static FVector OverlapPose(int32 I)
+	{
+		const FVector Right(-GHall.Forward.Y, GHall.Forward.X, 0.0);
+		return HallFront(200.0 + ((I / 4) % 4 - 1.5) * 20.0) + Right * ((I % 4) - 1.5) * 40.0;
+	}
+
+	static void AddOverlap(TArray<FStep>& S, int32 Scans)
+	{
+		const FString Prefix = FString::Printf(TEXT("Dist_Overlap%02d"), Scans);
+		AddScanFrom(S, Prefix + TEXT("_Scan00"), []() { return OverlapPose(0); }, []() { return GHall.WallPoint; }, true);
+		for (int32 I = 1; I < Scans; ++I)
+		{
+			const FString Label = FString::Printf(TEXT("%s_Scan%02d"), *Prefix, I);
+			S.Add(Do(Label + TEXT(": pose"), [I]() { KeepEntityDormant(); StandAt(OverlapPose(I), GHall.WallPoint); return 0.3f; }));
+			AddScanHere(S, Label);
+		}
+		S.Add(WaitFor(FString::Printf(TEXT("%s: %d scans alive"), *Prefix, Scans), [Scans]() { return AliveScans() >= Scans; }, 3.f));
+		AddDistanceViews(S, Prefix, [](double D) { return HallFront(D); }, []() { return GHall.WallPoint; }, { 200.0, 500.0, 1000.0, 2000.0 });
+	}
+
+	// --- Injected points: a residue and the entity ---
+
+	struct FInjected
+	{
+		TWeakObjectPtr<AResidue> Residue;
+		FVector ResidueHome = FVector::ZeroVector;
+		FVector ResidueAt = FVector::ZeroVector;
+		TWeakObjectPtr<AEntity> Entity;
+		float EntitySpeed = -1.f;
+		FVector Figure = FVector::ZeroVector;
+		/** Direction from the figure to the viewer of the scan taken from 3 m and of the views after it. */
+		FVector Dir = FVector::ForwardVector;
+		/** Direction from the figure to the viewer of the scan taken from each distance (cm), seen from there. */
+		TMap<int32, FVector> DirAt;
+	};
+	static FInjected GInj;
+
+	static FVector Flat(const FVector& V) { return FVector(V.X, V.Y, GHall.FloorZ); }
+
+	/**
+	 * Pixels within RadiusCm (projected, at least 6 pixels) of Center whose hue is nearest to Colour among the scan's
+	 * colours (scan, residue, entity, interactable), level above 6: count, median and 90th percentile, and the depth
+	 * factor of a point there by both rules.
+	 */
+	static FString InjectedLevels(const FShot& Shot, const FVector& Center, double RadiusCm, const FLinearColor& Colour)
+	{
+		FVector2D Screen;
+		const double Depth = ViewDepth(Center);
+		if (Depth <= 1.0 || !Project(Center, Screen, Shot.Width, Shot.Height))
+		{
+			return TEXT("off screen");
+		}
+		const double ViewScale = ViewPixelScaleNow(Shot.Width);
+		const int32 Half = FMath::CeilToInt32(FMath::Max(6.0, RadiusCm / (ViewScale * Depth)));
+		const FScanColors Colors = UTheLastShiftSettings::GetScanColors();
+		auto Chroma = [](const FLinearColor& C)
+		{
+			const float M = FMath::Max3(C.R, C.G, C.B);
+			return M > 0.f ? FVector3f(C.R / M, C.G / M, C.B / M) : FVector3f::ZeroVector;
+		};
+		const FVector3f Want = Chroma(Colour);
+		const FVector3f Others[] = { Chroma(Colors.Scan), Chroma(Colors.Residue), Chroma(Colors.Entity), Chroma(Colors.Interactable) };
+		TArray<double> Levels;
+		for (int32 Y = FMath::Max(0, FMath::FloorToInt32(Screen.Y) - Half); Y <= FMath::Min(Shot.Height - 1, FMath::FloorToInt32(Screen.Y) + Half); ++Y)
+		{
+			for (int32 X = FMath::Max(0, FMath::FloorToInt32(Screen.X) - Half); X <= FMath::Min(Shot.Width - 1, FMath::FloorToInt32(Screen.X) + Half); ++X)
+			{
+				const FColor& P = Shot.Pixels[Y * Shot.Width + X];
+				if (Level(P) <= 6)
+				{
+					continue;
+				}
+				const FVector3f C = Chroma(FLinearColor(P));
+				const double Mine = FVector3f::DistSquared(C, Want);
+				bool bNearest = true;
+				for (const FVector3f& O : Others)
+				{
+					bNearest = bNearest && (O.Equals(Want, 1.e-3f) || FVector3f::DistSquared(C, O) >= Mine);
+				}
+				if (bNearest)
+				{
+					Levels.Add(Level(P));
+				}
+			}
+		}
+		FString Factor = TEXT("no scan");
+		TArray<FVector> Positions;
+		TArray<int32> Channels;
+		int32 CaptureWidth = 0;
+		FLidarScanContext Context;
+		if (const ULidarScanComponent* L = Lidar(); L && L->GetLastScanSamples(Positions, Channels, CaptureWidth, Context))
+		{
+			const double SampleDepth = FMath::Max(FVector::DotProduct(Center - Context.CaptureOrigin, Context.CaptureForward), 1.0);
+			const FFactor F = DepthFactor(L, SampleDepth, FMath::Max(Depth, 1.0), Context.TanHalfFOV.X, CaptureWidth, ViewScale, false);
+			Factor = FString::Printf(TEXT("scanned from %.1f m, seen from %.1f m: spacing %.2f px, depth factor %.4f by the old rule, %.4f by the new"), SampleDepth / 100.0, Depth / 100.0, F.SpacingPx, F.Old, F.New);
+		}
+		return FString::Printf(TEXT("%d pixels of its colour within %d px, median %.0f, p90 %.0f, p99 %.0f levels; %s"),
+			Levels.Num(), Half, Percentile(Levels, 0.5), Percentile(Levels, 0.9), Percentile(Levels, 0.99), *Factor);
+	}
+
+	static void AddInjectedShot(TArray<FStep>& S, const FString& Label, TFunction<FVector()> Center, double RadiusCm, TFunction<FLinearColor()> Colour)
+	{
+		S.Add(Do(Label + TEXT(": hold the age fade, lines off"), []() { HoldAgeFade(true); ShowLines(false); return 0.3f; }));
+		AddShot(S, Label, [Label, Center, RadiusCm, Colour](const FShot& Shot)
+		{
+			HoldAgeFade(false);
+			ShowLines(true);
+			Note(FString::Printf(TEXT("%s: %s"), *Label, *InjectedLevels(Shot, Center(), RadiusCm, Colour())));
+		});
+	}
+
+	static AEntity* FindEntity()
+	{
+		UWorld* World = W();
+		for (TActorIterator<AEntity> It(World); World && It; ++It)
+		{
+			return *It;
+		}
+		return nullptr;
+	}
+
+	static void AddInjected(TArray<FStep>& S)
+	{
+		// The residue nearest to the hall view, moved 3 m in front of the hall's end wall, 1 m above the floor.
+		S.Add(Do(TEXT("injected: the residue"), []()
+		{
+			GInj = FInjected();
+			UWorld* World = W();
+			double Best = TNumericLimits<double>::Max();
+			for (TActorIterator<AResidue> It(World); World && It; ++It)
+			{
+				const double D = FVector::DistSquared(It->GetActorLocation(), GHall.Eye);
+				if (It->GetState() == EResidueState::Available && D < Best)
+				{
+					Best = D;
+					GInj.Residue = *It;
+				}
+			}
+			GInj.ResidueAt = Flat(GHall.WallPoint) - GHall.Forward * 300.0 + FVector(0, 0, 100);
+			if (AResidue* R = GInj.Residue.Get())
+			{
+				GInj.ResidueHome = R->GetActorLocation();
+				R->SetActorLocation(GInj.ResidueAt);
+				Note(FString::Printf(TEXT("residue %s moved from (%.0f, %.0f, %.0f) to (%.0f, %.0f, %.0f)"), *R->GetName(), GInj.ResidueHome.X, GInj.ResidueHome.Y, GInj.ResidueHome.Z,
+					GInj.ResidueAt.X, GInj.ResidueAt.Y, GInj.ResidueAt.Z));
+			}
+			else
+			{
+				Note(TEXT("no available residue in this map"));
+			}
+			return 0.f;
+		}));
+		auto ResidueAt = []() { return GInj.ResidueAt; };
+		auto ResidueColour = []() { return UTheLastShiftSettings::GetScanColors().Residue; };
+		for (const double D : { 300.0, 1000.0, 3000.0 })
+		{
+			const FString Label = FString::Printf(TEXT("Inj_Residue_Scan%02.0fm_View%02.0fm"), D / 100.0, D / 100.0);
+			AddScanFrom(S, Label, [D]() { return Flat(GInj.ResidueAt) - GHall.Forward * D; }, ResidueAt, false);
+			AddInjectedShot(S, Label, ResidueAt, 40.0, ResidueColour);
+		}
+		AddScanFrom(S, TEXT("Inj_Residue_Scan03m"), []() { return Flat(GInj.ResidueAt) - GHall.Forward * 300.0; }, ResidueAt, false);
+		for (const double D : { 1000.0, 3000.0 })
+		{
+			const FString Label = FString::Printf(TEXT("Inj_Residue_Scan03m_View%02.0fm"), D / 100.0);
+			S.Add(Do(Label + TEXT(": view"), [D]() { StandAt(Flat(GInj.ResidueAt) - GHall.Forward * D, GInj.ResidueAt); return 0.6f; }));
+			AddInjectedShot(S, Label, ResidueAt, 40.0, ResidueColour);
+		}
+		S.Add(Do(TEXT("injected: the residue goes back"), []()
+		{
+			if (AResidue* R = GInj.Residue.Get())
+			{
+				R->SetActorLocation(GInj.ResidueHome);
+			}
+			return 0.f;
+		}));
+
+		// The entity: awakened and made to appear, held (Speed 0.1 cm/s), then scanned from a direction with sight of it at
+		// 3, 10 and 30 m. It stays awake for the rest of the session: run this scenario last.
+		S.Add(Do(TEXT("injected: the entity, Resume, pose"), []()
+		{
+			ResumeTime();
+			KeepEntityDormant();
+			StandAt(Flat(GInj.ResidueAt) - GHall.Forward * 1500.0, GInj.ResidueAt);
+			return 0.7f;
+		}));
+		S.Add(Do(TEXT("injected: the entity, Stop"), []() { KeepEntityDormant(); StopTime(); return 0.f; }));
+		S.Add(WaitFor(TEXT("injected: the automatic scan is taken"), []() { return AliveScans() >= 1; }, 4.f, []()
+		{
+			AEntity* E = FindEntity();
+			GInj.Entity = E;
+			if (E)
+			{
+				GInj.EntitySpeed = E->Speed;
+				E->Speed = 0.1f;
+				E->Awaken();
+				if (!E->IsManifested())
+				{
+					E->SpawnNow(0.f);
+				}
+			}
+			return 0.5f;
+		}));
+		S.Add(WaitFor(TEXT("injected: the entity has appeared"), []() { const AEntity* E = GInj.Entity.Get(); return E && E->IsManifested(); }, 3.f, []()
+		{
+			const AEntity* E = GInj.Entity.Get();
+			UWorld* World = W();
+			if (!E || !World)
+			{
+				return 0.f;
+			}
+			GInj.Figure = E->GetFigureLocation();
+			// For each distance, the first direction from back down the hall outward (0, +2.5, -2.5, +5, ... degrees) with a
+			// floor there at the figure's height and sight of the figure; back down the hall when none has. The hall's floor
+			// can be a narrow span, so the steps are fine.
+			const double BaseYaw = (-GHall.Forward).Rotation().Yaw;
+			for (const double D : { 300.0, 1000.0, 3000.0 })
+			{
+				const int32 Key = FMath::RoundToInt32(D);
+				GInj.DirAt.Add(Key, -GHall.Forward);
+				FString Found = TEXT("none with floor and sight: back down the hall");
+				for (int32 K = 0; K < 144; ++K)
+				{
+					const double Offset = ((K + 1) / 2) * 2.5 * ((K % 2) ? 1.0 : -1.0);
+					const FVector Dir = FRotator(0.0, BaseYaw + Offset, 0.0).Vector();
+					const FVector At = GInj.Figure + Dir * D;
+					FHitResult Hit;
+					const bool bFloor = World->LineTraceSingleByChannel(Hit, At + FVector(0, 0, 150), At - FVector(0, 0, 300), ECC_Visibility);
+					if (bFloor && FMath::Abs(Hit.ImpactPoint.Z - GInj.Figure.Z) < 100.0 && E->CanBeSeenFrom(Hit.ImpactPoint + FVector(0, 0, 160), GInj.Figure))
+					{
+						GInj.DirAt.Add(Key, Dir);
+						Found = FString::Printf(TEXT("(%.2f, %.2f), %+.0f degrees from back down the hall"), Dir.X, Dir.Y, Offset);
+						break;
+					}
+				}
+				Note(FString::Printf(TEXT("entity at %.0f m: viewing direction %s"), D / 100.0, *Found));
+			}
+			GInj.Dir = GInj.DirAt.FindRef(300);
+			Note(FString::Printf(TEXT("entity figure at (%.0f, %.0f, %.0f); scanned from 3 m along (%.2f, %.2f), then seen from 10 and 30 m along the same direction"),
+				GInj.Figure.X, GInj.Figure.Y, GInj.Figure.Z, GInj.Dir.X, GInj.Dir.Y));
+			return 0.f;
+		}));
+		auto FigureCentre = []() { return GInj.Figure + FVector(0, 0, 90); };
+		auto EntityColour = []() { return UTheLastShiftSettings::GetScanColors().Entity; };
+		auto AddEntityScan = [&S](const FString& Label, double D)
+		{
+			S.Add(Do(Label + TEXT(": pose"), [D]()
+			{
+				if (const AEntity* E = GInj.Entity.Get())
+				{
+					GInj.Figure = E->GetFigureLocation();
+				}
+				const FVector* Dir = GInj.DirAt.Find(FMath::RoundToInt32(D));
+				StandAt(GInj.Figure + (Dir ? *Dir : GInj.Dir) * D, GInj.Figure + FVector(0, 0, 100));
+				return 0.4f;
+			}));
+			S.Add(Do(Label + TEXT(": scan"), []() { if (ULidarScanComponent* L = Lidar()) { L->Scan(); } return 0.3f; }));
+		};
+		for (const double D : { 300.0, 1000.0, 3000.0 })
+		{
+			const FString Label = FString::Printf(TEXT("Inj_Entity_Scan%02.0fm_View%02.0fm"), D / 100.0, D / 100.0);
+			AddEntityScan(Label, D);
+			AddInjectedShot(S, Label, FigureCentre, 110.0, EntityColour);
+		}
+		AddEntityScan(TEXT("Inj_Entity_Scan03m"), 300.0);
+		for (const double D : { 1000.0, 3000.0 })
+		{
+			const FString Label = FString::Printf(TEXT("Inj_Entity_Scan03m_View%02.0fm"), D / 100.0);
+			S.Add(Do(Label + TEXT(": view"), [D]() { StandAt(GInj.Figure + GInj.Dir * D, GInj.Figure + FVector(0, 0, 100)); return 0.6f; }));
+			AddInjectedShot(S, Label, FigureCentre, 110.0, EntityColour);
+		}
+		S.Add(Do(TEXT("injected: the entity's speed back"), []()
+		{
+			if (AEntity* E = GInj.Entity.Get(); E && GInj.EntitySpeed >= 0.f)
+			{
+				E->Speed = GInj.EntitySpeed;
+			}
+			return 0.f;
+		}));
 	}
 
 	static const TCHAR* GLocalExposureNames[3] = { TEXT("r.LocalExposure"), TEXT("r.DefaultFeature.LocalExposure.HighlightContrastScale"), TEXT("r.DefaultFeature.LocalExposure.ShadowContrastScale") };
 	static FString GSavedLocalExposure[3];
 
-	static void StartDistanceCheck(const FString& Scenario, bool bOldLocalExposure, bool bQuit)
+	static void StartDistanceCheck(const FString& Scenario, bool bOldLocalExposure, bool bQuit, const FString& Tag)
 	{
 		StartRun(TEXT("LinksDistanceCheck"), bQuit);
+		GShotFolder = TEXT("Brief13b");
+		GShotTag = Tag;
 		GRun.Cleanup = [bOldLocalExposure]()
 		{
 			CommonCleanup();
+			if (AResidue* R = GInj.Residue.Get(); R && R->GetActorLocation().Equals(GInj.ResidueAt, 1.0))
+			{
+				R->SetActorLocation(GInj.ResidueHome);
+			}
+			if (AEntity* E = GInj.Entity.Get(); E && GInj.EntitySpeed >= 0.f)
+			{
+				E->Speed = GInj.EntitySpeed;
+			}
+			GInj = FInjected();
 			ResumeTime();
 			for (int32 I = 0; bOldLocalExposure && I < 3; ++I)
 			{
@@ -2255,7 +2627,15 @@ namespace LinksDebug
 				}
 			}
 		};
-		const bool bHall = Scenario.Equals(TEXT("hall"), ESearchCase::IgnoreCase);
+		auto Is = [&Scenario](const TCHAR* Name) { return Scenario.Equals(Name, ESearchCase::IgnoreCase); };
+		const bool bHere = Is(TEXT("here"));
+		const bool bTestLidar = Is(TEXT("testlidar"));
+		const bool bHall = !bHere && !bTestLidar;
+		if (bHall && !Is(TEXT("hall")) && !Is(TEXT("overlap")) && !Is(TEXT("injected")) && !Is(TEXT("ownpose")))
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Links.DistanceCheck: unknown scenario '%s' (hall, testlidar, overlap, injected, ownpose, here)."), *Scenario);
+			return;
+		}
 		TArray<FStep>& S = GRun.Steps;
 		S.Add(WaitFor(TEXT("a game world with the player's lidar"), []() { return Lidar() && Pawn() && TS(); }, 30.f, [bOldLocalExposure, bHall]()
 		{
@@ -2284,11 +2664,60 @@ namespace LinksDebug
 		}));
 		if (bHall)
 		{
-			// Area 2: the hall's end wall scanned from 2 m, seen from 2, 5, 10 and 20 m.
 			S.Add(Do(TEXT("the hall"), []() { FindHall(); return GHall.bValid ? 0.f : -1.f; }));
-			auto Front = [](double D) { return FVector(GHall.WallPoint.X, GHall.WallPoint.Y, GHall.FloorZ) - GHall.Forward * D; };
-			AddScanFrom(S, TEXT("Dist_Hall_Scan2m"), [Front]() { return Front(200.0); }, []() { return GHall.WallPoint; }, true);
-			AddDistanceViews(S, TEXT("Dist_Hall"), Front, []() { return GHall.WallPoint; }, { 200.0, 500.0, 1000.0, 2000.0 });
+		}
+		if (Is(TEXT("hall")))
+		{
+			// Area 2: the hall's end wall scanned from 2 m, seen from 2, 5, 10 and 20 m.
+			AddScanFrom(S, TEXT("Dist_Hall_Scan2m"), []() { return HallFront(200.0); }, []() { return GHall.WallPoint; }, true);
+			AddDistanceViews(S, TEXT("Dist_Hall"), [](double D) { return HallFront(D); }, []() { return GHall.WallPoint; }, { 200.0, 500.0, 1000.0, 2000.0 });
+			// The floor 3 m ahead of the hall view, scanned from there, then seen from 0, 5 and 10 m farther back: from eye
+			// height, about 28, 11 and 7 degrees above the floor (edge-on, where lines crowd).
+			auto FloorTarget = []() { return GHall.Floor + GHall.Forward * 300.0; };
+			AddScanFrom(S, TEXT("Dist_Floor_Scan"), []() { return GHall.Floor; }, FloorTarget, true);
+			AddDistanceViews(S, TEXT("Dist_Floor"), [](double D) { return GHall.Floor - GHall.Forward * D; }, FloorTarget, { 0.0, 500.0, 1000.0 });
+		}
+		else if (Is(TEXT("overlap")))
+		{
+			// Area 2: the hall's end wall covered by 4, 8 and 16 scans taken from nearby poses about 2 m away.
+			for (const int32 Scans : { 4, 8, 16 })
+			{
+				AddOverlap(S, Scans);
+			}
+		}
+		else if (Is(TEXT("injected")))
+		{
+			AddInjected(S);
+		}
+		else if (Is(TEXT("ownpose")))
+		{
+			// Area 2: the hall's end wall scanned and seen from 3 m and from 10 m.
+			for (const double D : { 300.0, 1000.0 })
+			{
+				const FString Label = FString::Printf(TEXT("Own_Wall%02.0fm"), D / 100.0);
+				AddScanFrom(S, Label, [D]() { return HallFront(D); }, []() { return GHall.WallPoint; }, true);
+				AddPairShots(S, Label);
+			}
+		}
+		else if (bHere)
+		{
+			// Any map: a scan from the current pose (the automatic scan of a Stop, or one more scan), seen from that pose.
+			S.Add(Do(TEXT("scan from here"), []()
+			{
+				KeepEntityDormant();
+				if (!IsStopped())
+				{
+					StopTime();
+				}
+				else if (ULidarScanComponent* L = Lidar())
+				{
+					L->Scan();
+				}
+				return 0.f;
+			}));
+			S.Add(WaitFor(TEXT("a scan is alive"), []() { return AliveScans() >= 1; }, 4.f, []() { return 0.f; }));
+			S.Add(WaitFor(TEXT("its links reach the point system"), []() { return LinksReadyFor(NewestScan()); }, 3.f, []() { return WaitGrowthDone(); }));
+			AddPairShots(S, TEXT("Own_Here"));
 		}
 		else
 		{
@@ -2316,10 +2745,11 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLinksEndsCheckCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLinksDistanceCheckCommand(
 	TEXT("tls.Links.DistanceCheck"),
-	TEXT("tls.Links.DistanceCheck <hall|testlidar> [OldLocalExposure=0] [Quit=0]: (PIE or a package) one surface scanned from 2 m, seen from 2, 5, 10 and 20 m (hall, Area2_ServerHalls) or 12.5 m (testlidar, with a surface behind a wall too): on-screen levels of its points and of its lines in the middle of the frame, and the points' density compensation. OldLocalExposure=1 sets local exposure as before Step 1 for the run."),
+	TEXT("tls.Links.DistanceCheck <hall|testlidar|overlap|injected|ownpose|here> [OldLocalExposure=0] [Quit=0] [Tag]: (PIE or a package) on-screen levels in the middle of the frame (median, p90, p99, share at 250 or above) and the depth factor by the rule before Brief 13b and after it. hall (Area2_ServerHalls): the end wall scanned from 2 m, seen from 2, 5, 10 and 20 m, and the floor 3 m ahead seen from 0, 5 and 10 m farther back (edge-on); testlidar: a wall scanned from 2 m, seen from 2 to 12.5 m, and a surface behind it; overlap (Area2): the end wall covered by 4, 8 and 16 scans from nearby poses, seen from 2 to 20 m; injected (Area2): a residue and the entity scanned and seen from 3, 10 and 30 m, and scanned from 3 m, seen from 10 and 30 m (awakens the entity: run it last); ownpose (Area2): the end wall scanned and seen from 3 m and 10 m; here (any map): a scan from the current pose seen from it. Tag prefixes the shots' names. OldLocalExposure=1 sets local exposure as before Brief 13 Step 1 for the run. Shots to Saved/Screenshots/Brief13b."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
-		LinksDebug::StartDistanceCheck(Args.Num() > 0 ? Args[0] : FString(TEXT("hall")), Args.Num() > 1 && FCString::Atoi(*Args[1]) != 0, Args.Num() > 2 && FCString::Atoi(*Args[2]) != 0);
+		LinksDebug::StartDistanceCheck(Args.Num() > 0 ? Args[0] : FString(TEXT("hall")), Args.Num() > 1 && FCString::Atoi(*Args[1]) != 0, Args.Num() > 2 && FCString::Atoi(*Args[2]) != 0,
+			Args.Num() > 3 ? Args[3] : FString());
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLinksLiftCommand(

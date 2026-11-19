@@ -81,7 +81,10 @@
  * Update (every frame): draw position, colour and size from the live parameters,
  *   Position = S + N * SurfaceOffset                                  if |N|^2 > 0.25,
  *   Position = S + normalize(ViewOrigin - S) * min(ViewOffsetMaxCm, 0.5 * |ViewOrigin - S|)   otherwise,
- *   rgb   = BaseColor.rgb * clamp(pow(SampleDepth / zs, DensityCompensation) * AngleTerm, DensityBoostMin, DensityBoostMax),
+ *   rgb   = BaseColor.rgb * clamp(DepthTerm * AngleTerm, DensityBoostMin, DensityBoostMax),
+ *   DepthTerm = clamp(pow(Spacing / PointPixelSize, DensityCompensation), DensityBoostMin, 1),
+ *   Spacing = SampleDepth * 2 * TanHalfFov.x / CaptureWidth * Thin / (ViewPixelScale * zs)   (pixels),
+ *   Thin = max(1, NearThinningDistance / max(Depth, 1)),
  *   BaseColor = ChannelColorK if LidarChannel = K in [1, NumChannels], PointColor otherwise (ChannelColor1..4, pushed
  *           live: rgb = Channels[K-1].Color.rgb * PointIntensity * Channels[K-1].IntensityMultiplier, a unused),
  *   AngleTerm = pow(max(saturate(|dot(N, Vview)|), e) / max(saturate(|dot(N, Vcapture)|), e), AngleCompensation),
@@ -100,8 +103,18 @@
  * computed by the emitters, so every renderer and every point material of the system shows the same values.
  * It lifts sprites off their own surface so grazing views do not clip them; being a fixed world distance it never
  * carries a point through geometry thicker than the offset, whatever the viewing distance.
+ * Spacing is the on-screen distance between neighbouring samples of the scan: a capture texel is SampleDepth * 2 *
+ * TanHalfFov.x / CaptureWidth wide at the sample's depth (square texels), the near thinning keeps 1 / Thin^2 of the
+ * samples there (so their spacing is Thin texels), and a length w at planar view depth zs covers w / (ViewPixelScale * zs)
+ * pixels. While the scan's points are separate dots (Spacing >= PointPixelSize) DepthTerm is 1 and every point keeps
+ * its level at any distance; once they merge, DepthTerm follows their on-screen density (at DensityCompensation 2), so
+ * the merged surface stays at about the level of one dot. Each instance holds one scan, so a scan is dimmed by its own
+ * spacing only. DepthTerm never brightens. Spacing does not include the surface angle: AngleTerm carries it.
  * Compensation reads S, not the drawn position: SampleDepth is the depth of S along CaptureForward (raw depth minus
- * the bias it was placed with), so SampleDepth / zs is exactly 1 when the scan is viewed from its own pose.
+ * the bias it was placed with), so from the scan's own pose (zs = SampleDepth) Spacing is 2 * TanHalfFov.x / CaptureWidth
+ * * Thin / ViewPixelScale, the width of a capture texel in viewport pixels times Thin (for example about 9.8 pixels for a
+ * 180 capture matching the FOV of a 1529-pixel-wide viewport, 12.3 at a depth of 2 m with NearThinningDistance 2.5 m),
+ * and DepthTerm is 1 there whenever that is at least PointPixelSize.
  * PointColor.rgb already carries PointIntensity; the additive material multiplies rgb by alpha. The alpha of every
  * captured point, channel or not, is PointColor.a * fade: a channel changes the colour and intensity only.
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
@@ -182,8 +195,11 @@
  *   for the end's surface position P (User.LineLiftTexels, User.LineLiftMaxCm; at 0 the ends are where the points are drawn),
  *   Position = (LineA + LineB) / 2, SpriteAlignment = normalize(LineB - LineA),
  *   SpriteSize = (LinePixelWidth * ViewPixelScale * max(dot(Position - ViewOrigin, ViewForward), 1), |LineB - LineA|),
- *   Color.rgb = BaseColor(channel) * LineIntensity * clamp(DepthTerm * AngleTerm, DensityBoostMin, DensityBoostMax), the
- *     points' compensation taken at the midpoint of A and B with the normal normalize(NA + NB) (term 1 if that is short),
+ *   Color.rgb = BaseColor(channel) * LineIntensity * clamp(LineTerm * AngleTerm, DensityBoostMin, DensityBoostMax), with
+ *     LineTerm = min(1, Spacing / LinePixelWidth), Spacing and AngleTerm as for the points, taken at the midpoint M of A and
+ *     B (SampleDepth = Depth = max(dot(M - CaptureOrigin, CaptureForward), 1), zs = max(dot(M - ViewOrigin, ViewForward), 1))
+ *     with the normal normalize(NA + NB) (AngleTerm 1 if that is short): a line keeps its level until the lines of its
+ *     scan crowd closer than its own width,
  *   Color.a = PointColor.a * lerp(1, AlphaFloor, Age / FadeDuration) (the points' alpha: fade and ClearScans fade-out),
  *   DynamicMaterialParameter.x = User.LinkGrowth.
  * The sprite renderer uses CustomAlignment and FaceCamera: the quad contains the segment and turns about it toward the
@@ -224,10 +240,12 @@
  * 1 < Depth < MaxRange and Depth < d - OcclusionTolerance: the capture saw a surface in front of it. Points with
  * OcclusionTolerance < 0 skip the test. (Points outside the coverage of an occluding source are already removed on the
  * CPU, so u', v' are in [-1, 1] whenever the test runs.) The particle stores LidarSurfacePosition = Position = P,
- * LidarNormal = 0 and a raw depth of d + SurfaceBias, so SampleDepth = d and the update's depth term is exactly 1
- * from the scan's own pose, as for captured points.
+ * LidarNormal = 0 and a raw depth of d + SurfaceBias, so SampleDepth = d and the update's depth term is 1 from the
+ * scan's own pose, as for captured points.
  * Update: as above, except
- *   rgb   = InjectedColors[i].rgb * InjectedIntensity * clamp(compensation, DensityBoostMin, DensityBoostMax),
+ *   rgb   = InjectedColors[i].rgb * InjectedIntensity * DepthTerm, with Thin = 1 (the near thinning is a capture-sampling
+ *           rule): the spacing of a capture sample at the point's depth, whatever the source's own point density, and an
+ *           AngleTerm of 1 (no normal),
  *   alpha = InjectedColors[i].a * FadeOutAlpha * lerp(1, lerp(1, AlphaFloor, Age / FadeDuration), FadeWeight)
  *           * TransientAlpha,
  *   TransientAlpha = saturate(1 - (ScanRealAge - Hold) / max(Vanish, 0.001))  if Hold >= 0     (Transient),

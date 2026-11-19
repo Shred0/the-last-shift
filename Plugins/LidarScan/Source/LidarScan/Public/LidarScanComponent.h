@@ -395,20 +395,27 @@ public:
 	FLinearColor PointColor = FLinearColor(0.4f, 0.85f, 1.f, 1.f);
 
 	/**
-	 * Emissive multiplier applied to PointColor; 1 = the point material's nominal brightness. Kept low so that the
-	 * density compensation can brighten points (up to DensityBoostMax) before the tonemapper turns them white.
+	 * Emissive multiplier applied to PointColor; 1 = the point material's nominal brightness: the level of one point
+	 * seen on its own, at any distance. Kept low so that the angle compensation can brighten points (up to
+	 * DensityBoostMax) before the tonemapper turns them white.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "4.0", UIMin = "0.0", UIMax = "4.0"))
 	float PointIntensity = 0.3f;
 
 	/**
-	 * View-relative density compensation. Every point is the same size on screen, so the perceived brightness of a
-	 * surface is its point density on screen, which grows as (ViewDepth / SampleDepth)^2 when a scan is seen from
-	 * farther than it was taken from (and shrinks when seen from closer). Each point's intensity is scaled every
-	 * frame by clamp(pow(SampleDepth / ViewDepth, DensityCompensation), DensityBoostMin, DensityBoostMax), where
-	 * SampleDepth is the point's depth along the capture's forward axis and ViewDepth its depth along the current
-	 * camera's forward axis. From the scan's own pose the factor is 1 everywhere. 2 cancels the density change,
-	 * lower values only soften it; 0 = off (every point at PointIntensity).
+	 * Density compensation by on-screen crowding. Every point is the same size on screen, so a point reads the same at
+	 * any distance as long as it stands apart from its neighbours; once the points of a scan merge on screen, the surface
+	 * would turn into a bright sheet. Each point's intensity is scaled every frame by
+	 * clamp(pow(Spacing / PointPixelSize, DensityCompensation), DensityBoostMin, 1), where Spacing is the on-screen
+	 * distance between neighbouring samples of its scan: the width of one capture texel at the point's depth along the
+	 * capture's forward axis (SampleDepth * 2 tan(HFOV / 2) / capture width), times max(1, NearThinningDistance /
+	 * SampleDepth) for captured points (the thinning spreads them), seen from the point's depth along the current
+	 * camera's forward axis. While the points are separate dots (Spacing >= PointPixelSize) each keeps its full level;
+	 * once they merge, the surface stays at the level of one dot (2: the factor follows the points' on-screen density).
+	 * From the scan's own pose a capture texel is (viewport width / capture width) x (tan(capture HFOV / 2) / tan(view
+	 * HFOV / 2)) pixels wide on screen, wider than a point at the usual sizes, so the factor there is 1 (for a 256 capture
+	 * on a 1920 viewport, 7.5 pixels against PointPixelSize 3.5). Each scan is dimmed by its own spacing
+	 * only: several scans of one surface add up. 0 = off (every point at PointIntensity).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "3.0", UIMin = "0.0", UIMax = "3.0"))
 	float DensityCompensation = 2.f;
@@ -419,18 +426,18 @@ public:
 	 * more obliquely than they were sampled crowd together (and spread out when seen more head-on). Each point's
 	 * intensity is also scaled by pow(max(cos ViewAngle, e) / max(cos CaptureAngle, e), AngleCompensation), with the
 	 * surface normal reconstructed from the depth capture when the scan is taken. Both factors go through the same
-	 * DensityBoostMin / DensityBoostMax clamp. From the scan's own pose the term is 1. Samples on a depth
+	 * DensityBoostMin / DensityBoostMax clamp (the depth term alone never exceeds 1). From the scan's own pose the term is 1. Samples on a depth
 	 * discontinuity (no reliable neighbour) take the capture ray as their normal; points that carry no normal at all
 	 * (injected points) keep a term of 1. 1 cancels the change, lower values only soften it; 0 = off (depth term only).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
 	float AngleCompensation = 1.f;
 
-	/** Lower clamp of the density compensation factor: how far points seen from farther or more obliquely than they were taken can dim. */
+	/** Lower clamp of the density compensation factor: how far points crowded on screen, or seen more obliquely than they were taken, can dim. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "0.01", ClampMax = "1.0", UIMin = "0.01", UIMax = "1.0"))
 	float DensityBoostMin = 0.02f;
 
-	/** Upper clamp of the density compensation factor: how far points seen from closer or more head-on than they were taken can brighten. */
+	/** Upper clamp of the density compensation factor: how far points seen more head-on than they were taken can brighten (the depth term never brightens). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Points", meta = (ClampMin = "1.0", ClampMax = "16.0", UIMin = "1.0", UIMax = "16.0"))
 	float DensityBoostMax = 4.f;
 
@@ -520,7 +527,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0.5", ClampMax = "8.0", UIMin = "0.5", UIMax = "8.0"))
 	float LinePixelWidth = 1.5f;
 
-	/** Brightness of a line as a factor of the brightness of its points (same colour, compensation and fade). Live. */
+	/**
+	 * Brightness of a line as a factor of the brightness of its points (same colour, angle compensation and fade). Instead
+	 * of the points' depth term a line takes min(1, Spacing / LinePixelWidth), Spacing being the points' on-screen spacing
+	 * at the line's middle: a line keeps its level at any distance until the lines of its scan crowd on screen. Live.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0.0", ClampMax = "4.0", UIMin = "0.0", UIMax = "4.0"))
 	float LineIntensity = 0.5f;
 
