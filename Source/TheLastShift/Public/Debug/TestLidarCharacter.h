@@ -13,6 +13,7 @@ class UInputMappingContext;
 class AResidue;
 class ULidarScanComponent;
 class UResidueCollectCueWidget;
+class UFlashlightHintWidget;
 class UInteractPromptWidget;
 class UScanCueWidget;
 class UScanDirectorComponent;
@@ -26,7 +27,8 @@ struct FInputActionValue;
  * Test harness pawn for the LidarScan spike (TestLidar map only).
  * First-person movement, toggleable flashlight, time stop toggle, scan requests through the scan director, the
  * scan-ready cue, and Interact: held near an Available residue while Stopped it collects (with the collect cue),
- * pressed near a power terminal it activates it; the Interact prompt shows its key where it applies. Input assets and
+ * pressed near a power terminal it activates it; the Interact prompt shows its key where it applies; the flashlight hint
+ * shows the Flashlight key when asked for (ShowFlashlightHint, the arrival only) until the flashlight is on. Input assets and
  * the cue widget class are assigned in BP_TestPawn. Carries the home AI's text channel (TextChannel, driven only by
  * HomeAI) and shows it with the text channel widget.
  */
@@ -47,6 +49,17 @@ public:
 	/** The flashlight is lit. */
 	UFUNCTION(BlueprintPure, Category = "Test")
 	bool IsFlashlightOn() const;
+
+	/**
+	 * Starts the flashlight hint (UFlashlightHintWidget::Activate): the suit shows the Flashlight key until the flashlight
+	 * is on. The arrival's hatch asks for it. False without a hint widget.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Test|UI")
+	bool ShowFlashlightHint();
+
+	/** The flashlight hint widget (null before the HUD is created or without a class). */
+	UFUNCTION(BlueprintPure, Category = "Test|UI")
+	UFlashlightHintWidget* GetFlashlightHint() const { return FlashlightHint; }
 
 protected:
 	virtual void BeginPlay() override;
@@ -98,6 +111,13 @@ protected:
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
 	TObjectPtr<UInteractPromptWidget> InteractPrompt;
+
+	/** Flashlight hint (the key of the Flashlight action), hidden until ShowFlashlightHint. None = no hint. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Test|UI")
+	TSubclassOf<UFlashlightHintWidget> FlashlightHintClass;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Test|UI")
+	TObjectPtr<UFlashlightHintWidget> FlashlightHint;
 
 	/** The home AI's text in a lower corner, created for the local player. None = not shown. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Test|UI")

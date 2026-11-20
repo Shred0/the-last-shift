@@ -11,7 +11,9 @@
 #include "GameFramework/PlayerController.h"
 #include "Materials/MaterialInterface.h"
 #include "Narrative/NarrativeRows.h"
+#include "Debug/TestLidarCharacter.h"
 #include "Prologue/PrologueLineTrigger.h"
+#include "Run/HomeAIComponent.h"
 #include "Run/TheLastShiftSettings.h"
 #include "TextChannel/TextChannelComponent.h"
 #include "TheLastShift.h"
@@ -96,6 +98,9 @@ void APrologueHatch::BeginPlay()
 	State = EPrologueHatchState::Open;
 	ClosingSeconds = 0.0;
 	DoorDelaySeconds = 0.0;
+	bLightAsked = bLightRowSeen = bLightDone = bHatchAsked = false;
+	LastLightRow = NAME_None;
+	SteppedOutRun = LightDoneRun = -1.0;
 	ApplyPanel();
 	UE_LOG(LogTheLastShift, Log, TEXT("%s: open, closes in %.2f s of Normal time once the player has left the ship; exit door %s, %.2f s after the Door lines."), *GetName(),
 		UTheLastShiftSettings::Get()->GetHatchCloseSeconds(), *GetNameSafe(ExitDoor), UTheLastShiftSettings::Get()->GetExitDoorDelaySeconds());
@@ -147,6 +152,57 @@ bool APrologueHatch::IsChannelTypedOut() const
 	return !Channel || Channel->IsTypedOut();
 }
 
+void APrologueHatch::StartLightLines()
+{
+	const double Now = TimeState ? TimeState->GetRunSeconds() : 0.0;
+	SteppedOutRun = Now;
+	bLightAsked = true;
+	const TArray<FName> Rows = UHomeAIComponent::FindPrologueRows(UTheLastShiftSettings::Get()->LoadPrologueTable(), PrologueGroups::Light);
+	LastLightRow = Rows.Num() > 0 ? Rows.Last() : NAME_None;
+	APrologueLineTrigger::Say(this, PrologueGroups::Light);
+
+	const APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	const UTextChannelComponent* Channel = Pawn ? Pawn->FindComponentByClass<UTextChannelComponent>() : nullptr;
+	// The home AI pushes the rows within Say: nothing in the channel now means nothing was said.
+	if (LastLightRow.IsNone() || !Channel || !Channel->IsBusy())
+	{
+		FinishLightLines(Now, LastLightRow.IsNone() ? TEXT("the Light group has no row") : TEXT("no Light line was said"));
+	}
+}
+
+void APrologueHatch::UpdateLightLines(double Now)
+{
+	if (!bLightAsked || bLightDone)
+	{
+		return;
+	}
+	const APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	const APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	const UTextChannelComponent* Channel = Pawn ? Pawn->FindComponentByClass<UTextChannelComponent>() : nullptr;
+	if (!Channel)
+	{
+		FinishLightLines(Now, TEXT("no text channel"));
+		return;
+	}
+	bLightRowSeen |= Channel->GetCurrentRowName() == LastLightRow;
+	if (bLightRowSeen && Channel->IsTypedOut())
+	{
+		FinishLightLines(Now, *FString::Printf(TEXT("%s typed out"), *LastLightRow.ToString()));
+	}
+}
+
+void APrologueHatch::FinishLightLines(double Now, const TCHAR* Why)
+{
+	bLightDone = true;
+	LightDoneRun = Now;
+	const APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	ATestLidarCharacter* Character = PC ? Cast<ATestLidarCharacter>(PC->GetPawn()) : nullptr;
+	const bool bHint = Character && Character->ShowFlashlightHint();
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: the Light lines are done (%s, %.2f s of the run's clock after stepping out): flashlight hint %s."), *GetName(), Why,
+		Now - SteppedOutRun, bHint ? TEXT("asked for") : TEXT("not available"));
+}
+
 void APrologueHatch::SetState(EPrologueHatchState NewState)
 {
 	if (State == NewState)
@@ -167,6 +223,7 @@ void APrologueHatch::Tick(float DeltaSeconds)
 	const double Step = LastRunSeconds >= 0.0 ? FMath::Max(Now - LastRunSeconds, 0.0) : 0.0;
 	LastRunSeconds = Now;
 	const bool bStill = TimeState && (TimeState->IsStopped() || TimeState->IsRunFrozen());
+	UpdateLightLines(Now);
 
 	switch (State)
 	{
@@ -185,6 +242,7 @@ void APrologueHatch::Tick(float DeltaSeconds)
 			UE_LOG(LogTheLastShift, Log, TEXT("%s: the player has left the ship."), *GetName());
 			ClosingSeconds = 0.0;
 			SetState(EPrologueHatchState::Closing);
+			StartLightLines();
 		}
 		break;
 	}
@@ -197,11 +255,16 @@ void APrologueHatch::Tick(float DeltaSeconds)
 		if (ClosingSeconds >= UTheLastShiftSettings::Get()->GetHatchCloseSeconds())
 		{
 			SetState(EPrologueHatchState::Closed);
-			APrologueLineTrigger::Say(this, PrologueGroups::Hatch);
 		}
 		break;
 	case EPrologueHatchState::Closed:
-		if (IsChannelTypedOut())
+		// The Hatch lines come after the Light lines.
+		if (!bHatchAsked && bLightDone)
+		{
+			bHatchAsked = true;
+			APrologueLineTrigger::Say(this, PrologueGroups::Hatch);
+		}
+		else if (bHatchAsked && IsChannelTypedOut())
 		{
 			SetState(EPrologueHatchState::DoorLines);
 			APrologueLineTrigger::Say(this, PrologueGroups::Door);

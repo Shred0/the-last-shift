@@ -70,6 +70,7 @@ void UHomeAIComponent::BeginPlay()
 	if (URunSubsystem* Run = URunSubsystem::Get(this))
 	{
 		Run->OnAreaEntered.AddUniqueDynamic(this, &UHomeAIComponent::HandleAreaEntered);
+		Run->OnEntityFound.AddUniqueDynamic(this, &UHomeAIComponent::HandleEntityFound);
 	}
 	if (UEnergySubsystem* Energy = UEnergySubsystem::Get(this))
 	{
@@ -114,6 +115,7 @@ void UHomeAIComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (URunSubsystem* Run = URunSubsystem::Get(this))
 	{
 		Run->OnAreaEntered.RemoveDynamic(this, &UHomeAIComponent::HandleAreaEntered);
+		Run->OnEntityFound.RemoveDynamic(this, &UHomeAIComponent::HandleEntityFound);
 	}
 	if (UEnergySubsystem* Energy = UEnergySubsystem::Get(this))
 	{
@@ -131,6 +133,7 @@ void UHomeAIComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	// The pause menu and the map transitions have no event the channel needs to react to within the frame.
 	UpdateSuspension();
+	PushEntityFound();
 }
 
 void UHomeAIComponent::UpdateSuspension()
@@ -235,6 +238,32 @@ void UHomeAIComponent::HandleSessionBanked(int32 BankedAmount)
 	UpdateSuspension();
 	const int32 Queued = Text->PushSequence(ETextTrigger::FirstEnergy, GetAct(), MakeContext());
 	UE_LOG(LogTextChannel, Log, TEXT("%s: first energy banked in act %d (%d): %d messages queued."), *GetName(), GetAct(), BankedAmount, Queued);
+}
+
+void UHomeAIComponent::HandleEntityFound()
+{
+	// Found inside the Stop's exit, before or after the time-state listeners that push the return message: wait a frame.
+	bEntityFoundPending = true;
+	UE_LOG(LogTextChannel, Log, TEXT("%s: the entity is found in act %d: its message follows on the next frame."), *GetName(), GetAct());
+}
+
+void UHomeAIComponent::PushEntityFound()
+{
+	if (!bEntityFoundPending)
+	{
+		return;
+	}
+	bEntityFoundPending = false;
+	UTextChannelComponent* Text = Channel.Get();
+	const UHomeStateSubsystem* Home = UHomeStateSubsystem::Get(this);
+	if (!Text || (Home && Home->IsRunLost()))
+	{
+		UE_LOG(LogTextChannel, Log, TEXT("%s: entity found: nothing said (%s)."), *GetName(), Text ? TEXT("the run is lost") : TEXT("no channel"));
+		return;
+	}
+	const bool bPushed = Text->PushTrigger(ETextTrigger::EntityFound, GetAct(), MakeContext());
+	UE_LOG(LogTextChannel, Log, TEXT("%s: entity found in act %d: %s (%d queued before it)."), *GetName(), GetAct(),
+		bPushed ? TEXT("its message queued") : TEXT("no EntityFound row"), Text->GetQueuedCount() - (bPushed ? 1 : 0));
 }
 
 void UHomeAIComponent::HandleTerminalActivated(APowerTerminal* Terminal, int32 Cost)

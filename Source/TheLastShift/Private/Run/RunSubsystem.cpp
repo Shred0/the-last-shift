@@ -91,7 +91,7 @@ bool URunSubsystem::StartNewGame()
 	}
 	// The prologue's maps are outside the run: nothing is saved there; the run starts for real at the arrival's exit.
 	ResetRunState(TEXT("new game, prologue"));
-	UE_LOG(LogRun, Log, TEXT("New game: battery 1, home 0 s, banked 0, archive empty in memory; save kept (%d snapshots); to the prologue's home."), Snapshots.Num());
+	UE_LOG(LogRun, Log, TEXT("New game: battery 1, home 0 s, banked 0, archive empty, entity not found in memory; save kept (%d snapshots); to the prologue's home."), Snapshots.Num());
 	return TravelToLevel(Settings->PrologueHomeMap, false, FText::GetEmpty(), 0.f, TEXT("new game -> prologue home"));
 }
 
@@ -249,12 +249,13 @@ void URunSubsystem::TakeSnapshot(int32 Act)
 	Snapshot.HomeSecondsElapsed = Home ? Home->GetHomeSecondsElapsed() : 0.0;
 	Snapshot.BankedEnergy = Energy ? Energy->GetBankedEnergy() : 0;
 	Snapshot.Archive = Archive;
+	Snapshot.bEntityFound = bEntityFound;
 
 	const int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& Old) { return Old.ActIndex >= Act; });
 	Snapshots.Add(Snapshot);
-	UE_LOG(LogRun, Log, TEXT("Snapshot: act %d, battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts (%d replaced or discarded, %d snapshots)."),
+	UE_LOG(LogRun, Log, TEXT("Snapshot: act %d, battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s (%d replaced or discarded, %d snapshots)."),
 		Act, Snapshot.BatteryFraction, Snapshot.HomeSecondsElapsed, Snapshot.BankedEnergy, Snapshot.Archive.LogOrders.Num(), Snapshot.Archive.TwinPartsPlayed,
-		Discarded, Snapshots.Num());
+		Snapshot.bEntityFound ? TEXT("found") : TEXT("not found"), Discarded, Snapshots.Num());
 	WriteSave();
 	OnSnapshotsChanged.Broadcast();
 }
@@ -282,7 +283,8 @@ bool URunSubsystem::LoadSave()
 	{
 		if (const URunSaveGame* Save = Cast<URunSaveGame>(UGameplayStatics::LoadGameFromSlot(SaveSlotName(), 0)))
 		{
-			// Tagged properties: a version 1 file has no archive in its snapshots, which then load with an empty one.
+			// Tagged properties: a version 1 file has no archive in its snapshots, which then load with an empty one; a file
+			// before version 3 has no entity state, which then loads as not found.
 			LoadedSaveVersion = Save->Version;
 			const int32 ActCount = UTheLastShiftSettings::Get()->AreaMaps.Num();
 			for (const FAreaSnapshot& Snapshot : Save->Snapshots)
@@ -355,6 +357,26 @@ void URunSubsystem::ClearArchive()
 	SetArchive(FSuitArchive(), TEXT("cleared"));
 }
 
+// --- The entity ---
+
+bool URunSubsystem::MarkEntityFound(const FString& Why)
+{
+	if (bEntityFound)
+	{
+		return false;
+	}
+	bEntityFound = true;
+	UE_LOG(LogRun, Log, TEXT("Entity found (%s): from the next Stop on its points show in its own colour."), *Why);
+	OnEntityFound.Broadcast();
+	return true;
+}
+
+void URunSubsystem::SetEntityFound(bool bFound, const FString& Why)
+{
+	bEntityFound = bFound;
+	UE_LOG(LogRun, Log, TEXT("Entity (%s): %s."), *Why, bEntityFound ? TEXT("found") : TEXT("not found"));
+}
+
 void URunSubsystem::SetArchive(const FSuitArchive& InArchive, const TCHAR* Why)
 {
 	Archive = InArchive;
@@ -388,7 +410,7 @@ bool URunSubsystem::StartNewRun()
 	}
 	ResetRunState(TEXT("new run"));
 	ClearSave();
-	UE_LOG(LogRun, Log, TEXT("New run: battery 1, home 0 s, banked 0, archive empty, save cleared."));
+	UE_LOG(LogRun, Log, TEXT("New run: battery 1, home 0 s, banked 0, archive empty, entity not found, save cleared."));
 	return TravelToArea(1);
 }
 
@@ -404,6 +426,7 @@ void URunSubsystem::ResetRunState(const TCHAR* Why)
 		Energy->RestoreBankedEnergy(0);
 	}
 	SetArchive(FSuitArchive(), Why);
+	SetEntityFound(false, Why);
 }
 
 bool URunSubsystem::RestartFromAct(int32 Act)
@@ -433,9 +456,11 @@ bool URunSubsystem::RestartFromAct(int32 Act)
 		Energy->RestoreBankedEnergy(Restored.BankedEnergy);
 	}
 	SetArchive(Restored.Archive, *FString::Printf(TEXT("restart from act %d"), Act));
+	SetEntityFound(Restored.bEntityFound, FString::Printf(TEXT("restart from act %d"), Act));
 	const int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& S) { return S.ActIndex > Act; });
-	UE_LOG(LogRun, Log, TEXT("Restart from act %d: battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts; %d later snapshots discarded."),
-		Act, Restored.BatteryFraction, Restored.HomeSecondsElapsed, Restored.BankedEnergy, Restored.Archive.LogOrders.Num(), Restored.Archive.TwinPartsPlayed, Discarded);
+	UE_LOG(LogRun, Log, TEXT("Restart from act %d: battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s; %d later snapshots discarded."),
+		Act, Restored.BatteryFraction, Restored.HomeSecondsElapsed, Restored.BankedEnergy, Restored.Archive.LogOrders.Num(), Restored.Archive.TwinPartsPlayed,
+		Restored.bEntityFound ? TEXT("found") : TEXT("not found"), Discarded);
 	WriteSave();
 	OnSnapshotsChanged.Broadcast();
 	return TravelToArea(Act);

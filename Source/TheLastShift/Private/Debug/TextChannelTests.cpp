@@ -727,7 +727,7 @@ namespace NarrativeCsv
 
 	/**
 	 * Every problem of DT_Prologue.csv (empty: the structure is right): it parses, rows <Group>_<order> matching their Group
-	 * and Order columns, every Group one of Wake, Hologram, Hangar, Flight, Hatch and Door, (Group, Order) unique, no line
+	 * and Order columns, every Group one of Wake, Hologram, Hangar, Flight, Light, Hatch and Door, (Group, Order) unique, no line
 	 * break, no empty text.
 	 */
 	static TArray<FString> CheckPrologue(const FString& Csv, const TCHAR* File = TEXT("DT_Prologue.csv"))
@@ -739,7 +739,7 @@ namespace NarrativeCsv
 		{
 			Problems.Add(FString::Printf(TEXT("%s has no rows"), File));
 		}
-		const TSet<FName> Groups = { PrologueGroups::Wake, PrologueGroups::Hologram, PrologueGroups::Hangar, PrologueGroups::Flight, PrologueGroups::Hatch, PrologueGroups::Door };
+		const TSet<FName> Groups = { PrologueGroups::Wake, PrologueGroups::Hologram, PrologueGroups::Hangar, PrologueGroups::Flight, PrologueGroups::Light, PrologueGroups::Hatch, PrologueGroups::Door };
 		const FRegexPattern NamePattern(TEXT("^([A-Za-z]+)_([0-9]+)$"));
 		TSet<FString> Keys;
 		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
@@ -757,7 +757,7 @@ namespace NarrativeCsv
 			}
 			if (!Groups.Contains(Row.Group))
 			{
-				Problems.Add(FString::Printf(TEXT("%s, row %s: group '%s' is not Wake, Hologram, Hangar, Flight, Hatch or Door"), File, *Name, *Row.Group.ToString()));
+				Problems.Add(FString::Printf(TEXT("%s, row %s: group '%s' is not Wake, Hologram, Hangar, Flight, Light, Hatch or Door"), File, *Name, *Row.Group.ToString()));
 			}
 			const FString Key = FString::Printf(TEXT("%s/%d"), *Row.Group.ToString(), Row.Order);
 			if (Keys.Contains(Key))

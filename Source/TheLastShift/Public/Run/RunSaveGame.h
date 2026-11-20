@@ -48,12 +48,17 @@ struct THELASTSHIFT_API FAreaSnapshot
 	/** The suit's archive on entering the area. A save written before version 2 has none: it loads empty. */
 	UPROPERTY(SaveGame, BlueprintReadOnly, Category = "Run")
 	FSuitArchive Archive;
+
+	/** The entity had been found on entering the area (URunSubsystem::IsEntityFound). A save written before version 3 has none: it loads false. */
+	UPROPERTY(SaveGame, BlueprintReadOnly, Category = "Run")
+	bool bEntityFound = false;
 };
 
 /**
  * The saved run: one snapshot per act reached, in act order. One slot, written by URunSubsystem.
- * Version 1: battery, home time, banked energy. Version 2 (Brief 8): plus the suit's archive. Properties are tagged, so an
- * older file loads with the newer fields at their defaults (an empty archive).
+ * Version 1: battery, home time, banked energy. Version 2 (Brief 8): plus the suit's archive. Version 3 (Brief 17): plus
+ * whether the entity had been found. Properties are tagged, so an older file loads with the newer fields at their
+ * defaults (an empty archive, the entity not found).
  */
 UCLASS()
 class THELASTSHIFT_API URunSaveGame : public USaveGame
@@ -61,7 +66,7 @@ class THELASTSHIFT_API URunSaveGame : public USaveGame
 	GENERATED_BODY()
 
 public:
-	static constexpr int32 CurrentVersion = 2;
+	static constexpr int32 CurrentVersion = 3;
 
 	/**
 	 * The version the file was written with. The default stays 1: a save skips values equal to the class default, so a

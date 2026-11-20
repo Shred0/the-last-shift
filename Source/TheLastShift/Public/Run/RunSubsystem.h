@@ -17,6 +17,7 @@ THELASTSHIFT_API DECLARE_LOG_CATEGORY_EXTERN(LogRun, Log, All);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAreaEntered, int32, ActIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRunSnapshotsChanged);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSuitArchiveChanged);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityFound);
 
 /** One moment of the last travel started by the run: what happened, when, and where the bar and the marker stood after it. */
 USTRUCT(BlueprintType)
@@ -58,6 +59,10 @@ struct THELASTSHIFT_API FTravelStepRecord
  * It is run state like battery, home time and banked energy: it survives map changes, every snapshot carries a copy,
  * restoring a snapshot restores it, a new run empties it. It stores which items, never their text.
  *
+ * Sole owner of whether the entity has been found (IsEntityFound): false in a new run, set once, at the end of the first
+ * Stop during which a scan kept at least one of the entity's points (AEntity, MarkEntityFound). It is run state like the
+ * archive: it survives map changes, every snapshot carries it, restoring a snapshot restores it, a new run clears it.
+ *
  * On UHomeStateSubsystem::OnRunLost it shows the loss screen (URunActListWidget, RunLost): game input off, the pause
  * menu refused, UI input on the screen.
  *
@@ -92,8 +97,9 @@ public:
 
 	/**
 	 * "New game" after the text scene. With the prologue's maps on (UTheLastShiftSettings::ArePrologueMapsOn): the run's
-	 * state in memory becomes a new run's (battery full, no home time, no banked energy, an empty archive) so the home AI
-	 * speaks as at the start of a run, the save is left as it is, and the travel goes to the prologue's home map. Off:
+	 * state in memory becomes a new run's (battery full, no home time, no banked energy, an empty archive, the entity not
+	 * found) so the home AI speaks as at the start of a run, the save is left as it is, and the travel goes to the
+	 * prologue's home map. Off:
 	 * StartNewRun. Refused while time is Stopped or while a transition runs.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Run")
@@ -192,6 +198,27 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Run|Archive")
 	FOnSuitArchiveChanged OnArchiveChanged;
 
+	// --- The entity ---
+
+	/** The entity has been found in this run: its points show in ScanColors.Entity, before that in ScanColors.Scan. */
+	UFUNCTION(BlueprintPure, Category = "Run|Entity")
+	bool IsEntityFound() const { return bEntityFound; }
+
+	/**
+	 * The entity was found now (the end of a Stop during which a scan kept one of its points). True, with OnEntityFound,
+	 * only the first time in a run; false when it was already found.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Run|Entity")
+	bool MarkEntityFound(const FString& Why);
+
+	/** Sets the state without OnEntityFound (debug: tls.Run.EntityFound; restoring a snapshot does the same). */
+	UFUNCTION(BlueprintCallable, Category = "Run|Entity")
+	void SetEntityFound(bool bFound, const FString& Why);
+
+	/** Once in a run, when the entity becomes found (MarkEntityFound). The home AI says its message on it. */
+	UPROPERTY(BlueprintAssignable, Category = "Run|Entity")
+	FOnEntityFound OnEntityFound;
+
 	/** Version of the save file read last by LoadSave (0 when there was none). */
 	int32 GetLoadedSaveVersion() const { return LoadedSaveVersion; }
 
@@ -230,7 +257,7 @@ private:
 	 */
 	bool TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FText& Label, float ReadingSeconds, const FString& What);
 
-	/** Battery full, no home time, no banked energy, an empty archive (the save is not touched). */
+	/** Battery full, no home time, no banked energy, an empty archive, the entity not found (the save is not touched). */
 	void ResetRunState(const TCHAR* Why);
 
 	UFUNCTION()
@@ -253,6 +280,7 @@ private:
 
 	TArray<FAreaSnapshot> Snapshots;
 	FSuitArchive Archive;
+	bool bEntityFound = false;
 	int32 LoadedSaveVersion = 0;
 	int32 SaveWrites = 0;
 	bool bLastSaveOk = false;

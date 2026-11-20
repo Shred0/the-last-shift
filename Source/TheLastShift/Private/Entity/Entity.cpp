@@ -10,6 +10,7 @@
 #include "GameFramework/PlayerController.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
+#include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "Time/TimeStateSubsystem.h"
@@ -159,6 +160,8 @@ void AEntity::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, E
 	{
 		bExitPending = true;
 		bLastExitGraze = false;
+		bShownThisStop = false;
+		bLastStopShown = false;
 		if (State == EEntityState::Awake)
 		{
 			Manifest(GetSpawnDistanceForNextStop(), TEXT("stop"));
@@ -181,6 +184,16 @@ void AEntity::RecordStopExit(EStopExitReason Reason)
 	}
 	bExitPending = false;
 	bLastExitGraze = false;
+	// Found at the end of the first Stop in which a scan kept one of its points, however the Stop ends.
+	bLastStopShown = bShownThisStop;
+	if (bShownThisStop)
+	{
+		bShownThisStop = false;
+		if (URunSubsystem* Run = URunSubsystem::Get(this))
+		{
+			Run->MarkEntityFound(FString::Printf(TEXT("%s: a scan kept its points in the Stop that ended %s"), *GetName(), LexToString(Reason)));
+		}
+	}
 	if (!bManifested)
 	{
 		return;
@@ -903,12 +916,73 @@ void AEntity::GatherLidarPoints_Implementation(const FLidarScanContext& Context,
 		SegmentStart += Length;
 	}
 	LastGatheredTrailPoints = OutPoints.Num() - FirstTrail;
+
+	// Until it is found: did this scan keep one of its points? Once one has, the Stop has shown it.
+	if (!bShownThisStop && !IsFound())
+	{
+		const double Start = FPlatformTime::Seconds();
+		int32 Traces = 0;
+		bLastKeptCheckResult = KeepsAnyPoint(Context, OutPoints, FirstFigure, Traces);
+		LastKeptCheckMs = (FPlatformTime::Seconds() - Start) * 1000.0;
+		LastKeptCheckScan = Context.ScanIndex;
+		LastKeptCheckTraces = Traces;
+		bShownThisStop = bLastKeptCheckResult;
+		UE_LOG(LogEntity, Log, TEXT("%s: scan %d %s its points (%d traces, %.3f ms)."), *GetName(), Context.ScanIndex,
+			bLastKeptCheckResult ? TEXT("keeps") : TEXT("keeps none of"), Traces, LastKeptCheckMs);
+	}
+}
+
+bool AEntity::KeepsAnyPoint(const FLidarScanContext& Context, const TArray<FLidarInjectedPoint>& Points, int32 First, int32& OutTraces) const
+{
+	OutTraces = 0;
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(EntityScanKept), false, this);
+	if (const APawn* Pawn = GetPlayerPawn())
+	{
+		Params.AddIgnoredActor(Pawn);
+	}
+	const float Tolerance = FMath::Clamp(OcclusionTolerance, 0.f, 200.f);
+	for (int32 Index = FMath::Max(First, 0); Index < Points.Num(); ++Index)
+	{
+		const FVector& Point = Points[Index].WorldPosition;
+		double Depth = 0.0;
+		// The lidar drops what lies outside the capture's coverage (bOccludeByCapture); the rest is depth tested.
+		if (!Context.IsInCoverage(Point, Depth))
+		{
+			continue;
+		}
+		++OutTraces;
+		FHitResult Hit;
+		const float Length = static_cast<float>(FVector::Dist(Context.CaptureOrigin, Point));
+		if (!World->LineTraceSingleByChannel(Hit, Context.CaptureOrigin, Point, ECC_Visibility, Params) || Hit.Distance >= Length - Tolerance)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool AEntity::IsFound() const
+{
+	const URunSubsystem* Run = URunSubsystem::Get(this);
+	return Run && Run->IsEntityFound();
+}
+
+FLinearColor AEntity::GetPointColor() const
+{
+	const FScanColors& Colors = UTheLastShiftSettings::GetScanColors();
+	return IsFound() ? Colors.Entity : Colors.Scan;
 }
 
 FLidarSourceSettings AEntity::GetLidarSourceSettings_Implementation() const
 {
 	FLidarSourceSettings Settings;
-	Settings.Color = UTheLastShiftSettings::GetScanColors().Entity;
+	// The scan's colour until it is found, its own after (the two owners of ScanColors).
+	Settings.Color = GetPointColor();
 	Settings.IntensityMultiplier = IntensityMultiplier;
 	// Shown by the latest scan only: full until the next scan starts, then gone, so there is one snapshot at most.
 	Settings.FadeMode = ELidarFadeMode::UntilNextScan;

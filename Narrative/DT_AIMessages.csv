@@ -19,3 +19,7 @@ A4_JumpReturn_1,JumpReturn,4,1,"[PLACEHOLDER] Act 4 return one: the stop took {s
 A4_JumpReturn_2,JumpReturn,4,2,"[PLACEHOLDER] Act 4 return two: a jump of {jump} after {still}, {home} in total, {battery} left.",,,
 A4_AreaEntry_1,AreaEntry,4,1,"[PLACEHOLDER] Act 4 entry line: the home total is {home} and the battery is {battery}.",,,
 A4_Spend_1,Spend,4,1,"[PLACEHOLDER] Act 4 spend line: an energy unit went into the device, the battery is {battery}.",,,
+A1_EntityFound_1,EntityFound,1,1,"[PLACEHOLDER] Act 1 entity found line, after the return message: the battery is {battery}.",,,
+A2_EntityFound_1,EntityFound,2,1,"[PLACEHOLDER] Act 2 entity found line, after the return message: the battery is {battery}.",,,
+A3_EntityFound_1,EntityFound,3,1,"[PLACEHOLDER] Act 3 entity found line, after the return message: the battery is {battery}.",,,
+A4_EntityFound_1,EntityFound,4,1,"[PLACEHOLDER] Act 4 entity found line, after the return message: the battery is {battery}.",,,

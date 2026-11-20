@@ -20,7 +20,7 @@ enum class EPrologueHatchState : uint8
 	Open,
 	/** Closing over HatchCloseSeconds of Normal time. */
 	Closing,
-	/** Closed; the home AI's Hatch lines are being said. */
+	/** Closed; the home AI's Hatch lines are being said (once the Light lines are typed out). */
 	Closed,
 	/** The Hatch lines typed out; the home AI's Door lines, which announce the exit door, are being said. */
 	DoorLines,
@@ -31,11 +31,13 @@ enum class EPrologueHatchState : uint8
 };
 
 /**
- * The hatch of the twin structure's arrival hangar, in the hatch wall behind the ship, and what follows it. It starts to
- * close when the player's pawn, which begins inside the ship (ShipVolume), first stands outside it, and closes with one
+ * The hatch of the twin structure's arrival hangar, in the hatch wall behind the ship, and what follows it. When the
+ * player's pawn, which begins inside the ship (ShipVolume), first stands outside it, the home AI is asked for the Light
+ * lines (the flashlight); once they are typed out (or at once when the group has no row) the pawn shows the flashlight
+ * hint (ATestLidarCharacter::ShowFlashlightHint). At the same moment the hatch starts to close, and it closes with one
  * movement (the panel slides down in the wall's opening) over UTheLastShiftSettings::HatchCloseSeconds of the run's
- * clock in Normal time: it stands still while time is Stopped and behind the pause menu. Once closed it asks the home AI
- * for the Hatch lines; once they are said it asks for the Door lines; once those are said it waits
+ * clock in Normal time: it stands still while time is Stopped and behind the pause menu. Once closed, and once the Light
+ * lines are typed out, it asks the home AI for the Hatch lines; once they are said it asks for the Door lines; once those are said it waits
  * UTheLastShiftSettings::ExitDoorDelaySeconds of Normal time (still while Stopped and behind the pause menu, like the
  * closing) and opens ExitDoor (powered, untimed: it stays open). A group is said when the pawn's text channel has typed
  * out everything pushed to it (UTextChannelComponent::IsTypedOut: the last row shows its last character), not when it
@@ -91,6 +93,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Hatch", meta = (Units = "s"))
 	float GetDoorDelaySeconds() const { return static_cast<float>(DoorDelaySeconds); }
 
+	/** The run's clock when the player first stood outside the ship (-1 before). */
+	UFUNCTION(BlueprintPure, Category = "Hatch", meta = (Units = "s"))
+	float GetSteppedOutRunSeconds() const { return static_cast<float>(SteppedOutRun); }
+
+	/** The Light lines are typed out (or had no row) and the flashlight hint was asked for. */
+	UFUNCTION(BlueprintPure, Category = "Hatch")
+	bool AreLightLinesDone() const { return bLightDone; }
+
+	/** The run's clock when the Light lines were done (-1 before). */
+	UFUNCTION(BlueprintPure, Category = "Hatch", meta = (Units = "s"))
+	float GetLightDoneRunSeconds() const { return static_cast<float>(LightDoneRun); }
+
 	/** The pawn's location is inside ShipVolume. */
 	UFUNCTION(BlueprintPure, Category = "Hatch")
 	bool IsInsideShip(const AActor* Actor) const;
@@ -112,6 +126,11 @@ private:
 	void ApplyPanel();
 	/** The pawn's text channel has typed out everything pushed to it (no channel: true). */
 	bool IsChannelTypedOut() const;
+	/** The player has stepped out: the Light lines are asked for. */
+	void StartLightLines();
+	/** Watches the Light lines until their last row is typed out, then asks for the flashlight hint. */
+	void UpdateLightLines(double Now);
+	void FinishLightLines(double Now, const TCHAR* Why);
 
 	UPROPERTY(VisibleAnywhere, Category = "Hatch")
 	TObjectPtr<UStaticMeshComponent> Panel;
@@ -131,4 +150,12 @@ private:
 	double ClosingSeconds = 0.0;
 	double DoorDelaySeconds = 0.0;
 	double LastRunSeconds = -1.0;
+
+	bool bLightAsked = false;
+	bool bLightRowSeen = false;
+	bool bLightDone = false;
+	bool bHatchAsked = false;
+	FName LastLightRow;
+	double SteppedOutRun = -1.0;
+	double LightDoneRun = -1.0;
 };

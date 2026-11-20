@@ -38,6 +38,7 @@
 #include "InputKeyEventArgs.h"
 #include "LidarScanComponent.h"
 #include "Residue/Residue.h"
+#include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanCueWidget.h"
 #include "Scan/ScanDirectorComponent.h"
@@ -982,13 +983,25 @@ namespace ReadabilityDebug
 				ResiduesOk += SameColor(ILidarPointSource::Execute_GetLidarSourceSettings(R).Color, C.Residue) ? 1 : 0;
 			}
 			Check(Residues == ResiduesOk, FString::Printf(TEXT("colors: %d of %d residues use the new residue colour"), ResiduesOk, Residues));
+			// Brief 17: the entity reads the scan's colour until it is found, its own after: both new values, from their owner.
 			int32 Entities = 0, EntitiesOk = 0;
+			URunSubsystem* Run = URunSubsystem::Get(W());
+			const bool bFoundBefore = Run && Run->IsEntityFound();
 			for (AEntity* E : Actors<AEntity>())
 			{
 				++Entities;
-				EntitiesOk += SameColor(ILidarPointSource::Execute_GetLidarSourceSettings(E).Color, C.Entity) ? 1 : 0;
+				bool bOk = Run != nullptr;
+				if (Run)
+				{
+					Run->SetEntityFound(false, TEXT("tls.ReadabilityTest colors"));
+					bOk &= SameColor(ILidarPointSource::Execute_GetLidarSourceSettings(E).Color, C.Scan);
+					Run->SetEntityFound(true, TEXT("tls.ReadabilityTest colors"));
+					bOk &= SameColor(ILidarPointSource::Execute_GetLidarSourceSettings(E).Color, C.Entity);
+					Run->SetEntityFound(bFoundBefore, TEXT("tls.ReadabilityTest colors"));
+				}
+				EntitiesOk += bOk ? 1 : 0;
 			}
-			Check(Entities == EntitiesOk, FString::Printf(TEXT("colors: %d of %d entities use the new entity colour"), EntitiesOk, Entities));
+			Check(Entities == EntitiesOk, FString::Printf(TEXT("colors: %d of %d entities use the new scan colour before they are found and the new entity colour after"), EntitiesOk, Entities));
 			const int32 Channel = UTheLastShiftSettings::GetInteractableScanChannel();
 			Check(L && L->AreChannelsActive() && SameColor(L->GetChannel(Channel).Color, C.Interactable),
 				FString::Printf(TEXT("colors: the lidar's channel %d (the moved InteractableScanChannel) has the new interactable colour (%s)"), Channel, L ? *L->GetChannel(Channel).Color.ToString() : TEXT("-")));

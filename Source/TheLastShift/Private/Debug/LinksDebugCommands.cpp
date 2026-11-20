@@ -30,6 +30,7 @@
 #include "Misc/App.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "TheLastShift.h"
@@ -2500,6 +2501,11 @@ namespace LinksDebug
 		// 3, 10 and 30 m. It stays awake for the rest of the session: run this scenario last.
 		S.Add(Do(TEXT("injected: the entity, Resume, pose"), []()
 		{
+			// Its points are measured by the entity's own colour (Brief 17: the scan's until it is found): found from here on.
+			if (URunSubsystem* Run = URunSubsystem::Get(W()))
+			{
+				Run->SetEntityFound(true, TEXT("tls.Links.DistanceCheck injected"));
+			}
 			ResumeTime();
 			KeepEntityDormant();
 			StandAt(Flat(GInj.ResidueAt) - GHall.Forward * 1500.0, GInj.ResidueAt);

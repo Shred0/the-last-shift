@@ -62,6 +62,7 @@ namespace NarrativeFixture
 			}
 			AddMessage(Table, ETextTrigger::AreaEntry, Act, 1, FString::Printf(TEXT("Fixture entry line of act %d: {home} at home, battery {battery}, a neutral test."), Act));
 			AddMessage(Table, ETextTrigger::Spend, Act, 1, FString::Printf(TEXT("Fixture spend line of act %d: one unit spent at a terminal, battery {battery}."), Act));
+			AddMessage(Table, ETextTrigger::EntityFound, Act, 1, FString::Printf(TEXT("Fixture entity found line of act %d: a neutral sentence, battery {battery}."), Act));
 		}
 		return Table;
 	}
@@ -176,6 +177,8 @@ namespace NarrativeFixture
 		Add(PrologueGroups::Hangar, 1);
 		Add(PrologueGroups::Hatch, 1);
 		Add(PrologueGroups::Hatch, 2);
+		Add(PrologueGroups::Light, 2);
+		Add(PrologueGroups::Light, 1);
 		return Table;
 	}
 

@@ -25,6 +25,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Residue/Residue.h"
+#include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "TheLastShift.h"
@@ -789,8 +790,19 @@ namespace OcclusionDebug
 		G = FState();
 		// Values between 0 and 1 keep working as built: they are checked at 0.2; the game's value (1) has checks of its own.
 		G.Intensity = 0.2f;
+		// Check D measures the entity in its own colour (Brief 17: before it is found it shows in the scan's): found for the run.
+		static bool bFoundSaved = false;
+		if (URunSubsystem* Run = URunSubsystem::Get(W()))
+		{
+			bFoundSaved = Run->IsEntityFound();
+			Run->SetEntityFound(true, TEXT("tls.OcclusionTest: the entity in its own colour"));
+		}
 		GRun.Cleanup = []()
 		{
+			if (URunSubsystem* Run = URunSubsystem::Get(W()))
+			{
+				Run->SetEntityFound(bFoundSaved, TEXT("tls.OcclusionTest: end"));
+			}
 			GetMutableDefault<UTheLastShiftSettings>()->ScanOcclusion = GSavedOcclusion;
 			if (UScanDirectorComponent* D = Director())
 			{

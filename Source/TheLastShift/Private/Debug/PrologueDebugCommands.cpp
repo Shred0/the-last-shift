@@ -12,7 +12,8 @@
 // Normal time and still while Stopped and behind the pause menu; the ship closed until then; nothing beyond the open
 // hatch and no way out through it; the walk from the start to the ship), the flight with the first Flight line,
 // Prologue_Arrival (the ship's lights, the hatch started by leaving the ship and closing in HatchCloseSeconds of Normal
-// time, still while Stopped and behind the pause menu, the Hatch lines, the Door lines, then the exit door after
+// time, still while Stopped and behind the pause menu; Brief 17: the Light lines from the step out, then the flashlight
+// hint with the Flashlight key, gone when the flashlight is switched on; the Hatch lines after the Light lines, the Door lines, then the exit door after
 // ExitDoorDelaySeconds of Normal time, still while Stopped and behind the pause menu), and area 1 with the same run state
 // and first snapshot as C. The flashlight: off and unavailable at home (its key does nothing), available and off at the
 // start of the arrival, as without the prologue's maps in area 1. B) skipped, the home crossed by teleports (the hangar's
@@ -21,6 +22,7 @@
 // act 2, New game, quit to the main menu from inside Prologue_Home: nothing saved or deleted, and Continue restores that
 // saved run. F) no Hologram and no Door rows: the hangar's terminal works as soon as the monitor room is entered; the
 // exit door opens the delay after the last Hatch row. G) neither Hatch nor Door: the delay after the hatch has closed.
+// B, F and G leave the Light rows out (Brief 17), so they test the sequence they tested before.
 // The lines are the test's own fixture rows; the shots go to Saved/Screenshots/Brief14. tls.Prologue.Report logs the
 // prologue map's doors, terminals, lights, hatch, sliding panels, departure scene, hologram, triggers, corridor and its
 // doorways, and flashlight. Development builds only.
@@ -65,6 +67,7 @@
 #include "Prologue/PrologueDeparture.h"
 #include "Prologue/PrologueEntryDoor.h"
 #include "Prologue/PrologueHatch.h"
+#include "UI/FlashlightHintWidget.h"
 #include "Prologue/PrologueHologram.h"
 #include "Prologue/PrologueLineTrigger.h"
 #include "Prologue/PrologueSlidingPanel.h"
@@ -1940,6 +1943,11 @@ namespace PrologueDebug
 		{
 			const APrologueHatch* Hatch = First<APrologueHatch>();
 			Check(!Hatch->IsInsideShip(Pawn()), TEXT("A: the player is outside the ship"));
+			const UFlashlightHintWidget* Hint = Char() ? Char()->GetFlashlightHint() : nullptr;
+			const UTextChannelComponent* Text = Channel();
+			Check((Text && Text->GetCurrentRowName() == TEXT("Light_1")) || RowSeen(TEXT("Light_1")),
+				FString::Printf(TEXT("A: stepping out of the ship starts the Light lines (now %s)"), Text ? *Text->GetCurrentRowName().ToString() : TEXT("-")));
+			Check(Hint && Hint->GetHintState() == EFlashlightHintState::Idle && !Hint->IsShown(), TEXT("A: no flashlight hint while the Light lines are said"));
 			// Beside the ship: from its open side the ship hides the hatch.
 			Teleport(HatchView());
 			LookAt(Hatch->GetActorLocation() + FVector(0.f, 0.f, 350.f));
@@ -2005,8 +2013,49 @@ namespace PrologueDebug
 		{
 			Shot(TEXT("Arrival_4_HatchClosed"));
 			const APrologueHatch* Hatch = First<APrologueHatch>();
-			Check(Hatch->GetHatchState() == EPrologueHatchState::Closed && !Hatch->ExitDoor->IsOpen() && RowSeen(TEXT("Hatch_1")),
-				FString::Printf(TEXT("A: the Hatch lines are said, the door waits for them (%s)"), *RowsFrom(0)));
+			Check(Hatch->GetHatchState() == EPrologueHatchState::Closed && !Hatch->ExitDoor->IsOpen(),
+				FString::Printf(TEXT("A: the hatch closed, the door waits for the lines (%s)"), *RowsFrom(0)));
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("A: the Light lines typed out: the hint"), []() { const UFlashlightHintWidget* H = Char() ? Char()->GetFlashlightHint() : nullptr; return H && H->IsShown(); }, 30.f, []()
+		{
+			const UFlashlightHintWidget* Hint = Char()->GetFlashlightHint();
+			const FLine* Light2 = nullptr;
+			for (const FLine& Line : GRun.Lines)
+			{
+				Light2 = Line.Row == TEXT("Light_2") ? &Line : Light2;
+			}
+			const FKey Bound = TimeStateDebug::BoundKey(W(), TEXT("FlashlightAction"));
+			Check(Light2 && Light2->TypedRun >= 0.0, FString::Printf(TEXT("A: the hint appears once Light_2 is typed out (at %.3f s)"), Light2 ? Light2->TypedRun : -1.0));
+			Check(Bound.IsValid() && Hint->GetShownKey() == Bound && !Char()->IsFlashlightOn(),
+				FString::Printf(TEXT("A: the hint shows the key bound to Flashlight (%s, bound %s): \"%s\""), *Hint->GetShownKey().ToString(), *Bound.ToString(), *Hint->GetShownText()));
+			Check(!RowSeen(TEXT("Hatch_1")) || First<APrologueHatch>()->AreLightLinesDone(), TEXT("A: no Hatch line before the Light lines are done"));
+			Shot(TEXT("Arrival_4b_FlashlightHint"));
+			return 0.3f;
+		}));
+		S.Add(Do(TEXT("A: the flashlight key, with the hint"), []()
+		{
+			Check(PressPawnKey(TEXT("FlashlightAction")), TEXT("A: the flashlight key pressed"));
+			return 0.3f;
+		}));
+		S.Add(Do(TEXT("A: the hint is gone"), []()
+		{
+			const UFlashlightHintWidget* Hint = Char()->GetFlashlightHint();
+			Check(Char()->IsFlashlightOn() && Hint->GetHintState() == EFlashlightHintState::Done && !Hint->IsShown(),
+				FString::Printf(TEXT("A: the flashlight on, the hint gone (%s)"), *FlashlightState()));
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("A: the Hatch lines after the Light lines"), []() { return RowSeen(TEXT("Hatch_1"), GRun.MapsAtMark); }, 30.f, []()
+		{
+			const FLine* Light2 = nullptr;
+			const FLine* Hatch1 = nullptr;
+			for (const FLine& Line : GRun.Lines)
+			{
+				Light2 = Line.Row == TEXT("Light_2") ? &Line : Light2;
+				Hatch1 = Line.Row == TEXT("Hatch_1") ? &Line : Hatch1;
+			}
+			Check(Light2 && Hatch1 && Light2->TypedRun >= 0.0 && Hatch1->StartRun >= Light2->TypedRun && !First<APrologueHatch>()->ExitDoor->IsOpen(),
+				FString::Printf(TEXT("A: the Hatch lines start after Light_2 is typed out (%.3f -> %.3f s), the door closed"), Light2 ? Light2->TypedRun : -1.0, Hatch1 ? Hatch1->StartRun : -1.0));
 			return 0.f;
 		}));
 		S.Add(WaitFor(TEXT("A: the Door lines after the Hatch lines"), []() { return RowSeen(TEXT("Door_1"), GRun.MapsAtMark); }, 30.f, []()
@@ -2078,7 +2127,9 @@ namespace PrologueDebug
 					Order += (Order.IsEmpty() ? TEXT("") : TEXT(" ")) + Line.Row.ToString();
 				}
 			}
-			Check(Order == TEXT("Hatch_1 Hatch_2 Door_1 Door_2"), FString::Printf(TEXT("A: the arrival's lines, once each, in order, all before the door opened: %s"), *Order));
+			Check(Order == TEXT("Light_1 Light_2 Hatch_1 Hatch_2 Door_1 Door_2"), FString::Printf(TEXT("A: the arrival's lines, once each, in order, all before the door opened: %s"), *Order));
+			const UFlashlightHintWidget* Hint = Char() ? Char()->GetFlashlightHint() : nullptr;
+			Check(Hint && Hint->GetHintState() == EFlashlightHintState::Done && !Hint->IsShown(), TEXT("A: the hint has not come back by the time the door opens"));
 			LookAt(First<APrologueHatch>()->ExitDoor->GetActorLocation() + FVector(0.f, 0.f, 150.f));
 			return 0.6f;
 		}));
@@ -2120,7 +2171,7 @@ namespace PrologueDebug
 		// --- B: skipped, the Hangar and Hatch groups with no row ---
 		S.Add(Do(TEXT("B: New game, skipped"), []()
 		{
-			NarrativeFixture::SetPrologueGroups({ PrologueGroups::Hangar, PrologueGroups::Hatch });
+			NarrativeFixture::SetPrologueGroups({ PrologueGroups::Hangar, PrologueGroups::Hatch, PrologueGroups::Light });
 			GRun.HashBefore = SaveHash();
 			GRun.SnapshotsBefore = Run()->GetSnapshots().Num();
 			GRun.SaveWritesBefore = Run()->GetSaveWrites();
@@ -2287,7 +2338,7 @@ namespace PrologueDebug
 		AddBackToMenu(S, TEXT("E"));
 
 		// --- F: no Hologram rows (the hangar's terminal works on entering the monitor room), no Door rows (the door opens the delay after the last Hatch row) ---
-		AddSkipToArrival(S, TEXT("F"), { PrologueGroups::Door, PrologueGroups::Hologram });
+		AddSkipToArrival(S, TEXT("F"), { PrologueGroups::Door, PrologueGroups::Hologram, PrologueGroups::Light });
 		S.Add(WaitFor(TEXT("F: the exit door opens"), []() { return First<APrologueHatch>()->GetHatchState() == EPrologueHatchState::DoorOpened; }, 40.f, []()
 		{
 			CheckDoorDelay(TEXT("F"), GRun.MapsAtMark, TEXT("Hatch_2"), true);
@@ -2297,7 +2348,7 @@ namespace PrologueDebug
 		AddBackToMenu(S, TEXT("F"));
 
 		// --- G: neither group: the door opens the delay after the hatch has closed ---
-		AddSkipToArrival(S, TEXT("G"), { PrologueGroups::Hatch, PrologueGroups::Door });
+		AddSkipToArrival(S, TEXT("G"), { PrologueGroups::Hatch, PrologueGroups::Door, PrologueGroups::Light });
 		S.Add(WaitFor(TEXT("G: the exit door opens"), []() { return First<APrologueHatch>()->GetHatchState() == EPrologueHatchState::DoorOpened; }, 40.f, []()
 		{
 			CheckDoorDelay(TEXT("G"), GRun.MapsAtMark, NAME_None, true);

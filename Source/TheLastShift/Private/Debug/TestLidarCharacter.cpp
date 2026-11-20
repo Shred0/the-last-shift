@@ -22,6 +22,7 @@
 #include "Scan/ScanDirectorComponent.h"
 #include "TextChannel/TextChannelComponent.h"
 #include "TheLastShift.h"
+#include "UI/FlashlightHintWidget.h"
 #include "UI/InteractPromptWidget.h"
 #include "Time/TimeStateSubsystem.h"
 
@@ -57,6 +58,7 @@ ATestLidarCharacter::ATestLidarCharacter()
 
 	CollectCueClass = UResidueCollectCueWidget::StaticClass();
 	InteractPromptClass = UInteractPromptWidget::StaticClass();
+	FlashlightHintClass = UFlashlightHintWidget::StaticClass();
 	TextChannelWidgetClass = UTextChannelWidget::StaticClass();
 }
 
@@ -98,6 +100,11 @@ void ATestLidarCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		InteractPrompt->RemoveFromParent();
 		InteractPrompt = nullptr;
+	}
+	if (FlashlightHint)
+	{
+		FlashlightHint->RemoveFromParent();
+		FlashlightHint = nullptr;
 	}
 	if (TextChannelWidget)
 	{
@@ -145,6 +152,16 @@ void ATestLidarCharacter::CreateScanCue()
 		{
 			InteractPrompt->SetInteractAction(InteractAction);
 			InteractPrompt->AddToViewport(0);
+		}
+	}
+
+	if (!FlashlightHint && FlashlightHintClass)
+	{
+		FlashlightHint = CreateWidget<UFlashlightHintWidget>(PC, FlashlightHintClass);
+		if (FlashlightHint)
+		{
+			FlashlightHint->SetFlashlightAction(FlashlightAction);
+			FlashlightHint->AddToViewport(0);
 		}
 	}
 
@@ -227,6 +244,19 @@ void ATestLidarCharacter::OnScan()
 bool ATestLidarCharacter::IsFlashlightOn() const
 {
 	return Flashlight && Flashlight->IsVisible();
+}
+
+bool ATestLidarCharacter::ShowFlashlightHint()
+{
+	// The HUD may not exist yet on the very first frame of a map.
+	CreateScanCue();
+	if (!FlashlightHint)
+	{
+		UE_LOG(LogTheLastShift, Warning, TEXT("TestLidarCharacter: no flashlight hint to show."));
+		return false;
+	}
+	FlashlightHint->Activate();
+	return true;
 }
 
 void ATestLidarCharacter::OnToggleFlashlight()

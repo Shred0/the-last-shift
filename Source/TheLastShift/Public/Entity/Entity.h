@@ -143,6 +143,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityContact);
  * voluntary Resume the next spawn distance becomes clamp(DistanceAtExit - ApproachPerExit, MinSpawnDistance,
  * InitialSpawnDistance); after any contact it is MinSpawnDistance. Its points are shown by the latest scan only: full
  * until the next scan starts, then gone over PointVanishSeconds, so at most one snapshot of it is ever on screen.
+ *
+ * Until it is found its points show in the scan's own colour (ScanColors.Scan), after in its own (ScanColors.Entity);
+ * nothing else about them changes. It is found at the end of the first Stop during which a scan kept at least one of its
+ * points, however that Stop ends: at each scan, while it is not found, the points the lidar keeps (inside the capture's
+ * coverage, the same test as the lidar's) are traced from the capture origin on the visibility channel, and one that no
+ * geometry hides by more than OcclusionTolerance counts as kept. URunSubsystem owns the state (MarkEntityFound).
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API AEntity : public AActor, public ILidarPointSource
@@ -272,7 +278,8 @@ public:
 
 	// --- Render ---
 
-	// Colour of every entity point: ScanColors.Entity of the project settings (UTheLastShiftSettings), its one owner.
+	// Colour of every entity point: ScanColors.Scan until the entity is found (URunSubsystem::IsEntityFound), then
+	// ScanColors.Entity, both of the project settings (UTheLastShiftSettings), their one owner.
 
 	/** Brightness of entity points relative to captured points. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Render", meta = (ClampMin = "0.0", ClampMax = "16.0"))
@@ -352,6 +359,24 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Entity")
 	int32 GetLastGatheredTrailPoints() const { return LastGatheredTrailPoints; }
+
+	/** True when a scan of the current Stop (or of the last one, until the next Stop) kept at least one of its points. */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	bool WasShownThisStop() const { return bShownThisStop || bLastStopShown; }
+
+	/** The run's entity state: true once found (URunSubsystem::IsEntityFound), false without a run subsystem. */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	bool IsFound() const;
+
+	/** The colour its points get now: ScanColors.Entity once found, ScanColors.Scan before. */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	FLinearColor GetPointColor() const;
+
+	/** The last scan's kept-point check: its scan index (-1 when none ran), traces made, whether a point was kept, and its cost. */
+	int32 GetLastKeptCheckScan() const { return LastKeptCheckScan; }
+	int32 GetLastKeptCheckTraces() const { return LastKeptCheckTraces; }
+	bool GetLastKeptCheckResult() const { return bLastKeptCheckResult; }
+	double GetLastKeptCheckMs() const { return LastKeptCheckMs; }
 
 	// --- Actions ---
 
@@ -435,6 +460,9 @@ private:
 	void RecordExit(EStopExitReason Reason);
 	void CheckContact();
 
+	/** True when the lidar keeps at least one of Points[First..] for Context (see the class comment). */
+	bool KeepsAnyPoint(const FLidarScanContext& Context, const TArray<FLidarInjectedPoint>& Points, int32 First, int32& OutTraces) const;
+
 	/** The run's clock (UTimeStateSubsystem::GetRunSeconds), world time before the time state is bound. */
 	double GetRunSeconds() const;
 
@@ -463,6 +491,15 @@ private:
 	/** A Stop began and its exit has not been recorded yet. */
 	bool bExitPending = false;
 	bool bLastExitGraze = false;
+
+	/** A scan of the current Stop kept one of its points; the same for the last Stop, until the next one begins. */
+	bool bShownThisStop = false;
+	bool bLastStopShown = false;
+
+	int32 LastKeptCheckScan = INDEX_NONE;
+	int32 LastKeptCheckTraces = 0;
+	bool bLastKeptCheckResult = false;
+	double LastKeptCheckMs = 0.0;
 
 	FEntitySpawnReport LastSpawnReport;
 

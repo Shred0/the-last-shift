@@ -16,8 +16,8 @@ namespace NarrativeFixture
 {
 	/**
 	 * A new transient DT_AIMessages-shaped table: A1_AreaStart_1..3, A1_FirstEnergy_1, and for every act 1-4
-	 * A<act>_JumpReturn_1..2 (all four tokens and the word "still"), A<act>_AreaEntry_1 ({home}, {battery}) and
-	 * A<act>_Spend_1 ({battery}). Every text is at least 60 characters long.
+	 * A<act>_JumpReturn_1..2 (all four tokens and the word "still"), A<act>_AreaEntry_1 ({home}, {battery}),
+	 * A<act>_Spend_1 ({battery}) and A<act>_EntityFound_1 ({battery}). Every text is at least 60 characters long.
 	 */
 	UDataTable* BuildAIMessages();
 
@@ -41,7 +41,7 @@ namespace NarrativeFixture
 	UDataTable* BuildScenes(bool bPrologue = true);
 
 	/**
-	 * A new transient DT_Prologue-shaped table: Wake_1..2, Hologram_1, Hangar_1, Flight_1..2, Hatch_1..2 and Door_1..2,
+	 * A new transient DT_Prologue-shaped table: Wake_1..2, Hologram_1, Hangar_1, Flight_1..2, Light_1..2, Hatch_1..2 and Door_1..2,
 	 * less the rows of the groups in Without (each text names its group and order, see GetPrologueLineText).
 	 */
 	UDataTable* BuildPrologue(const TArray<FName>& Without = TArray<FName>());
