@@ -600,7 +600,8 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLidarDepthCheckCommand(
 		if (const AAreaGenerator* Generator = AAreaGenerator::Find(World))
 		{
 			for (const TArray<FTransform>* Plan : { &Generator->PlanFloors, &Generator->PlanWalls, &Generator->PlanCurbs,
-				&Generator->PlanPillars, &Generator->PlanCeilings, &Generator->PlanBackdrop })
+				&Generator->PlanPillars, &Generator->PlanCeilings, &Generator->PlanBackdrop, &Generator->PlanFloorsCollision,
+				&Generator->PlanWallsCollision, &Generator->PlanCurbsCollision, &Generator->PlanPillarsCollision, &Generator->PlanCeilingsCollision })
 			{
 				for (const FTransform& T : *Plan)
 				{

@@ -91,7 +91,8 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnAreaGenerationFinished, class AAreaGener
  *
  * On BeginPlay: (1) read the recipe and seed; (2) plan the route with the planner; (3) publish the plan as one array
  * of box transforms per kind (the Plan* properties, one engine cube of 100 cm per box) and run the PCG graphs on it
- * with the same seed (StructureGraph: floors, walls, curbs, pillars, ceilings; BackdropGraph: the far masses); (4) spawn the gameplay actors in their slots (residues,
+ * with the same seed (StructureGraph: floors, walls, curbs, pillars, ceilings, and the kit's meshes over the modelled
+ * segments, whose boxes it spawns hidden: collision only; BackdropGraph: the far masses); (4) spawn the gameplay actors in their slots (residues,
  * gates with door, terminal and regenerating residue, light groups, log and twin AI terminals, beacons, exit, area info) and move the map's PlayerStart
  * and entity to theirs; (5) fit the map's NavMeshBoundsVolume to the route, wait for PCG and for the dynamic navmesh;
  * (6) run the validator; (7) broadcast OnAreaReady. Until then the player pawn cannot move, look or stop time and
@@ -357,6 +358,76 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "0.0", ClampMax = "400.0", Units = "cm"))
 	float BeaconClearPathHeight = 150.f;
 
+	// --- Dressing (Brief 16): the kit's meshes the structure graph places over the boxes of the modelled segments ---
+	// Where every cell along a box belongs to a modelled segment (Corridor, Room, Gate, Catwalk), the box is kept for collision and
+	// navigation only (Plan<Kind>Collision: not rendered, not seen by the scan's capture) and the kit's meshes are placed
+	// over it, look only (no collision, no navigation). Computed from the plan, with no random draw: the plan and the
+	// layout hash do not change. The sizes below are the meshes' own (in the graph); the dressing scales them to fit.
+
+	/** SM_KitWallPanel's size: X thickness (ribs towards +X), Y width, Z height (pivot at its base centre). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing")
+	FVector DressWallPanelSize = FVector(20.f, 100.f, 350.f);
+
+	/** SM_KitFloorPlate's size: X long side, Y short side, Z thickness (pivot at its base centre). Floors and ceilings (turned over). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing")
+	FVector DressFloorPlateSize = FVector(200.f, 100.f, 10.f);
+
+	/** SM_KitCornerPost's size: X and Y the post's side, Z its height (pivot at its base centre). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing")
+	FVector DressCornerPostSize = FVector(20.f, 20.f, 100.f);
+
+	/** SM_KitCurb's size: X thickness (towards +X the deck), Y length, Z height from its base (pivot at its base centre). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing")
+	FVector DressCurbSize = FVector(20.f, 100.f, 125.f);
+
+	/** SM_KitCeilingBeam: its length (along Y; pivot at its top centre). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "50.0", ClampMax = "1000.0", Units = "cm"))
+	float DressBeamLength = 300.f;
+
+	/** Ceiling beams across corridors, this far apart along each leg. 0 = none. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "0.0", ClampMax = "2000.0", Units = "cm"))
+	float DressBeamSpacing = 300.f;
+
+	/** SM_KitConduit: its length (along Y; pivot at its back, at the base). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "50.0", ClampMax = "1000.0", Units = "cm"))
+	float DressConduitLength = 200.f;
+
+	/** SM_KitConduit: its depth from its back (mounted on the wall panels' slab, the wall box's middle). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "1.0", ClampMax = "100.0", Units = "cm"))
+	float DressConduitDepth = 29.f;
+
+	/**
+	 * Conduits run along the walls of corridors and gates (not inside niches or dead ends) at this height, above the
+	 * player, one continuous run per wall line: it goes straight on across a niche's or a dead end's mouth to the wall on
+	 * its far side, with every bracket on a wall; it ends against a wall's or a gate frame's face, or meets the run on the
+	 * wall that turns there.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "250.0", ClampMax = "1000.0", Units = "cm"))
+	float DressConduitHeight = 300.f;
+
+	/** SM_KitGateFrame's depth along the passage: the gate's wall panels stop on each side of it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "10.0", ClampMax = "200.0", Units = "cm"))
+	float DressGateFrameDepth = 60.f;
+
+	/** SM_KitGateFrame's size across the passage (outer faces) and its height (from the floor's underside). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing")
+	FVector2D DressGateFrameSize = FVector2D(480.f, 420.f);
+
+	/** SM_KitCatwalkFrame: its span across the deck (along Y; pivot at its top centre, hung under the deck). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "50.0", ClampMax = "2000.0", Units = "cm"))
+	float DressFrameSpan = 340.f;
+
+	/** Frames under catwalks and their platforms, about this far apart. 0 = none. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "0.0", ClampMax = "2000.0", Units = "cm"))
+	float DressFrameSpacing = 200.f;
+
+	/** Instances of the dressing (all pieces). */
+	UFUNCTION(BlueprintPure, Category = "Area")
+	int32 GetDressingInstanceCount() const;
+
+	/** True when every box of Kind along the segment's cells is kept for collision only (the segment type is modelled). */
+	static bool IsDressedSegmentType(EAreaSegmentType Type);
+
 	// --- Classes and assets ---
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
@@ -382,6 +453,10 @@ public:
 	/** The beacons' lamp head (SM_BeaconHead: pivot at its mount, +X the direction it lights). None: the beacon is a light alone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
 	TObjectPtr<UStaticMesh> BeaconHeadMesh;
+
+	/** The gate doors' modelled panel (SM_KitGatePanel, 4 x 3 m, pivot at its bottom centre), given to the doors this generator spawns. None: the door's own. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
+	TObjectPtr<UStaticMesh> GatePanelMesh;
 
 	/** The beacons' rod (SM_BeaconRod: one metre along +Z, pivot at its lower end), stretched to the length it needs. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Classes")
@@ -475,6 +550,77 @@ public:
 
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
 	TArray<FTransform> PlanBackdrop;
+
+	// The boxes of the modelled segments: collision and navigation only, never rendered (the graph spawns them hidden).
+	// Plan<Kind> holds the boxes still shown; the two together are the plan's boxes of Kind.
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanFloorsCollision;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanWallsCollision;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanCurbsCollision;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanPillarsCollision;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Plan")
+	TArray<FTransform> PlanCeilingsCollision;
+
+	// The dressing: one array per kit mesh, read by the structure graph (component tag AreaDressing).
+
+	/** SM_KitWallPanel over walls, scaled along and up to fit. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressWallPanels;
+
+	/** SM_KitFloorPlate over floors and catwalk decks, and turned over under ceilings. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressFloorPlates;
+
+	/** SM_KitCornerPost in the corners of walls and curbs. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressCornerPosts;
+
+	/** SM_KitCeilingBeam across corridors. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressCeilingBeams;
+
+	/** SM_KitConduit along corridor walls. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressConduits;
+
+	/** SM_KitCurb over curbs. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressCurbs;
+
+	/** SM_KitCatwalkFrame under catwalk decks. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressCatwalkFrames;
+
+	/** SM_KitGateFrame around each gate's door. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressGateFrames;
+
+	/** A wall panel the last dressing placed: its centre (on the wall box's middle line), the way it faces, its factor along. */
+	struct FDressPanelPick
+	{
+		FVector2D At = FVector2D::ZeroVector;
+		FVector2D Facing = FVector2D::ZeroVector;
+		double Factor = 0.0;
+	};
+
+	/** The most squeezed and the most stretched wall panel of the last dressing (tls.Views areawalls shoots them). */
+	FDressPanelPick DressMostSqueezedPanel;
+	FDressPanelPick DressMostStretchedPanel;
+
+	/** The first niche or dead-end mouth a conduit run crosses: its middle on the wall line, the way into the corridor, its width (Factor, cm). */
+	FDressPanelPick DressFirstConduitMouth;
+
+	/** What the last dressing placed, with the largest and smallest factors it scaled the kit's pieces by (logged at ready). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State")
+	FString LastDressingReport;
 
 	/**
 	 * Clears and regenerates the area for InSeed in this world (runtime: tls.AreaGenerate, seed sweeps). With

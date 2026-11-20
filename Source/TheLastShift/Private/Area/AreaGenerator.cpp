@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "Area/AreaGenerator.h"
+#include "HAL/IConsoleManager.h"
 
 #include "AI/NavDataGenerator.h"
 #include "Area/AreaExit.h"
@@ -1786,11 +1787,25 @@ namespace AreaGen
 
 	// --- Geometry from the plan ---
 
+	/** One wall or curb box as the planner laid it: the cell edges it runs along (for the dressing; the box is the plan's). */
+	struct FEdgeRun
+	{
+		int32 D = 0;      // the floor cells' side the edge is on (0 +X, 1 +Y, 2 -X, 3 -Y)
+		int32 Line = 0;   // the edge's grid line
+		int32 R0 = 0;     // first and last cell coordinate along the line
+		int32 R1 = 0;
+		float Ext0 = 0.f; // the box's extension beyond the first and last edge (T at a concave end, 0 at a convex one)
+		float Ext1 = 0.f;
+	};
+
 	/** The plan's boxes; structure kinds carry their XY footprint (their Z comes from FAreaPieceHeights). */
 	struct FGeometryPlan
 	{
 		TArray<FBox> Floors, Walls, Curbs, Pillars, Ceilings, Backdrop;
 		TArray<FAreaFloorRect> FloorRects;
+		// Parallel to Walls, Curbs, Ceilings and Pillars: what the dressing needs to know of each box.
+		TArray<FEdgeRun> WallRuns, CurbRuns;
+		TArray<int32> CeilingSegments, PillarSegments;
 	};
 
 	static FBox BoxTransform(const FVector& Min, const FVector& Max)
@@ -1872,11 +1887,13 @@ namespace AreaGen
 				{
 					Out.Ceilings.Add(BoxTransform(FVector(R.Min.X * Cell - T, R.Min.Y * Cell - T, G.WallHeight),
 						FVector((R.Max.X + 1) * Cell + T, (R.Max.Y + 1) * Cell + T, G.WallHeight + FT)));
+					Out.CeilingSegments.Add(S);
 				}
 			}
 			for (const FBox2D& P : Plan.Segs[S].Pillars)
 			{
 				Out.Pillars.Add(BoxTransform(FVector(P.Min.X, P.Min.Y, -FT), FVector(P.Max.X, P.Max.Y, G.WallHeight)));
+				Out.PillarSegments.Add(S);
 			}
 		}
 
@@ -1936,6 +1953,14 @@ namespace AreaGen
 				const FVector Min = bAlongY ? FVector(Out0, Run0, -FT) : FVector(Run0, Out0, -FT);
 				const FVector Max = bAlongY ? FVector(Out1, Run1, Height) : FVector(Run1, Out1, Height);
 				(bWall ? Out.Walls : Out.Curbs).Add(BoxTransform(Min, Max));
+				FEdgeRun Run;
+				Run.D = D;
+				Run.Line = Line;
+				Run.R0 = R0;
+				Run.R1 = R1;
+				Run.Ext0 = Ext0;
+				Run.Ext1 = Ext1;
+				(bWall ? Out.WallRuns : Out.CurbRuns).Add(Run);
 				if (I < Coords.Num()) { R0 = Coords[I]; }
 			}
 		}
@@ -2007,6 +2032,803 @@ namespace AreaGen
 	}
 
 	static FRotator YawOf(const FVector2D& Dir) { return FRotator(0.0, FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X)), 0.0); }
+
+	// --- Dressing (Brief 16) ---
+
+	/** Which boxes stay shown, and the kit's meshes placed over the others. Parallel flags to FGeometryPlan's arrays. */
+	struct FDressing
+	{
+		TArray<bool> FloorHidden, WallHidden, CurbHidden, PillarHidden, CeilingHidden;
+		TArray<FTransform> Panels, Plates, Posts, Beams, Conduits, Curbs, Frames, GateFrames;
+		FString Report;
+		AAreaGenerator::FDressPanelPick Squeezed, Stretched, FirstMouth;
+	};
+
+	/** The floor cell across a run's edge line from RunCell (the other side of the line). */
+	static FIntPoint AcrossCell(const FEdgeRun& R, int32 RunCoord)
+	{
+		switch (R.D)
+		{
+		case 0: return FIntPoint(R.Line, RunCoord);
+		case 2: return FIntPoint(R.Line - 1, RunCoord);
+		case 1: return FIntPoint(RunCoord, R.Line);
+		default: return FIntPoint(RunCoord, R.Line - 1);
+		}
+	}
+
+	static FIntPoint RunCell(const FEdgeRun& R, int32 RunCoord)
+	{
+		switch (R.D)
+		{
+		case 0: return FIntPoint(R.Line - 1, RunCoord);
+		case 2: return FIntPoint(R.Line, RunCoord);
+		case 1: return FIntPoint(RunCoord, R.Line - 1);
+		default: return FIntPoint(RunCoord, R.Line);
+		}
+	}
+
+	static bool IsDressedSegment(const FPlan& Plan, int32 Segment)
+	{
+		return Plan.Segs.IsValidIndex(Segment) && AAreaGenerator::IsDressedSegmentType(Plan.Segs[Segment].Type);
+	}
+
+	/** True when every floor cell along the run belongs to a modelled segment; OutAllType: every one is of Type. */
+	static bool IsRunDressed(const FPlan& Plan, const FEdgeRun& R, EAreaSegmentType Type, bool& OutAllType)
+	{
+		OutAllType = true;
+		for (int32 C = R.R0; C <= R.R1; ++C)
+		{
+			const FCell* E = Plan.Cells.Find(RunCell(R, C));
+			if (!E || !IsDressedSegment(Plan, E->Segment))
+			{
+				OutAllType = false;
+				return false;
+			}
+			OutAllType &= Plan.Segs[E->Segment].Type == Type;
+		}
+		return true;
+	}
+
+	/** World transform of a piece of Size (its pivot at its base centre) filling the box Min..Max (XY), local +X along Facing. */
+	static FTransform FitPiece(const FVector2D& Centre, double Z, int32 FacingDir, double Thickness, double Length, double Height, const FVector& Size, double Roll = 0.0)
+	{
+		const FVector2D F = DirV(FacingDir);
+		const double Yaw = FMath::RadiansToDegrees(FMath::Atan2(F.Y, F.X));
+		return FTransform(FRotator(0.0, Yaw, Roll), FVector(Centre.X, Centre.Y, Z),
+			FVector(Thickness / Size.X, Length / Size.Y, Height / Size.Z));
+	}
+
+	/** The smallest and largest factor a kit piece was scaled by, and where (for the report). */
+	struct FFactorRange
+	{
+		double Min = TNumericLimits<double>::Max();
+		double Max = -TNumericLimits<double>::Max();
+		FVector2D MinAt = FVector2D::ZeroVector;
+		FVector2D MaxAt = FVector2D::ZeroVector;
+		int32 Count = 0;
+
+		void Add(double F, const FVector2D& At)
+		{
+			++Count;
+			if (F < Min) { Min = F; MinAt = At; }
+			if (F > Max) { Max = F; MaxAt = At; }
+		}
+
+		FString ToString(const TCHAR* Name) const
+		{
+			return Count == 0 ? FString::Printf(TEXT("%s 0"), Name)
+				: FString::Printf(TEXT("%s %d (x%.3f at (%.0f, %.0f) .. x%.3f at (%.0f, %.0f))"), Name, Count, Min, MinAt.X, MinAt.Y, Max, MaxAt.X, MaxAt.Y);
+		}
+	};
+
+	static void BuildDressing(const AAreaGenerator& G, const FPlan& Plan, const FGeometryPlan& Geo, FDressing& Out)
+	{
+		const double FT = G.FloorThickness;
+		const double T = G.WallThickness;
+		const double WallTop = G.WallHeight + FT;  // walls are dressed from the floor's underside to the ceiling's top
+		const FVector PanelSize = G.DressWallPanelSize.ComponentMax(FVector(1.0));
+		const FVector PlateSize = G.DressFloorPlateSize.ComponentMax(FVector(1.0));
+		const FVector PostSize = G.DressCornerPostSize.ComponentMax(FVector(1.0));
+		const FVector CurbSize = G.DressCurbSize.ComponentMax(FVector(1.0));
+		const double BeamLength = FMath::Max(1.0, static_cast<double>(G.DressBeamLength));
+		const double ConduitLen = FMath::Max(1.0, static_cast<double>(G.DressConduitLength));
+		// How far a conduit stands in front of its wall's face (its back is on the panels' slab, the box's middle).
+		const double ConduitFront = FMath::Max(0.0, G.DressConduitDepth - 0.5 * T);
+		const double FrameHalfDepth = 0.5 * FMath::Max(1.0, static_cast<double>(G.DressGateFrameDepth));
+		FFactorRange PanelAlong, PlateShort, PlateLong, BeamF, CurbF, ConduitF, FrameF, Fillers;
+		// The range a wall panel or a curb is scaled along by (shorter spans get a filler block).
+		constexpr double KitMinFactor = 2.0 / 3.0;
+		constexpr double KitMaxFactor = 4.0 / 3.0;
+
+		// Which boxes are kept for collision only.
+		Out.FloorHidden.Init(false, Geo.Floors.Num());
+		for (int32 I = 0; I < Geo.FloorRects.Num() && I < Geo.Floors.Num(); ++I)
+		{
+			Out.FloorHidden[I] = IsDressedSegment(Plan, Geo.FloorRects[I].Segment);
+		}
+		Out.CeilingHidden.Init(false, Geo.Ceilings.Num());
+		for (int32 I = 0; I < Geo.CeilingSegments.Num() && I < Geo.Ceilings.Num(); ++I)
+		{
+			Out.CeilingHidden[I] = IsDressedSegment(Plan, Geo.CeilingSegments[I]);
+		}
+		Out.PillarHidden.Init(false, Geo.Pillars.Num());
+		for (int32 I = 0; I < Geo.PillarSegments.Num() && I < Geo.Pillars.Num(); ++I)
+		{
+			Out.PillarHidden[I] = IsDressedSegment(Plan, Geo.PillarSegments[I]);
+		}
+		Out.WallHidden.Init(false, Geo.Walls.Num());
+		for (int32 I = 0; I < Geo.WallRuns.Num() && I < Geo.Walls.Num(); ++I)
+		{
+			bool bUnused = false;
+			Out.WallHidden[I] = IsRunDressed(Plan, Geo.WallRuns[I], EAreaSegmentType::Corridor, bUnused);
+		}
+		int32 ShownMixed = 0;
+		auto TouchesDressed = [&](const FEdgeRun& R)
+		{
+			for (int32 C = R.R0; C <= R.R1; ++C)
+			{
+				const FCell* E = Plan.Cells.Find(RunCell(R, C));
+				if (E && IsDressedSegment(Plan, E->Segment)) { return true; }
+			}
+			return false;
+		};
+		for (int32 I = 0; I < Geo.WallRuns.Num() && I < Out.WallHidden.Num(); ++I)
+		{
+			ShownMixed += !Out.WallHidden[I] && TouchesDressed(Geo.WallRuns[I]) ? 1 : 0;
+		}
+		Out.CurbHidden.Init(false, Geo.Curbs.Num());
+		for (int32 I = 0; I < Geo.CurbRuns.Num() && I < Geo.Curbs.Num(); ++I)
+		{
+			bool bUnused = false;
+			Out.CurbHidden[I] = IsRunDressed(Plan, Geo.CurbRuns[I], EAreaSegmentType::Catwalk, bUnused);
+		}
+
+		// Floor plates over floors (and catwalk decks), turned over under ceilings: the long side across the box's short side.
+		auto Tile = [&](const FBox& Box, double Z, bool bTurnOver)
+		{
+			const double SX = Box.Max.X - Box.Min.X;
+			const double SY = Box.Max.Y - Box.Min.Y;
+			// Of the two ways to lay the plates (their long side along X or along Y), the one whose plates are scaled least.
+			auto Layout = [&](bool bLongAlongX, int32& NX, int32& NY, double& Deviation)
+			{
+				const double PX = bLongAlongX ? PlateSize.X : PlateSize.Y;  // the plate's size along world X
+				const double PY = bLongAlongX ? PlateSize.Y : PlateSize.X;
+				NX = FMath::Max(1, FMath::RoundToInt(SX / PX));
+				NY = FMath::Max(1, FMath::RoundToInt(SY / PY));
+				Deviation = FMath::Max(FMath::Abs(SX / NX / PX - 1.0), FMath::Abs(SY / NY / PY - 1.0));
+			};
+			int32 NX0, NY0, NX1, NY1;
+			double D0, D1;
+			Layout(true, NX0, NY0, D0);
+			Layout(false, NX1, NY1, D1);
+			// Ties keep the long side across the box's shorter side.
+			const bool bPreferX = SX <= SY;
+			const bool bLongAlongX = D0 < D1 - 1e-6 ? true : (D1 < D0 - 1e-6 ? false : bPreferX);
+			const int32 NX = bLongAlongX ? NX0 : NX1;
+			const int32 NY = bLongAlongX ? NY0 : NY1;
+			const double CX = SX / NX;
+			const double CY = SY / NY;
+			// The plate's own long (X) and short (Y) sides after the turn.
+			const double PL = bLongAlongX ? CX : CY;
+			const double PS = bLongAlongX ? CY : CX;
+			const FVector2D Centre(0.5 * (Box.Min.X + Box.Max.X), 0.5 * (Box.Min.Y + Box.Max.Y));
+			PlateShort.Add(PL / PlateSize.X, Centre);
+			PlateLong.Add(PS / PlateSize.Y, Centre);
+			for (int32 A = 0; A < NX; ++A)
+			{
+				for (int32 B = 0; B < NY; ++B)
+				{
+					const FVector2D C(Box.Min.X + (A + 0.5) * CX, Box.Min.Y + (B + 0.5) * CY);
+					const FRotator R(0.0, bLongAlongX ? 0.0 : 90.0, bTurnOver ? 180.0 : 0.0);
+					Out.Plates.Add(FTransform(R, FVector(C.X, C.Y, Z), FVector(PL / PlateSize.X, PS / PlateSize.Y, FT / PlateSize.Z)));
+				}
+			}
+		};
+		for (int32 I = 0; I < Geo.Floors.Num(); ++I)
+		{
+			if (Out.FloorHidden[I])
+			{
+				Tile(Geo.Floors[I], -FT, false);
+			}
+		}
+		for (int32 I = 0; I < Geo.Ceilings.Num(); ++I)
+		{
+			if (Out.CeilingHidden[I])
+			{
+				// Turned over, the plate's pivot is its top: the ceiling's top.
+				Tile(Geo.Ceilings[I], G.WallHeight + FT, true);
+			}
+		}
+
+		// Gate frames: around each modelled gate's door; the gate's walls stop on each side of the frame.
+		struct FFrame { FVector2D Door; int32 Dir = 0; double HalfWidth = 0.0; };
+		TArray<FFrame> Frames;
+		for (int32 S = 0; S < Plan.Segs.Num(); ++S)
+		{
+			const FSeg& Seg = Plan.Segs[S];
+			if (Seg.Type != EAreaSegmentType::Gate || !IsDressedSegment(Plan, S))
+			{
+				continue;
+			}
+			Frames.Add({ Seg.DoorPos, Seg.DoorDir, 0.5 * Seg.Width });
+			const FVector2D F = DirV(Seg.DoorDir);
+			const double Yaw = FMath::RadiansToDegrees(FMath::Atan2(F.Y, F.X));
+			const FVector2D Size = G.DressGateFrameSize.ComponentMax(FVector2D(1.0, 1.0));
+			const double Across = Seg.Width + 4.0 * T;
+			FrameF.Add(Across / Size.X, Seg.DoorPos);
+			Out.GateFrames.Add(FTransform(FRotator(0.0, Yaw, 0.0), FVector(Seg.DoorPos.X, Seg.DoorPos.Y, 0.0),
+				FVector(1.0, Across / Size.X, (WallTop + FT) / Size.Y)));
+		}
+		// The parts of [A, B] along a run that a gate frame does not take.
+		auto Spans = [&](bool bAlongY, double Mid, double A, double B)
+		{
+			TArray<FVector2D> Cuts;
+			for (const FFrame& Fr : Frames)
+			{
+				const bool bFrameAlongY = Fr.Dir == 1 || Fr.Dir == 3;
+				if (bFrameAlongY != bAlongY)
+				{
+					continue;
+				}
+				const double DoorAlong = bAlongY ? Fr.Door.Y : Fr.Door.X;
+				const double DoorAcross = bAlongY ? Fr.Door.X : Fr.Door.Y;
+				if (FMath::Abs(Mid - DoorAcross) <= Fr.HalfWidth + T + 1.0 && DoorAlong > A - 1.0 && DoorAlong < B + 1.0)
+				{
+					Cuts.Add(FVector2D(DoorAlong - FrameHalfDepth, DoorAlong + FrameHalfDepth));
+				}
+			}
+			Cuts.Sort([](const FVector2D& X, const FVector2D& Y) { return X.X < Y.X; });
+			TArray<FVector2D> Result;
+			double From = A;
+			for (const FVector2D& Cut : Cuts)
+			{
+				if (Cut.X > From) { Result.Add(FVector2D(From, FMath::Min(Cut.X, B))); }
+				From = FMath::Max(From, Cut.Y);
+			}
+			if (B > From) { Result.Add(FVector2D(From, B)); }
+			return Result;
+		};
+
+		// Corner squares: at a convex end (no extension) the run's last T belongs to the square shared with the run that
+		// turns there; at a concave end the box's extension is the square. A post fills each square no shown box covers.
+		struct FSquare { FBox2D Box; bool bWall = false; };
+		TMap<FIntPoint, FSquare> Squares;
+		auto SquareKey = [](const FBox2D& Box) { const FVector2D C = Box.GetCenter(); return FIntPoint(FMath::RoundToInt(C.X * 2.0), FMath::RoundToInt(C.Y * 2.0)); };
+		auto AddSquare = [&](const FBox2D& Box, bool bWall)
+		{
+			FSquare& Sq = Squares.FindOrAdd(SquareKey(Box));
+			Sq.Box = Box;
+			Sq.bWall |= bWall;
+		};
+		struct FRunGeo
+		{
+			bool bAlongY = false;
+			double Out0 = 0.0, Mid = 0.0, A = 0.0, B = 0.0;
+			int32 Facing = 0;
+			bool bConvex0 = false, bConvex1 = false;
+			FBox2D Square0, Square1;
+		};
+		auto RunGeo = [&](const FEdgeRun& R)
+		{
+			FRunGeo Gm;
+			Gm.bAlongY = R.D == 0 || R.D == 2;
+			const double LineCm = R.Line * Cell;
+			Gm.Out0 = (R.D == 0 || R.D == 1) ? LineCm : LineCm - T;
+			Gm.Mid = Gm.Out0 + 0.5 * T;
+			Gm.Facing = Opposite(R.D);  // towards the floor
+			Gm.A = R.R0 * Cell;
+			Gm.B = (R.R1 + 1) * Cell;
+			Gm.bConvex0 = R.Ext0 <= 0.f;
+			Gm.bConvex1 = R.Ext1 <= 0.f;
+			auto Sq = [&](double S0, double S1)
+			{
+				return Gm.bAlongY ? FBox2D(FVector2D(Gm.Out0, S0), FVector2D(Gm.Out0 + T, S1)) : FBox2D(FVector2D(S0, Gm.Out0), FVector2D(S1, Gm.Out0 + T));
+			};
+			Gm.Square0 = Gm.bConvex0 ? Sq(Gm.A, Gm.A + T) : Sq(Gm.A - T, Gm.A);
+			Gm.Square1 = Gm.bConvex1 ? Sq(Gm.B - T, Gm.B) : Sq(Gm.B, Gm.B + T);
+			return Gm;
+		};
+		auto At = [](const FRunGeo& Gm, double Mid, double S) { return Gm.bAlongY ? FVector2D(Mid, S) : FVector2D(S, Mid); };
+		auto PlacePieces = [&](const FRunGeo& Gm, double A1, double B1, bool bWall)
+		{
+			const double Len = B1 - A1;
+			if (Len < 1.0)
+			{
+				return;
+			}
+			const FVector Size = bWall ? PanelSize : CurbSize;
+			const double Bottom = bWall ? -FT : G.CurbHeight - CurbSize.Z;
+			const double Top = bWall ? WallTop : G.CurbHeight;
+			if (Len < Size.Y * KitMinFactor)
+			{
+				// Too short for a piece within its factors: a plain filler block (the corner post), flush with the face.
+				const FVector2D C = At(Gm, Gm.Mid, 0.5 * (A1 + B1));
+				Fillers.Add(Len, C);
+				Out.Posts.Add(FitPiece(C, Bottom, Gm.Facing, T, Len, Top - Bottom, FVector(PostSize.X, PostSize.Y, PostSize.Z)));
+				return;
+			}
+			// As few pieces as keep each within the factors (along: x0.667 to x1.333 of the piece).
+			const int32 N = FMath::Max(1, FMath::CeilToInt(Len / (Size.Y * KitMaxFactor) - 1e-6));
+			const double PieceLen = Len / N;
+			for (int32 K = 0; K < N; ++K)
+			{
+				const FVector2D C = At(Gm, Gm.Mid, A1 + (K + 0.5) * PieceLen);
+				if (bWall)
+				{
+					const double Factor = PieceLen / Size.Y;
+					if (PanelAlong.Count == 0 || Factor < Out.Squeezed.Factor) { Out.Squeezed = { C, DirV(Gm.Facing), Factor }; }
+					if (PanelAlong.Count == 0 || Factor > Out.Stretched.Factor) { Out.Stretched = { C, DirV(Gm.Facing), Factor }; }
+					PanelAlong.Add(Factor, C);
+					Out.Panels.Add(FitPiece(C, -FT, Gm.Facing, T, PieceLen, WallTop + FT, Size));
+				}
+				else
+				{
+					// The curb's top at CurbHeight, its girder hanging under the deck.
+					CurbF.Add(PieceLen / Size.Y, C);
+					Out.Curbs.Add(FitPiece(C, G.CurbHeight - Size.Z, Gm.Facing, T, PieceLen, Size.Z, Size));
+				}
+			}
+		};
+		auto DressRun = [&](const FEdgeRun& R, bool bWall)
+		{
+			const FRunGeo Gm = RunGeo(R);
+			AddSquare(Gm.Square0, bWall);
+			AddSquare(Gm.Square1, bWall);
+			const double A1 = Gm.A + (Gm.bConvex0 ? T : 0.0);
+			const double B1 = Gm.B - (Gm.bConvex1 ? T : 0.0);
+			for (const FVector2D& Span : Spans(Gm.bAlongY, Gm.Mid, A1, B1))
+			{
+				PlacePieces(Gm, Span.X, Span.Y, bWall);
+			}
+		};
+		for (int32 I = 0; I < Geo.WallRuns.Num(); ++I)
+		{
+			if (Out.WallHidden[I])
+			{
+				DressRun(Geo.WallRuns[I], true);
+			}
+		}
+		for (int32 I = 0; I < Geo.CurbRuns.Num(); ++I)
+		{
+			if (Out.CurbHidden[I])
+			{
+				DressRun(Geo.CurbRuns[I], false);
+			}
+		}
+
+		// Pillars: a wall panel on each face, ribs out, and a post in each corner; a plate closes the bottom (the ceiling
+		// plates already pass over them).
+		for (int32 I = 0; I < Geo.Pillars.Num(); ++I)
+		{
+			if (!Out.PillarHidden[I])
+			{
+				continue;
+			}
+			const FBox& P = Geo.Pillars[I];
+			struct FFace { bool bAlongY; double Out0; int32 Facing; double A; double B; };
+			const FFace Faces[4] = {
+				{ true, P.Min.X, 2, P.Min.Y + T, P.Max.Y - T },
+				{ true, P.Max.X - T, 0, P.Min.Y + T, P.Max.Y - T },
+				{ false, P.Min.Y, 3, P.Min.X + T, P.Max.X - T },
+				{ false, P.Max.Y - T, 1, P.Min.X + T, P.Max.X - T } };
+			for (const FFace& Face : Faces)
+			{
+				FRunGeo Gm;
+				Gm.bAlongY = Face.bAlongY;
+				Gm.Out0 = Face.Out0;
+				Gm.Mid = Face.Out0 + 0.5 * T;
+				Gm.Facing = Face.Facing;
+				PlacePieces(Gm, Face.A, Face.B, true);
+			}
+			for (const FVector2D& Corner : { FVector2D(P.Min.X, P.Min.Y), FVector2D(P.Max.X - T, P.Min.Y), FVector2D(P.Min.X, P.Max.Y - T), FVector2D(P.Max.X - T, P.Max.Y - T) })
+			{
+				AddSquare(FBox2D(Corner, Corner + FVector2D(T, T)), true);
+			}
+			Tile(FBox(FVector(P.Min.X, P.Min.Y, -FT), FVector(P.Max.X, P.Max.Y, 0.0)), -FT, false);
+		}
+
+		// A post in each corner square that no shown box covers, as tall as the tallest box there.
+		TArray<FIntPoint> Keys;
+		Squares.GetKeys(Keys);
+		Keys.Sort([](const FIntPoint& X, const FIntPoint& Y) { return X.Y != Y.Y ? X.Y < Y.Y : X.X < Y.X; });
+		for (const FIntPoint& Key : Keys)
+		{
+			const FSquare& Sq = Squares[Key];
+			const FVector2D C = Sq.Box.GetCenter();
+			bool bShownCovers = false;
+			bool bWallCovers = Sq.bWall;
+			auto Covers = [&C](const FBox& Box) { return C.X > Box.Min.X + 0.1 && C.X < Box.Max.X - 0.1 && C.Y > Box.Min.Y + 0.1 && C.Y < Box.Max.Y - 0.1; };
+			for (int32 I = 0; I < Geo.Walls.Num() && !bShownCovers; ++I)
+			{
+				if (Covers(Geo.Walls[I]))
+				{
+					bShownCovers |= !Out.WallHidden[I];
+					bWallCovers = true;
+				}
+			}
+			for (int32 I = 0; I < Geo.Curbs.Num() && !bShownCovers; ++I)
+			{
+				bShownCovers |= Covers(Geo.Curbs[I]) && !Out.CurbHidden[I];
+			}
+			for (int32 I = 0; I < Geo.Pillars.Num() && !bShownCovers; ++I)
+			{
+				bShownCovers |= Covers(Geo.Pillars[I]) && !Out.PillarHidden[I];
+			}
+			if (bShownCovers)
+			{
+				continue;
+			}
+			const double Bottom = bWallCovers ? -FT : G.CurbHeight - CurbSize.Z;
+			const double Top = bWallCovers ? WallTop : G.CurbHeight;
+			Out.Posts.Add(FitPiece(C, Bottom, 0, Sq.Box.GetSize().X, Sq.Box.GetSize().Y, Top - Bottom, PostSize));
+		}
+
+		// Conduits: one continuous run along each wall line of a corridor or a gate (cells inside its legs: not inside
+		// niches or dead ends) at least a metre long. Where a niche or a dead end of the same segment opens in the wall,
+		// the run goes straight on across its mouth, at the same height, to the wall on its far side: the walls on the
+		// two sides of a mouth are one line. A line ends where its wall ends: against the wall that closes it, at the
+		// edge of any other opening (the face of the wall that turns away there), or against a gate frame. Where two
+		// walls that both carry one meet, the run along X meets the run along Y: at an inside corner it stops at the
+		// other run's front, at an outside corner it goes on to the other run's front, so the two join.
+		auto IsMainCell = [&](const FIntPoint& C)
+		{
+			const FCell* E = Plan.Cells.Find(C);
+			if (!E || E->Kind != EKind::Floor || !Plan.Segs.IsValidIndex(E->Segment))
+			{
+				return false;
+			}
+			const FSeg& Sg = Plan.Segs[E->Segment];
+			if (Sg.Type != EAreaSegmentType::Corridor && Sg.Type != EAreaSegmentType::Gate)
+			{
+				return false;
+			}
+			const FVector2D P = CellCenter(C);
+			for (const FLeg& Leg : Sg.Legs)
+			{
+				if (Inside(Leg.Rect, P)) { return true; }
+			}
+			return false;
+		};
+		// A niche's or a dead end's mouth along a run's line: the corridor's (or gate's) floor on one side of the line and
+		// a floor cell of the same segment outside its legs on the other, so no wall stands on the line there.
+		auto IsMouth = [&](const FEdgeRun& R, int32 C)
+		{
+			const FIntPoint Floor = RunCell(R, C);
+			const FIntPoint Across = AcrossCell(R, C);
+			const FCell* F = Plan.Cells.Find(Floor);
+			const FCell* A = Plan.Cells.Find(Across);
+			return F && A && A->Kind == EKind::Floor && A->Segment == F->Segment && IsMainCell(Floor) && !IsMainCell(Across);
+		};
+		TArray<bool> CarriesConduit;
+		CarriesConduit.Init(false, Geo.WallRuns.Num());
+		TMap<FIntPoint, TArray<int32>> ConduitCorners;
+		TMap<FIntVector, int32> RunStarts;  // (D, Line, R0) of each run that carries one
+		for (int32 I = 0; I < Geo.WallRuns.Num(); ++I)
+		{
+			const FEdgeRun& R = Geo.WallRuns[I];
+			if (!Out.WallHidden[I])
+			{
+				continue;
+			}
+			bool bMain = true;
+			for (int32 C = R.R0; C <= R.R1 && bMain; ++C)
+			{
+				bMain = IsMainCell(RunCell(R, C));
+			}
+			if (!bMain)
+			{
+				continue;
+			}
+			CarriesConduit[I] = true;
+			RunStarts.Add(FIntVector(R.D, R.Line, R.R0), I);
+			const FRunGeo Gm = RunGeo(R);
+			ConduitCorners.FindOrAdd(SquareKey(Gm.Square0)).Add(I);
+			ConduitCorners.FindOrAdd(SquareKey(Gm.Square1)).Add(I);
+		}
+		// Lines: runs on one wall line joined across the mouths between them, in run order.
+		TArray<int32> NextRun, MouthEnd;
+		NextRun.Init(INDEX_NONE, Geo.WallRuns.Num());
+		MouthEnd.Init(0, Geo.WallRuns.Num());
+		TArray<bool> HasPrevious;
+		HasPrevious.Init(false, Geo.WallRuns.Num());
+		for (int32 I = 0; I < Geo.WallRuns.Num(); ++I)
+		{
+			if (!CarriesConduit[I])
+			{
+				continue;
+			}
+			const FEdgeRun& R = Geo.WallRuns[I];
+			int32 C = R.R1 + 1;
+			while (IsMouth(R, C) && C - R.R1 <= 64)
+			{
+				++C;
+			}
+			const int32* J = C > R.R1 + 1 ? RunStarts.Find(FIntVector(R.D, R.Line, C)) : nullptr;
+			if (J && *J != I)
+			{
+				NextRun[I] = *J;
+				MouthEnd[I] = C;
+				HasPrevious[*J] = true;
+			}
+		}
+		auto Shared = [&](const FBox2D& Square)
+		{
+			const TArray<int32>* Runs = ConduitCorners.Find(SquareKey(Square));
+			return Runs && Runs->Num() > 1;
+		};
+		// SM_KitConduit has one bracket, its middle a quarter of the piece's length from the piece's middle along the
+		// piece's -Y (Blender's +Y is Unreal's -Y), and a fortieth of its length wide on each side.
+		constexpr double BracketAt = -0.25;
+		constexpr double BracketHalf = 0.025;
+		constexpr double BracketMargin = 2.0;  // cm a bracket keeps from a mouth's edge
+		FFactorRange ConduitCrossF;
+		int32 MouthsCrossed = 0, LinesUnsolved = 0;
+		struct FMouthLine { bool bAlongY; double Mid; double A; double B; };
+		TArray<FMouthLine> AllMouths;
+		double FirstMouthDistance = TNumericLimits<double>::Max();
+		const FVector2D RouteStart = Plan.Segs.Num() > 0 && Plan.Segs[0].Legs.Num() > 0 ? FVector2D(Plan.Segs[0].Legs[0].Start) : FVector2D::ZeroVector;
+		for (int32 First = 0; First < Geo.WallRuns.Num(); ++First)
+		{
+			if (!CarriesConduit[First] || HasPrevious[First])
+			{
+				continue;
+			}
+			int32 Last = First;
+			TArray<FVector2D> Mouths;  // along the line, between a run's end and the next run's start
+			for (int32 Guard = 0; NextRun[Last] != INDEX_NONE && Guard < 256; ++Guard)
+			{
+				const FEdgeRun& R = Geo.WallRuns[Last];
+				Mouths.Add(FVector2D((R.R1 + 1) * Cell, MouthEnd[Last] * Cell));
+				Last = NextRun[Last];
+			}
+			const FRunGeo Gm = RunGeo(Geo.WallRuns[First]);
+			const FRunGeo GmLast = RunGeo(Geo.WallRuns[Last]);
+			const bool bAlongX = !Gm.bAlongY;
+			double S0 = Gm.A;
+			double S1 = GmLast.B;
+			if (S1 - S0 < 100.0)
+			{
+				continue;
+			}
+			if (bAlongX && Shared(Gm.Square0)) { S0 += Gm.bConvex0 ? -ConduitFront : ConduitFront; }
+			if (bAlongX && Shared(GmLast.Square1)) { S1 += GmLast.bConvex1 ? ConduitFront : -ConduitFront; }
+			for (const FVector2D& M : Mouths)
+			{
+				++MouthsCrossed;
+				AllMouths.Add({ Gm.bAlongY, Gm.Mid, M.X, M.Y });
+				const FVector2D MouthAt = At(Gm, Gm.Mid, 0.5 * (M.X + M.Y));
+				const double Distance = FVector2D::Distance(MouthAt, RouteStart);
+				if (Distance < FirstMouthDistance)
+				{
+					FirstMouthDistance = Distance;
+					Out.FirstMouth = { MouthAt, DirV(Gm.Facing), M.Y - M.X };
+				}
+			}
+			// Where the bracket of a piece from S to S + L falls along the line, by the way the piece's +Y runs.
+			const FVector2D F = DirV(Gm.Facing);
+			const double Sigma = Gm.bAlongY ? F.X : -F.Y;
+			auto BracketClear = [&](double S, double L)
+			{
+				const double Middle = S + 0.5 * L + Sigma * BracketAt * L;
+				const double Half = BracketHalf * L + BracketMargin;
+				for (const FVector2D& M : Mouths)
+				{
+					if (Middle + Half > M.X && Middle - Half < M.Y) { return false; }
+				}
+				return true;
+			};
+			for (const FVector2D& Span : Spans(Gm.bAlongY, Gm.Mid, S0, S1))
+			{
+				const double Len = Span.Y - Span.X;
+				if (Len < 1.0)
+				{
+					continue;
+				}
+				TArray<double> Lengths;
+				bool bCrosses = false;
+				for (const FVector2D& M : Mouths)
+				{
+					bCrosses |= M.X < Span.Y && M.Y > Span.X;
+				}
+				if (bCrosses)
+				{
+					// The pieces' lengths, on a 5 cm step (the last one takes what is left), that keep every bracket on a
+					// wall and scale the pieces least: the sum of the squared log of each piece's factor.
+					constexpr double Step = 5.0;
+					const double MinL = 0.5 * ConduitLen;
+					const double MaxL = 2.5 * ConduitLen;
+					const int32 K = FMath::FloorToInt(Len / Step);
+					TArray<double> Best;
+					TArray<int32> Prev;
+					Best.Init(TNumericLimits<double>::Max(), K + 2);
+					Prev.Init(INDEX_NONE, K + 2);
+					Best[0] = 0.0;
+					auto Cost = [&](double L) { return FMath::Square(FMath::Loge(L / ConduitLen)); };
+					for (int32 P = 0; P <= K; ++P)
+					{
+						if (Best[P] == TNumericLimits<double>::Max())
+						{
+							continue;
+						}
+						const double From = P * Step;
+						for (int32 Q = P + 1; Q <= K + 1; ++Q)
+						{
+							const double To = Q == K + 1 ? Len : Q * Step;
+							const double L = To - From;
+							if (L > MaxL) { break; }
+							if (L < MinL || (Q == K && Len - To < 1e-6) || !BracketClear(Span.X + From, L)) { continue; }
+							const double C = Best[P] + Cost(L);
+							if (C < Best[Q]) { Best[Q] = C; Prev[Q] = P; }
+						}
+					}
+					if (Prev[K + 1] != INDEX_NONE)
+					{
+						for (int32 Q = K + 1; Q > 0; Q = Prev[Q])
+						{
+							const double To = Q == K + 1 ? Len : Q * Step;
+							Lengths.Insert(To - Prev[Q] * Step, 0);
+						}
+					}
+					else
+					{
+						++LinesUnsolved;
+					}
+				}
+				if (Lengths.Num() == 0)
+				{
+					const int32 N = FMath::Max(1, FMath::RoundToInt(Len / ConduitLen));
+					Lengths.Init(Len / N, N);
+				}
+				double S = Span.X;
+				for (const double L : Lengths)
+				{
+					const FVector2D C = At(Gm, Gm.Mid, S + 0.5 * L);
+					bool bOverMouth = false;
+					for (const FVector2D& M : Mouths)
+					{
+						bOverMouth |= M.X < S + L && M.Y > S;
+					}
+					(bOverMouth ? ConduitCrossF : ConduitF).Add(L / ConduitLen, C);
+					Out.Conduits.Add(FitPiece(C, G.DressConduitHeight, Gm.Facing, 1.0, L, 1.0, FVector(1.0, ConduitLen, 1.0)));
+					S += L;
+				}
+			}
+		}
+		// Every placed bracket, from its piece's transform, against every mouth crossed (must be none).
+		int32 BracketsOverMouth = 0;
+		for (const FTransform& Piece : Out.Conduits)
+		{
+			const FVector Bracket = Piece.TransformPosition(FVector(0.5 * G.DressConduitDepth, BracketAt * ConduitLen, 0.0));
+			const double Half = BracketHalf * ConduitLen * Piece.GetScale3D().Y;
+			for (const FMouthLine& M : AllMouths)
+			{
+				const double Along = M.bAlongY ? Bracket.Y : Bracket.X;
+				const double Across = M.bAlongY ? Bracket.X : Bracket.Y;
+				if (FMath::Abs(Across - M.Mid) < T + G.DressConduitDepth && Along + Half > M.A && Along - Half < M.B)
+				{
+					++BracketsOverMouth;
+				}
+			}
+		}
+
+		// Ceiling beams: across corridor and gate legs every DressBeamSpacing where both ends meet a wall (not by a gate's
+		// frame), and across rooms in lines of beams from wall to wall; their ends in the panels' slab.
+		const double BeamSpacing = G.DressBeamSpacing;
+		for (int32 S = 0; S < Plan.Segs.Num() && BeamSpacing > 0.0; ++S)
+		{
+			const FSeg& Seg = Plan.Segs[S];
+			const bool bStrip = Seg.Type == EAreaSegmentType::Corridor || Seg.Type == EAreaSegmentType::Gate;
+			if ((!bStrip && Seg.Type != EAreaSegmentType::Room) || !IsDressedSegment(Plan, S))
+			{
+				continue;
+			}
+			for (const FLeg& Leg : Seg.Legs)
+			{
+				const FVector2D F = DirV(Leg.Dir);
+				const FVector2D L = DirV(LeftOf(Leg.Dir));
+				// The leg's extent across: the strip's width around its centreline, or the room's rectangle.
+				double Lat0 = -0.5 * Seg.Width;
+				double Lat1 = 0.5 * Seg.Width;
+				if (!bStrip)
+				{
+					const FVector2D C0 = Leg.Rect.Min - Leg.Start;
+					const FVector2D C1 = Leg.Rect.Max - Leg.Start;
+					const double D0 = FVector2D::DotProduct(C0, L);
+					const double D1 = FVector2D::DotProduct(C1, L);
+					Lat0 = FMath::Min(D0, D1);
+					Lat1 = FMath::Max(D0, D1);
+				}
+				for (double Along = BeamSpacing; Along <= Leg.Length - 100.0; Along += BeamSpacing)
+				{
+					const FVector2D P = Leg.Start + F * Along;
+					bool bWalls = true;
+					for (const double Lat : { Lat0, Lat1 })
+					{
+						const double Side = Lat > 0.0 ? 1.0 : -1.0;
+						const FVector2D InsideP = P + L * (Lat - Side * Cell * 0.5);
+						const FVector2D OutsideP = P + L * (Lat + Side * Cell * 0.5);
+						const FIntPoint CI(FMath::FloorToInt(InsideP.X / Cell), FMath::FloorToInt(InsideP.Y / Cell));
+						const FIntPoint CO(FMath::FloorToInt(OutsideP.X / Cell), FMath::FloorToInt(OutsideP.Y / Cell));
+						const FCell* EI = Plan.Cells.Find(CI);
+						bWalls &= EI && EI->Segment == S && !Plan.Cells.Contains(CO);
+					}
+					for (const FFrame& Fr : Frames)
+					{
+						bWalls &= FVector2D::Distance(P, Fr.Door) > 100.0;
+					}
+					if (!bWalls)
+					{
+						continue;
+					}
+					// Lines of beams from wall to wall, each about the beam's length; the line's length along the beam's Y.
+					const double Span = (Lat1 - Lat0) + T;
+					const int32 N = FMath::Max(1, FMath::RoundToInt(Span / BeamLength));
+					for (int32 K = 0; K < N; ++K)
+					{
+						const double Lat = Lat0 - 0.5 * T + (K + 0.5) * Span / N;
+						const FVector2D C = P + L * Lat;
+						BeamF.Add(Span / N / BeamLength, C);
+						Out.Beams.Add(FitPiece(C, G.WallHeight, Leg.Dir, 1.0, Span / N, 1.0, FVector(1.0, BeamLength, 1.0)));
+					}
+				}
+			}
+		}
+
+		// Frames under catwalk decks and platforms, across each floor box's short side and its curbs.
+		const double FrameSpacing = G.DressFrameSpacing;
+		const double FrameSpan = FMath::Max(1.0, static_cast<double>(G.DressFrameSpan));
+		FFactorRange CatwalkFrameF;
+		for (int32 I = 0; I < Geo.FloorRects.Num() && FrameSpacing > 0.0; ++I)
+		{
+			const FAreaFloorRect& Rect = Geo.FloorRects[I];
+			if (!Out.FloorHidden[I] || !Plan.Segs.IsValidIndex(Rect.Segment) || Plan.Segs[Rect.Segment].Type != EAreaSegmentType::Catwalk)
+			{
+				continue;
+			}
+			const FBox& Box = Rect.Box;
+			const double SX = Box.Max.X - Box.Min.X;
+			const double SY = Box.Max.Y - Box.Min.Y;
+			const bool bAlongX = SX >= SY;  // frames step along the long side
+			const double Long = bAlongX ? SX : SY;
+			const int32 N = FMath::Max(1, FMath::RoundToInt(Long / FrameSpacing));
+			for (int32 K = 0; K < N; ++K)
+			{
+				const double S = (bAlongX ? Box.Min.X : Box.Min.Y) + (K + 0.5) * Long / N;
+				double E0 = bAlongX ? Box.Min.Y : Box.Min.X;
+				double E1 = bAlongX ? Box.Max.Y : Box.Max.X;
+				// Out to the curbs' outer faces where the edge is open (no floor beyond).
+				auto Floor = [&](double Across)
+				{
+					const FVector2D Q = bAlongX ? FVector2D(S, Across) : FVector2D(Across, S);
+					return Plan.Cells.Contains(FIntPoint(FMath::FloorToInt(Q.X / Cell), FMath::FloorToInt(Q.Y / Cell)));
+				};
+				E0 -= Floor(E0 - Cell * 0.5) ? 0.0 : T;
+				E1 += Floor(E1 + Cell * 0.5) ? 0.0 : T;
+				const double Mid = 0.5 * (E0 + E1);
+				const FVector2D C = bAlongX ? FVector2D(S, Mid) : FVector2D(Mid, S);
+				CatwalkFrameF.Add((E1 - E0) / FrameSpan, C);
+				Out.Frames.Add(FitPiece(C, -FT, bAlongX ? 0 : 1, 1.0, E1 - E0, 1.0, FVector(1.0, FrameSpan, 1.0)));
+			}
+		}
+
+		Out.Report = FString::Printf(TEXT("%s, wall height x%.3f; %s, %s; %s; %s; %s; %s; posts %d; %s"),
+			*PanelAlong.ToString(TEXT("wall panels along")), (WallTop + FT) / PanelSize.Z, *PlateShort.ToString(TEXT("floor and ceiling plates, their 2 m side")),
+			*PlateLong.ToString(TEXT("their 1 m side")), *BeamF.ToString(TEXT("beams")), *ConduitF.ToString(TEXT("conduits")), *CurbF.ToString(TEXT("curbs")),
+			*CatwalkFrameF.ToString(TEXT("catwalk frames")), Out.Posts.Num(), *FrameF.ToString(TEXT("gate frames across")));
+		for (int32 I = 0; I < Geo.CurbRuns.Num() && I < Out.CurbHidden.Num(); ++I)
+		{
+			ShownMixed += !Out.CurbHidden[I] && TouchesDressed(Geo.CurbRuns[I]) ? 1 : 0;
+		}
+		int32 HiddenBoxes = 0, ShownStructure = 0;
+		for (const TArray<bool>* Flags : { &Out.FloorHidden, &Out.WallHidden, &Out.CurbHidden, &Out.PillarHidden, &Out.CeilingHidden })
+		{
+			for (const bool bHidden : *Flags) { (bHidden ? HiddenBoxes : ShownStructure) += 1; }
+		}
+		Out.Report += FString::Printf(TEXT("; %s (cm); boxes collision only %d, shown %d (halls), shown boxes touching a modelled segment %d"),
+			*Fillers.ToString(TEXT("filler blocks")), HiddenBoxes, ShownStructure, ShownMixed);
+		Out.Report += FString::Printf(TEXT("; conduit runs across %d niche and dead-end mouths, %s, brackets over a mouth %d, lines left unsolved %d"),
+			MouthsCrossed, *ConduitCrossF.ToString(TEXT("conduits across a mouth")), BracketsOverMouth, LinesUnsolved);
+	}
 }
 
 namespace AreaHash
@@ -2043,6 +2865,13 @@ namespace AreaHash
 		EAreaPieceKind::Pillars, EAreaPieceKind::Ceilings, EAreaPieceKind::Backdrop };
 }
 
+#if !UE_BUILD_SHIPPING
+static TAutoConsoleVariable<int32> CVarAreaDressing(
+	TEXT("tls.Area.Dressing"), 1,
+	TEXT("1: the modelled segments are dressed with the kit (their boxes collision only). 0: every box shown, no dressing (diagnostics: the look before Brief 16). Read at each generation."),
+	ECVF_Default);
+#endif
+
 // --- Queries ---
 
 TArray<UInstancedStaticMeshComponent*> AAreaGenerator::GetPCGComponents(EAreaPieceKind Kind) const
@@ -2068,6 +2897,28 @@ int32 AAreaGenerator::GetPCGInstanceCountOf(EAreaPieceKind Kind) const
 	for (const UInstancedStaticMeshComponent* Component : GetPCGComponents(Kind))
 	{
 		Count += Component->GetInstanceCount();
+	}
+	return Count;
+}
+
+bool AAreaGenerator::IsDressedSegmentType(EAreaSegmentType Type)
+{
+	// Brief 16: corridors, rooms, gates and catwalks. Halls stay boxes until their own briefs.
+	return Type != EAreaSegmentType::Hall;
+}
+
+int32 AAreaGenerator::GetDressingInstanceCount() const
+{
+	static const FName Tag(TEXT("AreaDressing"));
+	TArray<UInstancedStaticMeshComponent*> All;
+	GetComponents(All);
+	int32 Count = 0;
+	for (const UInstancedStaticMeshComponent* Component : All)
+	{
+		if (Component && Component->ComponentHasTag(Tag))
+		{
+			Count += Component->GetInstanceCount();
+		}
 	}
 	return Count;
 }
@@ -2261,7 +3112,9 @@ int32 AAreaGenerator::ClearArea()
 		}
 	}
 	PublishedPieces.Reset();
-	for (TArray<FTransform>* Plan : { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop })
+	for (TArray<FTransform>* Plan : { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop,
+		&PlanFloorsCollision, &PlanWallsCollision, &PlanCurbsCollision, &PlanPillarsCollision, &PlanCeilingsCollision,
+		&DressWallPanels, &DressFloorPlates, &DressCornerPosts, &DressCeilingBeams, &DressConduits, &DressCurbs, &DressCatwalkFrames, &DressGateFrames })
 	{
 		Plan->Reset();
 	}
@@ -2608,10 +3461,11 @@ void AAreaGenerator::BecomeReady()
 	State = EAreaGenerationState::Ready;
 	ReleasePlayer();
 	SetCoverHold(false);
-	UE_LOG(LogArea, Display, TEXT("%s: AREA READY: act %d, map %s, seed %d (%d tried), hash %016llx, route %.1f m, %d PCG instances (plan %s), plan %.3f s, PCG %.3f s, navmesh %.3f s, validation %.3f s, time to ready %.2f s."),
+	UE_LOG(LogArea, Display, TEXT("%s: AREA READY: act %d, map %s, seed %d (%d tried), hash %016llx, route %.1f m, %d PCG instances (plan %s), plan %.3f s, PCG %.3f s, navmesh %.3f s, validation %.3f s, time to ready %.2f s; dressing %d instances."),
 		*GetName(), Act, *UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()), Seed, LastSeedsTried, static_cast<uint64>(LayoutHash), RouteLength / 100.f,
 		GetPCGInstanceCount(), bLastPCGMatchedPlan ? TEXT("matched") : TEXT("NOT MATCHED"), LastGenerationSeconds, LastPCGSeconds, LastNavigationSeconds,
-		LastValidationSeconds, TimeToReadySeconds);
+		LastValidationSeconds, TimeToReadySeconds, GetDressingInstanceCount());
+	UE_LOG(LogArea, Display, TEXT("%s: DRESSING act %d seed %d: %s."), *GetName(), Act, Seed, *LastDressingReport);
 	if (URunSubsystem* Run = URunSubsystem::Get(this))
 	{
 		Run->NotifyAreaReady(World);
@@ -2863,30 +3717,72 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	PublishedPieces[static_cast<int32>(EAreaPieceKind::Ceilings)].Boxes = Geometry.Ceilings;
 	PublishedPieces[static_cast<int32>(EAreaPieceKind::Backdrop)].Boxes = Geometry.Backdrop;
 	{
+		// The boxes of the modelled segments go to the collision arrays (spawned hidden), the others stay shown; the
+		// dressing is placed over the hidden ones. Neither changes PublishedPieces, which the hash and the plan check read.
+		FDressing Dressing;
+#if !UE_BUILD_SHIPPING
+		// tls.Area.Dressing 0 (diagnostics): every box shown and no dressing, as before Brief 16; the plan is the same.
+		if (CVarAreaDressing.GetValueOnGameThread() == 0)
+		{
+			Dressing.FloorHidden.Init(false, Geometry.Floors.Num());
+			Dressing.WallHidden.Init(false, Geometry.Walls.Num());
+			Dressing.CurbHidden.Init(false, Geometry.Curbs.Num());
+			Dressing.PillarHidden.Init(false, Geometry.Pillars.Num());
+			Dressing.CeilingHidden.Init(false, Geometry.Ceilings.Num());
+			Dressing.Report = TEXT("off (tls.Area.Dressing 0)");
+		}
+		else
+#endif
+		{
+			BuildDressing(*this, Plan, Geometry, Dressing);
+		}
 		const FAreaPieceHeights Heights = GetPieceHeights();
-		TArray<FTransform>* Targets[] = { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop };
+		TArray<FTransform>* Shown[] = { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop };
+		TArray<FTransform>* Hidden[] = { &PlanFloorsCollision, &PlanWallsCollision, &PlanCurbsCollision, &PlanPillarsCollision, &PlanCeilingsCollision, nullptr };
+		const TArray<bool>* HiddenFlags[] = { &Dressing.FloorHidden, &Dressing.WallHidden, &Dressing.CurbHidden, &Dressing.PillarHidden, &Dressing.CeilingHidden, nullptr };
 		for (int32 Kind = 0; Kind < 6; ++Kind)
 		{
-			for (const FBox& Box : PublishedPieces[Kind].Boxes)
+			const TArray<FBox>& Boxes = PublishedPieces[Kind].Boxes;
+			for (int32 I = 0; I < Boxes.Num(); ++I)
 			{
-				Targets[Kind]->Add(Heights.MakeTransform(static_cast<EAreaPieceKind>(Kind), Box));
+				const bool bCollisionOnly = HiddenFlags[Kind] && HiddenFlags[Kind]->IsValidIndex(I) && (*HiddenFlags[Kind])[I];
+				(bCollisionOnly ? Hidden[Kind] : Shown[Kind])->Add(Heights.MakeTransform(static_cast<EAreaPieceKind>(Kind), Boxes[I]));
 			}
 		}
+		DressWallPanels = MoveTemp(Dressing.Panels);
+		DressFloorPlates = MoveTemp(Dressing.Plates);
+		DressCornerPosts = MoveTemp(Dressing.Posts);
+		DressCeilingBeams = MoveTemp(Dressing.Beams);
+		DressConduits = MoveTemp(Dressing.Conduits);
+		DressCurbs = MoveTemp(Dressing.Curbs);
+		DressCatwalkFrames = MoveTemp(Dressing.Frames);
+		DressGateFrames = MoveTemp(Dressing.GateFrames);
+		LastDressingReport = MoveTemp(Dressing.Report);
+		DressMostSqueezedPanel = Dressing.Squeezed;
+		DressMostStretchedPanel = Dressing.Stretched;
+		DressFirstConduitMouth = Dressing.FirstMouth;
 	}
 	RouteLength = Plan.RouteLength();
 
 	// --- Spawn the gameplay actors ---
 	ULevel* Level = GetLevel();
-	auto Spawn = [&](UClass* Class, const FVector& Location, const FRotator& Rotation, const FString& Label, const TCHAR* Folder) -> AActor*
+	auto Spawn = [&](UClass* Class, const FVector& Location, const FRotator& Rotation, const FString& Label, const TCHAR* Folder, TFunction<void(AActor*)> BeforeConstruction = nullptr) -> AActor*
 	{
 		FActorSpawnParameters Params;
 		Params.OverrideLevel = Level;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		Params.bDeferConstruction = BeforeConstruction != nullptr;
 		if (!bGame)
 		{
 			Params.ObjectFlags |= RF_Transient;
 		}
 		AActor* Actor = World->SpawnActor(Class, &Location, &Rotation, Params);
+		if (Actor && BeforeConstruction)
+		{
+			// Set what the construction reads (a door's modelled panel), then finish the spawn.
+			BeforeConstruction(Actor);
+			Actor->FinishSpawning(FTransform(Rotation, Location));
+		}
 		if (Actor)
 		{
 			Actor->Tags.Add(AAreaInfo::GeneratedTag);
@@ -2961,7 +3857,10 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	for (int32 I = 0; I < Builder.GatePlacements.Num(); ++I)
 	{
 		const FBuilder::FGatePlacement& Gate = Builder.GatePlacements[I];
-		ADoorDevice* Door = Cast<ADoorDevice>(Spawn(DoorClass, At(Gate.Door, 0.f), YawOf(DirV(Gate.DoorDir)), FString::Printf(TEXT("Area_Gate%d_Door"), I), TEXT("Gates")));
+		// The gate's door shows the modelled gate panel (look only: its blocker, scan channel and timing are the class's).
+		UStaticMesh* Panel = GatePanelMesh;
+		ADoorDevice* Door = Cast<ADoorDevice>(Spawn(DoorClass, At(Gate.Door, 0.f), YawOf(DirV(Gate.DoorDir)), FString::Printf(TEXT("Area_Gate%d_Door"), I), TEXT("Gates"),
+			[Panel](AActor* Actor) { if (ADoorDevice* D = Cast<ADoorDevice>(Actor); D && Panel) { D->PanelMesh = Panel; } }));
 		APowerTerminal* Terminal = Cast<APowerTerminal>(Spawn(TerminalClass, At(Gate.Terminal, 0.f), YawOf(Gate.TerminalFacing), FString::Printf(TEXT("Area_Gate%d_Terminal"), I), TEXT("Gates")));
 		AResidue* Regen = Cast<AResidue>(Spawn(ResidueClass, At(Gate.Regen, ResidueHeight), FRotator::ZeroRotator, FString::Printf(TEXT("Area_Gate%d_RegenResidue"), I), TEXT("Gates")));
 		if (Door)
@@ -3030,7 +3929,13 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	for (int32 I = 0; I < Builder.TwinPlacements.Num(); ++I)
 	{
 		const FBuilder::FWallPlacement& P = Builder.TwinPlacements[I];
-		Spawn(TwinAITerminalClass, At(P.Pos, 0.f), YawOf(P.Facing), FString::Printf(TEXT("Area_TwinAITerminal%d"), I), TEXT("Twin"));
+		APowerTerminal* Twin = Cast<APowerTerminal>(Spawn(TwinAITerminalClass, At(P.Pos, 0.f), YawOf(P.Facing), FString::Printf(TEXT("Area_TwinAITerminal%d"), I), TEXT("Twin")));
+		// The twin AI's terminal has no body of its own: it shows the modelled body when the area's terminals do.
+		if (Twin && !Twin->bModelledBody && TerminalDefaults->bModelledBody)
+		{
+			Twin->bModelledBody = true;
+			Twin->ApplyTerminalBody();
+		}
 		UE_LOG(LogArea, Log, TEXT("%s: twin AI terminal in segment %d (%s) at (%.0f, %.0f), facing yaw %.0f, route %.1f m of %.1f m, standing place (%.0f, %.0f)."), *GetName(), P.Segment,
 			LexToString(Plan.Segs[P.Segment].Type), P.Pos.X, P.Pos.Y, YawOf(P.Facing).Yaw, P.RouteDistance / 100.f, Plan.RouteLength() / 100.f, P.Stand.X, P.Stand.Y);
 	}

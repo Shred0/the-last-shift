@@ -5,9 +5,13 @@
 // 1000 frames there and 1000 frames from 25 m behind, then the same with the settings' line values (neighbours from the
 // command, logging links per scan, links dropped by the cap and line particles), then the frame of a scan and the worst
 // of the 12 frames that follow, lines off against on. Development builds only.
+// Brief 16 added a pose: "corridor" stands 15 m into the current area's first corridor, looking back at its start (so the
+// position 25 m behind is further along the same corridor), in any area map.
 // Built with TLS_COST_BASELINE defined to 1 (the Step 1 baseline copy, without lines), it measures 0 neighbours only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Area/AreaInfo.h"
+#include "Area/AreaTypes.h"
 #include "Camera/CameraComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/Engine.h"
@@ -59,6 +63,7 @@ namespace LinksCostDebug
 		int32 Setting = 0; // 0 = 0 neighbours, 1 = the settings' line values
 		double PhaseStart = 0.0;
 		bool bQuit = false;
+		bool bCorridor = false;
 		FVector HallLocation = FVector::ZeroVector;
 		FRotator HallRotation = FRotator::ZeroRotator;
 		TArray<double> Frame, Gpu, Game;
@@ -217,7 +222,33 @@ namespace LinksCostDebug
 				T->Resume();
 			}
 			SetLines(G.Setting == 1);
-			Exec(TEXT("tls.Beacon.View 0 middle"));
+			if (G.bCorridor)
+			{
+				// 15 m into the area's first corridor, looking back at its start.
+				const UWorld* World = Pawn() ? Pawn()->GetWorld() : nullptr;
+				const AAreaInfo* Info = AAreaInfo::Find(World);
+				bool bPlaced = false;
+				for (int32 I = 0; Info && I < Info->Segments.Num() && !bPlaced; ++I)
+				{
+					if (Info->Segments[I].Type != EAreaSegmentType::Corridor)
+					{
+						continue;
+					}
+					int32 Unused = 0;
+					const FVector From = Info->GetRoutePointAtDistance(Info->Segments[I].RouteStart + 1500.f, Unused);
+					const FVector To = Info->GetRoutePointAtDistance(Info->Segments[I].RouteStart + 150.f, Unused);
+					Exec(*FString::Printf(TEXT("tls.StandAt %.0f %.0f %.0f %.0f"), From.X, From.Y, To.X, To.Y));
+					bPlaced = true;
+				}
+				if (!bPlaced)
+				{
+					UE_LOG(LogTheLastShift, Warning, TEXT("CostRun: no corridor in this map."));
+				}
+			}
+			else
+			{
+				Exec(TEXT("tls.Beacon.View 0 middle"));
+			}
 			Begin(EPhase::Scans, Now);
 			G.FrameInRound = -2;
 			return true;
@@ -351,7 +382,7 @@ namespace LinksCostDebug
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLinksCostRunCommand(
 	TEXT("tls.Links.CostRun"),
-	TEXT("tls.Links.CostRun [Quit=0] [Neighbours]: (PIE or a package, in Area2_ServerHalls) uncaps the frame rate, then at beacon 0's hall view takes 16 scans with 0 neighbours and measures 1000 frames there and 1000 from 25 m behind, then the same with the settings' line values and Neighbours (default the settings', at least 2), logging links per scan, links dropped by the cap and line particles, then the frame of a scan and the worst of the 12 frames after it, lines off against on. Logs medians."),
+	TEXT("tls.Links.CostRun [Quit=0] [Neighbours, 0 = the settings'] [hall|corridor]: (PIE or a package; hall in Area2_ServerHalls, corridor in any area: 15 m into its first corridor, looking back at the start) uncaps the frame rate, then at beacon 0's hall view takes 16 scans with 0 neighbours and measures 1000 frames there and 1000 from 25 m behind, then the same with the settings' line values and Neighbours (default the settings', at least 2), logging links per scan, links dropped by the cap and line particles, then the frame of a scan and the worst of the 12 frames after it, lines off against on. Logs medians."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		using namespace LinksCostDebug;
@@ -361,8 +392,9 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLinksCostRunCommand(
 		}
 		G = FCostRun();
 		G.bQuit = Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0;
+		G.bCorridor = Args.Num() > 2 && Args[2].Equals(TEXT("corridor"), ESearchCase::IgnoreCase);
 #if !TLS_COST_BASELINE
-		G.Neighbours = Args.Num() > 1 ? FMath::Clamp(FCString::Atoi(*Args[1]), 1, 8) : FMath::Max(UTheLastShiftSettings::GetScanLinks().Neighbours, 2);
+		G.Neighbours = Args.Num() > 1 && FCString::Atoi(*Args[1]) > 0 ? FMath::Clamp(FCString::Atoi(*Args[1]), 1, 8) : FMath::Max(UTheLastShiftSettings::GetScanLinks().Neighbours, 2);
 #endif
 		G.PhaseStart = FPlatformTime::Seconds();
 #if !TLS_COST_BASELINE

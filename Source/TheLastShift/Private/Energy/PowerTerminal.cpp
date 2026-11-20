@@ -41,6 +41,26 @@ APowerTerminal::APowerTerminal()
 
 }
 
+void APowerTerminal::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	ApplyTerminalBody();
+}
+
+void APowerTerminal::ApplyTerminalBody()
+{
+	UStaticMesh* Body = bModelledBody ? UTheLastShiftSettings::GetTerminalBodyMesh() : nullptr;
+	if (!Mesh || !Body)
+	{
+		return;
+	}
+	// The modelled body at scale 1, its pivot (base centre) at the actor's origin: the box it fills is the cube's of the
+	// constructor (40 x 60 x 120 cm from the floor), and its collision box is that box.
+	Mesh->SetStaticMesh(Body);
+	Mesh->SetRelativeLocation(FVector::ZeroVector);
+	Mesh->SetRelativeScale3D(FVector::OneVector);
+}
+
 void APowerTerminal::BeginPlay()
 {
 	Super::BeginPlay();

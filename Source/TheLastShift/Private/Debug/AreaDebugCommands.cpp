@@ -18,6 +18,7 @@
 #include "Energy/PowerTerminal.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Engine/StaticMesh.h"
 #include "Entity/Entity.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -30,6 +31,7 @@
 #include "NavigationSystem.h"
 #include "Residue/Residue.h"
 #include "Run/RunSubsystem.h"
+#include "UObject/UObjectIterator.h"
 
 #if !UE_BUILD_SHIPPING
 
@@ -870,6 +872,306 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsTravelToCommand(
 		}
 		const int32 Act = FCString::Atoi(*Args[0]);
 		UE_LOG(LogRun, Display, TEXT("tls.Travel.To %d: from act %d: %s."), Act, Run->GetActIndex(), Run->TravelToArea(Act) ? TEXT("travelling") : TEXT("refused"));
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsAreaProbeCommand(
+	TEXT("tls.Area.Probe"),
+	TEXT("tls.Area.Probe <X0> <Y0> <Z0> <X1> <Y1> <Z1>: traces the segment on the Visibility and Pawn channels in the game world and logs every blocking hit (component, its tags, its collision and render flags, distance)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		UWorld* World = nullptr;
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.World() && Context.World()->IsGameWorld()) { World = Context.World(); break; }
+		}
+		if (!World || Args.Num() < 6)
+		{
+			UE_LOG(LogArea, Warning, TEXT("tls.Area.Probe <X0> <Y0> <Z0> <X1> <Y1> <Z1> (in a game world)"));
+			return;
+		}
+		const FVector A(FCString::Atod(*Args[0]), FCString::Atod(*Args[1]), FCString::Atod(*Args[2]));
+		const FVector B(FCString::Atod(*Args[3]), FCString::Atod(*Args[4]), FCString::Atod(*Args[5]));
+		for (const ECollisionChannel Channel : { ECC_Visibility, ECC_Pawn })
+		{
+			TArray<FHitResult> Hits;
+			FCollisionQueryParams Params(SCENE_QUERY_STAT(TlsAreaProbe), false);
+			World->LineTraceMultiByChannel(Hits, A, B, Channel, Params);
+			UE_LOG(LogArea, Display, TEXT("tls.Area.Probe %s -> %s on %s: %d hits"), *A.ToString(), *B.ToString(), Channel == ECC_Visibility ? TEXT("Visibility") : TEXT("Pawn"), Hits.Num());
+			for (const FHitResult& Hit : Hits)
+			{
+				const UPrimitiveComponent* C = Hit.GetComponent();
+				FString Tags;
+				if (C) { for (const FName& T : C->ComponentTags) { Tags += T.ToString() + TEXT(" "); } }
+				UE_LOG(LogArea, Display, TEXT("  %s hit %s (%s) tags [%s] at %s, distance %.1f, item %d; collision %d, profile %s, response %d, visible %d, main pass %d"),
+					Hit.bBlockingHit ? TEXT("blocking") : TEXT("touch"), *GetNameSafe(C), C ? *C->GetClass()->GetName() : TEXT("-"), *Tags, *Hit.ImpactPoint.ToString(), Hit.Distance, Hit.Item,
+					C ? static_cast<int32>(C->GetCollisionEnabled()) : -1, C ? *C->GetCollisionProfileName().ToString() : TEXT("-"), C ? static_cast<int32>(C->GetCollisionResponseToChannel(Channel)) : -1,
+					C ? (C->IsVisible() ? 1 : 0) : -1, C ? (C->bRenderInMainPass ? 1 : 0) : -1);
+			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsAreaDressCheckCommand(
+	TEXT("tls.Area.DressCheck"),
+	TEXT("tls.Area.DressCheck: measures the dressing as placed (its instances and their meshes' bounds) against the plan's boxes: floor plate tops against the floor's top, wall panel and curb faces against their boxes' faces, curb tops against CurbHeight; counts dressing pieces inside the walkable space (over a floor, from 1 cm to 2.2 m above it)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld*)
+	{
+		UWorld* World = nullptr;
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.World() && Context.World()->IsGameWorld()) { World = Context.World(); break; }
+		}
+		AAreaGenerator* Gen = World ? AAreaGenerator::Find(World) : nullptr;
+		const AAreaInfo* Info = World ? AAreaInfo::Find(World) : nullptr;
+		if (!Gen || !Info)
+		{
+			UE_LOG(LogArea, Warning, TEXT("tls.Area.DressCheck: no area in a game world."));
+			return;
+		}
+		auto Boxes = [](const TArray<FTransform>& A, const TArray<FTransform>& B)
+		{
+			TArray<FBox> Out;
+			for (const TArray<FTransform>* L : { &A, &B })
+			{
+				for (const FTransform& T : *L)
+				{
+					const FVector Half = T.GetScale3D().GetAbs() * 50.0;
+					Out.Add(FBox(T.GetLocation() - Half, T.GetLocation() + Half));
+				}
+			}
+			return Out;
+		};
+		const TArray<FBox> Walls = Boxes(Gen->PlanWalls, Gen->PlanWallsCollision);
+		const TArray<FBox> Curbs = Boxes(Gen->PlanCurbs, Gen->PlanCurbsCollision);
+		const TArray<FBox> Pillars = Boxes(Gen->PlanPillars, Gen->PlanPillarsCollision);
+		TArray<FBox> WallLike = Walls;
+		WallLike.Append(Pillars);
+		auto Containing = [](const TArray<FBox>& List, const FVector& P) -> const FBox*
+		{
+			for (const FBox& B : List)
+			{
+				if (P.X >= B.Min.X - 0.5 && P.X <= B.Max.X + 0.5 && P.Y >= B.Min.Y - 0.5 && P.Y <= B.Max.Y + 0.5) { return &B; }
+			}
+			return nullptr;
+		};
+		double FloorTop = 0.0, WallFace = 0.0, CurbFace = 0.0, CurbTop = 0.0;
+		int32 Plates = 0, Panels = 0, CurbsN = 0, Unmatched = 0, Intrusions = 0, Pieces = 0;
+		FString Worst;
+		double WorstIntrusion = 0.0;
+		TArray<UInstancedStaticMeshComponent*> All;
+		Gen->GetComponents(All);
+		for (const UInstancedStaticMeshComponent* C : All)
+		{
+			if (!C || !C->ComponentHasTag(TEXT("AreaDressing")) || !C->GetStaticMesh())
+			{
+				continue;
+			}
+			const FBox Local = C->GetStaticMesh()->GetBoundingBox();
+			const bool bPlates = C->ComponentHasTag(TEXT("AreaDressFloorPlates"));
+			const bool bPanels = C->ComponentHasTag(TEXT("AreaDressWallPanels"));
+			const bool bCurbs = C->ComponentHasTag(TEXT("AreaDressCurbs"));
+			for (int32 I = 0; I < C->GetInstanceCount(); ++I)
+			{
+				FTransform T;
+				C->GetInstanceTransform(I, T, true);
+				const FBox B = Local.TransformBy(T);
+				++Pieces;
+				if (bPlates && B.Max.Z < 50.0)
+				{
+					++Plates;
+					FloorTop = FMath::Max(FloorTop, FMath::Abs(B.Max.Z - Info->FloorZ));
+				}
+				if (bPanels || bCurbs)
+				{
+					const FBox* Box = Containing(bPanels ? WallLike : Curbs, B.GetCenter());
+					if (!Box)
+					{
+						++Unmatched;
+					}
+					else
+					{
+						// The piece's thin axis. Against a wall or curb box (as thin as the piece) both faces must match; against a
+						// pillar the piece lines one face, so the nearer of the two.
+						const bool bThinX = (B.Max.X - B.Min.X) < (B.Max.Y - B.Min.Y);
+						const double D0 = bThinX ? FMath::Abs(B.Min.X - Box->Min.X) : FMath::Abs(B.Min.Y - Box->Min.Y);
+						const double D1 = bThinX ? FMath::Abs(B.Max.X - Box->Max.X) : FMath::Abs(B.Max.Y - Box->Max.Y);
+						const double BoxThin = bThinX ? Box->Max.X - Box->Min.X : Box->Max.Y - Box->Min.Y;
+						const double D = BoxThin <= Gen->WallThickness + 1.0 ? FMath::Max(D0, D1) : FMath::Min(D0, D1);
+						if (bPanels) { ++Panels; WallFace = FMath::Max(WallFace, D); }
+						else { ++CurbsN; CurbFace = FMath::Max(CurbFace, D); CurbTop = FMath::Max(CurbTop, FMath::Abs(B.Max.Z - Gen->CurbHeight)); }
+					}
+				}
+				// Inside the walkable space: over a floor rectangle (less 1 cm), from 1 cm to 2.2 m above it. A gate frame's
+				// bounds span its doorway (its jambs stand outside the walls' faces, its head above 3 m): it is left out.
+				if (C->ComponentHasTag(TEXT("AreaDressGateFrames")))
+				{
+					continue;
+				}
+				for (const FAreaFloorRect& R : Info->FloorRects)
+				{
+					const FBox Walk(FVector(R.Box.Min.X + 1.0, R.Box.Min.Y + 1.0, R.Box.Max.Z + 1.0), FVector(R.Box.Max.X - 1.0, R.Box.Max.Y - 1.0, R.Box.Max.Z + 220.0));
+					if (B.Intersect(Walk))
+					{
+						const FBox O = B.Overlap(Walk);
+						const double Depth = FMath::Min3(O.GetSize().X, O.GetSize().Y, O.GetSize().Z);
+						if (Depth > 0.5)
+						{
+							++Intrusions;
+							if (Depth > WorstIntrusion)
+							{
+								WorstIntrusion = Depth;
+								Worst = FString::Printf(TEXT("%s instance %d at %s, %.1f cm"), *C->GetName(), I, *B.GetCenter().ToString(), Depth);
+							}
+						}
+					}
+				}
+			}
+		}
+		UE_LOG(LogArea, Display, TEXT("tls.Area.DressCheck: %d dressing pieces; floor plates %d, largest |top - floor| %.2f cm; wall panels %d, largest face distance from their box %.2f cm; curbs %d, largest face distance %.2f cm, largest |top - CurbHeight| %.2f cm; pieces not over a box %d; pieces inside the walkable space (deeper than 0.5 cm) %d%s"),
+			Pieces, Plates, FloorTop, Panels, WallFace, CurbsN, CurbFace, CurbTop, Unmatched, Intrusions, Worst.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", deepest %s"), *Worst));
+	}));
+
+namespace TerminalCheck
+{
+	struct FPart { const TCHAR* Name; FBox Box; };
+
+	/** SM_TerminalBody's parts (mesh cm, from its Blender source): plinth, column, head (the head's slanted top as its box). */
+	static const FPart BodyParts[] = {
+		{ TEXT("plinth"), FBox(FVector(-20.0, -30.0, 0.0), FVector(20.0, 30.0, 8.0)) },
+		{ TEXT("column"), FBox(FVector(-17.0, -17.0, 8.0), FVector(5.0, 17.0, 78.0)) },
+		{ TEXT("head"), FBox(FVector(-20.0, -30.0, 78.0), FVector(20.0, 30.0, 120.0)) },
+	};
+
+	/** SM_KitWallPanel's parts (mesh cm, from its Blender source; +X is its face side, the slab's face at X 0). */
+	static const FPart PanelParts[] = {
+		{ TEXT("slab"), FBox(FVector(-10.0, -42.5, 0.0), FVector(0.0, 42.5, 350.0)) },
+		{ TEXT("rib"), FBox(FVector(-10.0, -50.0, 0.0), FVector(10.0, -42.5, 350.0)) },
+		{ TEXT("rib"), FBox(FVector(-10.0, 42.5, 0.0), FVector(10.0, 50.0, 350.0)) },
+		{ TEXT("rail"), FBox(FVector(0.0, -42.5, 100.0), FVector(5.0, 42.5, 108.0)) },
+		{ TEXT("louvre"), FBox(FVector(0.0, -30.0, 40.0), FVector(3.0, 30.0, 90.0)) },
+		{ TEXT("louvre slat"), FBox(FVector(3.0, -30.0, 48.0), FVector(7.0, 30.0, 54.0)) },
+		{ TEXT("louvre slat"), FBox(FVector(3.0, -30.0, 62.0), FVector(7.0, 30.0, 68.0)) },
+		{ TEXT("louvre slat"), FBox(FVector(3.0, -30.0, 76.0), FVector(7.0, 30.0, 82.0)) },
+		{ TEXT("upper frame"), FBox(FVector(0.0, -33.0, 175.0), FVector(5.0, 33.0, 255.0)) },
+		{ TEXT("upper side rib"), FBox(FVector(0.0, -38.5, 185.0), FVector(8.0, -33.5, 245.0)) },
+		{ TEXT("upper side rib"), FBox(FVector(0.0, 33.5, 185.0), FVector(8.0, 38.5, 245.0)) },
+	};
+
+	static FBox Shrunk(const FBox& B, double By) { return FBox(B.Min + FVector(By), B.Max - FVector(By)); }
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsTerminalCheckCommand(
+	TEXT("tls.TerminalCheck"),
+	TEXT("tls.TerminalCheck: (any map; the game world, else the editor's) for every power terminal showing the modelled body, logs every visible mesh part its body's parts (plinth, column, head) cut into by more than 0.5 cm: a wall panel's own parts (slab, ribs, rail, louvre, upper frame) from SM_KitWallPanel's source, any other mesh by its bounds; and the distance from its back to the wall panel's slab face behind it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld*)
+	{
+		using namespace TerminalCheck;
+		UWorld* World = nullptr;
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.World() && Context.World()->IsGameWorld()) { World = Context.World(); break; }
+		}
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (!World && Context.World() && Context.WorldType == EWorldType::Editor) { World = Context.World(); }
+		}
+		if (!World)
+		{
+			UE_LOG(LogArea, Warning, TEXT("tls.TerminalCheck: no world."));
+			return;
+		}
+		int32 Terminals = 0, Clear = 0;
+		for (TActorIterator<APowerTerminal> It(World); It; ++It)
+		{
+			const APowerTerminal* T = *It;
+			const UStaticMeshComponent* Body = nullptr;
+			TArray<UStaticMeshComponent*> Own;
+			T->GetComponents(Own);
+			for (const UStaticMeshComponent* C : Own)
+			{
+				Body = C && C->GetStaticMesh() && C->GetStaticMesh()->GetName() == TEXT("SM_TerminalBody") ? C : Body;
+			}
+			if (!T->bModelledBody || !Body)
+			{
+				continue;
+			}
+			++Terminals;
+			const FTransform BodyT = Body->GetComponentTransform();
+			FBox BodyBox(ForceInit);
+			TArray<FBox> BodyBoxes;
+			for (const FPart& P : BodyParts)
+			{
+				BodyBoxes.Add(Shrunk(P.Box.TransformBy(BodyT), 0.5));
+				BodyBox += BodyBoxes.Last();
+			}
+			const FBox Near = BodyBox.ExpandBy(60.0);
+			FString Hits;
+			int32 HitCount = 0;
+			double BackToFace = -1.0;
+			const FVector Back = BodyT.TransformPosition(FVector(-20.0, 0.0, 60.0));
+			const FVector BackDir = -BodyT.GetUnitAxis(EAxis::X);
+			auto Test = [&](const FString& What, const FBox& Box)
+			{
+				for (int32 I = 0; I < BodyBoxes.Num(); ++I)
+				{
+					if (BodyBoxes[I].Intersect(Box))
+					{
+						const FVector O = BodyBoxes[I].Overlap(Box).GetSize();
+						const double Depth = FMath::Min3(O.X, O.Y, O.Z) + 0.5;  // the 0.5 cm taken off the body's side
+						++HitCount;
+						Hits += FString::Printf(TEXT("%s%s into the %s by %.1f cm"), Hits.IsEmpty() ? TEXT("") : TEXT("; "), *What, BodyParts[I].Name, Depth);
+					}
+				}
+			};
+			for (TObjectIterator<UStaticMeshComponent> CIt; CIt; ++CIt)
+			{
+				const UStaticMeshComponent* C = *CIt;
+				if (!C || C->GetWorld() != World || C->GetOwner() == T || !C->GetStaticMesh() || !C->IsVisible() || !C->bRenderInMainPass || !C->IsRegistered())
+				{
+					continue;
+				}
+				const UInstancedStaticMeshComponent* ISM = Cast<UInstancedStaticMeshComponent>(C);
+				const int32 Count = ISM ? ISM->GetInstanceCount() : 1;
+				const FBox Local = C->GetStaticMesh()->GetBoundingBox();
+				const bool bPanel = C->GetStaticMesh()->GetName() == TEXT("SM_KitWallPanel");
+				for (int32 I = 0; I < Count; ++I)
+				{
+					FTransform W = C->GetComponentTransform();
+					if (ISM) { ISM->GetInstanceTransform(I, W, true); }
+					if (!Local.TransformBy(W).Intersect(Near))
+					{
+						continue;
+					}
+					const FString Owner = FString::Printf(TEXT("%s %s%s"), C->GetOwner() ? *C->GetOwner()->GetActorNameOrLabel() : TEXT("-"), *C->GetStaticMesh()->GetName(),
+						ISM ? *FString::Printf(TEXT(" #%d"), I) : TEXT(""));
+					if (!bPanel)
+					{
+						Test(Owner, Local.TransformBy(W));
+						continue;
+					}
+					for (const FPart& P : PanelParts)
+					{
+						Test(Owner + TEXT(" ") + P.Name, P.Box.TransformBy(W));
+					}
+					// The panel's slab face behind the terminal's back: its distance along the panel's face direction.
+					const FVector FaceN = W.GetUnitAxis(EAxis::X);
+					if (FVector::DotProduct(FaceN, BackDir) < -0.9)
+					{
+						const FVector InPanel = W.InverseTransformPosition(Back);
+						const FVector HalfAlong = W.GetScale3D() * 50.0;
+						if (InPanel.Y >= -50.0 && InPanel.Y <= 50.0 && InPanel.Z >= 0.0 && InPanel.Z <= 350.0 && HalfAlong.Y > 0.0)
+						{
+							const double D = FVector::DotProduct(Back - W.GetLocation(), FaceN);
+							BackToFace = BackToFace < 0.0 ? D : FMath::Min(BackToFace, D);
+						}
+					}
+				}
+			}
+			Clear += HitCount == 0 ? 1 : 0;
+			UE_LOG(LogArea, Display, TEXT("tls.TerminalCheck: %s (%s) at %s yaw %.0f: %s%s"), *T->GetActorNameOrLabel(), *T->GetClass()->GetName(),
+				*T->GetActorLocation().ToCompactString(), T->GetActorRotation().Yaw, HitCount == 0 ? TEXT("clear") : *FString::Printf(TEXT("%d contacts: %s"), HitCount, *Hits),
+				BackToFace >= 0.0 ? *FString::Printf(TEXT("; its back %.1f cm from the wall panel's slab face"), BackToFace) : TEXT("; no wall panel behind it"));
+		}
+		UE_LOG(LogArea, Display, TEXT("tls.TerminalCheck: %d terminals with the modelled body in %s, %d clear"), Terminals, *World->GetMapName(), Clear);
 	}));
 
 #endif // !UE_BUILD_SHIPPING

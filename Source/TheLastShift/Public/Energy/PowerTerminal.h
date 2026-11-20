@@ -8,6 +8,7 @@
 
 class APawn;
 class APoweredDevice;
+class UStaticMesh;
 class UStaticMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTerminalActivated, int32, Cost);
@@ -84,6 +85,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	FBox GetLocalBodyBox() const;
 
+	/**
+	 * Shows the project's modelled terminal body (UTheLastShiftSettings::TerminalBodyMesh, the one owner of the reference)
+	 * instead of the engine's cube scaled to the body. The body fills the cube's box (40 x 60 x 120 cm) and its collision is
+	 * that box: only the look changes; Mesh keeps its scan channel and its place. Off (the default): nothing changes. A
+	 * terminal with a body of its own (the log terminal) ignores it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terminal")
+	bool bModelledBody = false;
+
+	/** Gives Mesh the modelled body when bModelledBody is set (the area generator calls it after setting the flag on a terminal it spawns). */
+	void ApplyTerminalBody();
+
 	/** The terminal nearest to Pawn within its InteractRadius, or null. */
 	static APowerTerminal* FindNearestInRange(const APawn* Pawn);
 
@@ -97,6 +110,7 @@ public:
 	FOnTerminalInsufficientEnergy OnInsufficientEnergy;
 
 protected:
+	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 
 	/** After a successful payment (energy spent, Targets powered), before OnActivated and OnAnyActivated. */

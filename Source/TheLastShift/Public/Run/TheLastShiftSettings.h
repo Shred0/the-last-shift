@@ -10,6 +10,7 @@
 #include "TheLastShiftSettings.generated.h"
 
 class UDataTable;
+class UStaticMesh;
 class UWorld;
 
 /** Per-act size of a full time jump (a contact with response Jump or RewindAndJump). A graze is GrazeJumpFraction of it. */
@@ -342,6 +343,13 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability")
 	FScanLinks ScanLinks;
 
+	/**
+	 * The modelled body of the power terminals (SM_TerminalBody: 40 x 60 x 120 cm, pivot at its base centre, front +X, a
+	 * collision box of that size). The one owner of the reference: every terminal with bModelledBody shows it.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability", meta = (AllowedClasses = "/Script/Engine.StaticMesh"))
+	TSoftObjectPtr<UStaticMesh> TerminalBodyMesh;
+
 	/** The travel screen stays black at least this long, even when the next area is ready sooner. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float TravelHoldSeconds = 4.f;
@@ -572,6 +580,9 @@ public:
 
 	/** InteractableScanChannel of the project settings, clamped to [1, 4]. */
 	static int32 GetInteractableScanChannel() { return FMath::Clamp(Get()->InteractableScanChannel, 1, 4); }
+
+	/** The terminals' modelled body (loaded on first use), or null when none is set. */
+	static UStaticMesh* GetTerminalBodyMesh() { return Get()->TerminalBodyMesh.LoadSynchronous(); }
 
 	/** The map a run starts in: the first entry of AreaMaps (null when the list is empty). */
 	TSoftObjectPtr<UWorld> GetFirstAreaMap() const { return AreaMaps.Num() > 0 ? AreaMaps[0] : TSoftObjectPtr<UWorld>(); }
