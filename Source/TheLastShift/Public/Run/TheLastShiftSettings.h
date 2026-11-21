@@ -251,8 +251,9 @@ struct THELASTSHIFT_API FTravelProgressFractions
 };
 
 /**
- * The twin structure's hologram in the prologue's monitor room: a still cloud of points on an octahedron, in the scan
- * colour. The values live in Config/DefaultGame.ini.
+ * The twin structure's hologram in the prologue's monitor room: a cloud of points on an octahedron, in the scan colour,
+ * that turns and whose points drift along its faces; the route drawn inside it by the briefing, in the entity's colour;
+ * the beams that rise to it from its base's rods. The values live in Config/DefaultGame.ini.
  */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FHologramTuning
@@ -274,6 +275,104 @@ struct THELASTSHIFT_API FHologramTuning
 	/** Of the points, the share laid along the twelve edges (the rest fill the eight faces). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float EdgeShare = 0.35f;
+
+	/** One turn around the vertical axis, at a constant speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Motion", meta = (ClampMin = "5.0", ClampMax = "600.0", Units = "s"))
+	float TurnSeconds = 40.f;
+
+	/** How far a point drifts along its face, each way, before it comes back (less where the face's edge is nearer: it never leaves the face). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Motion", meta = (ClampMin = "0.0", ClampMax = "20.0", Units = "cm"))
+	float DriftDistance = 4.f;
+
+	/** The time a point takes to drift out and back. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Motion", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
+	float DriftSeconds = 4.f;
+
+	/** Each point's period differs from DriftSeconds by up to this share, and its phase is its own: out of step with its neighbours. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Motion", meta = (ClampMin = "0.0", ClampMax = "0.9"))
+	float DriftPeriodSpread = 0.3f;
+
+	/**
+	 * The route's four nodes, one for each area, in the octahedron's frame (which turns) as fractions of its half-diagonal:
+	 * node 1 near a face (the hull), node 2 between it and node 3, node 3 at the centre (the core), node 4 back toward the
+	 * surface. Each is kept inside the octahedron (|x| + |y| + |z| at most 0.95).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Route", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	FVector RouteNode1 = FVector(0.40, 0.30, 0.15);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Route", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	FVector RouteNode2 = FVector(0.15, 0.25, -0.05);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Route", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	FVector RouteNode3 = FVector(0.0, 0.0, 0.0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Route", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	FVector RouteNode4 = FVector(-0.30, -0.10, 0.40);
+
+	/** Side of a route node (a small unlit cube). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Route", meta = (ClampMin = "2.0", ClampMax = "40.0", Units = "cm"))
+	float RouteNodeSize = 10.f;
+
+	/** Width of a route line (a stretched unlit cube). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Route", meta = (ClampMin = "0.5", ClampMax = "20.0", Units = "cm"))
+	float RouteLineWidth = 2.5f;
+
+	/** The vertical rods of the hologram's base the beams rise from (SM_HologramBase: 8), evenly round its pivot. 0: no beam. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0", ClampMax = "32"))
+	int32 BeamRods = 8;
+
+	/** Distance of the rods' axes from the base's pivot. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0.0", ClampMax = "500.0", Units = "cm"))
+	float BeamRodRadius = 182.f;
+
+	/** Height of the rods' tips above the base's pivot. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0.0", ClampMax = "300.0", Units = "cm"))
+	float BeamRodTop = 45.f;
+
+	/** Angle of the first rod round the pivot, from the base's forward axis. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "-180.0", ClampMax = "180.0", Units = "deg"))
+	float BeamRodAngle = 0.f;
+
+	/**
+	 * A beam's length, as a share of the way from its rod's tip to the hologram's far side along the beam's axis (the
+	 * farthest the turning hologram, BeamMargin included, reaches along it): 1 runs through the hologram to its far side.
+	 * Its spread does not depend on it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float BeamLength = 1.f;
+
+	/**
+	 * The margin round the hologram of the cone that holds it: the smallest cone, from the rod's tip with its axis on the
+	 * hologram's centre, that holds the whole turning hologram grown by this margin (BeamSpreadShare 1 is that cone).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0.0", ClampMax = "100.0", Units = "cm"))
+	float BeamMargin = 10.f;
+
+	/**
+	 * A beam's spread (the half-angle of its cone) as a share of the angle of the cone that holds the whole hologram: 1
+	 * holds it all; less narrows the beam's end, and the hologram's outer parts fall outside it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0.2", ClampMax = "1.0"))
+	float BeamSpreadShare = 0.75f;
+
+	/** A beam's level at its rod's tip: the share of the hologram's colour it adds there (faint). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BeamLevel = 0.05f;
+
+	/**
+	 * How the level falls along the beam: at a share u of its length (0 at the tip, 1 at its end) it is the tip's level
+	 * times (1 - u)^BeamFadePower, smoothly to nothing at the end. Higher keeps the light near the rods and off the hologram.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "1.0", ClampMax = "8.0"))
+	float BeamFadePower = 3.f;
+
+	/** How much the level flickers, up and down, as a share of it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BeamFlicker = 0.15f;
+
+	/** The flicker's base rate (each beam mixes it with two faster ones, in its own phases). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Hologram|Beams", meta = (ClampMin = "0.1", ClampMax = "30.0", Units = "Hz"))
+	float BeamFlickerHz = 6.f;
 };
 
 /**

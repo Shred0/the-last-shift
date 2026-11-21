@@ -39,6 +39,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	bool HasBriefingStarted() const { return bAsked; }
 
+	/**
+	 * The share of the briefing typed, 0 to 1: 0 until its first row starts to be typed, then the share of its text typed
+	 * out, each row weighted by its length, whatever the number or the length of the rows; 1 once the briefing has been
+	 * said (at once when the group has no row). It never goes back (a row restarted by a Stop does not undo it). The
+	 * hologram draws its route by it.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	float GetBriefingProgress01() const { return Progress; }
+
 	/** The run's clock when the terminal became usable (-1: not yet). */
 	UFUNCTION(BlueprintPure, Category = "Terminal", meta = (Units = "s"))
 	float GetBriefedRunSeconds() const { return static_cast<float>(BriefedRun); }
@@ -60,8 +69,15 @@ private:
 	void HandleLine(UWorld* World, FName Group);
 	void SetBriefed(const TCHAR* Why);
 
+	void UpdateProgress(const class UTextChannelComponent* Channel);
+
 	FDelegateHandle LineHandle;
 	FName LastRow;
+	/** The briefing's rows in order and their weights (their texts' lengths). */
+	TArray<FName> Rows;
+	TArray<float> Weights;
+	float TotalWeight = 0.f;
+	float Progress = 0.f;
 	bool bAsked = false;
 	bool bLastRowSeen = false;
 	bool bBriefed = false;

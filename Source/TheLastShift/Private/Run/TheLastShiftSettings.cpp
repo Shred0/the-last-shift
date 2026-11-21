@@ -58,6 +58,34 @@ FHologramTuning UTheLastShiftSettings::GetHologramTuning() const
 	T.Points = FMath::Clamp(Hologram.Points, 50, 10000);
 	T.PointSize = FMath::Clamp(Hologram.PointSize, 0.5f, 20.f);
 	T.EdgeShare = FMath::Clamp(Hologram.EdgeShare, 0.f, 1.f);
+	T.TurnSeconds = FMath::Clamp(Hologram.TurnSeconds, 5.f, 600.f);
+	T.DriftDistance = FMath::Clamp(Hologram.DriftDistance, 0.f, 20.f);
+	T.DriftSeconds = FMath::Clamp(Hologram.DriftSeconds, 0.5f, 30.f);
+	T.DriftPeriodSpread = FMath::Clamp(Hologram.DriftPeriodSpread, 0.f, 0.9f);
+	// Each node inside the octahedron: components in [-1, 1], |x| + |y| + |z| at most 0.95.
+	const auto Node = [](const FVector& In)
+	{
+		FVector N(FMath::Clamp(In.X, -1.0, 1.0), FMath::Clamp(In.Y, -1.0, 1.0), FMath::Clamp(In.Z, -1.0, 1.0));
+		const double L1 = FMath::Abs(N.X) + FMath::Abs(N.Y) + FMath::Abs(N.Z);
+		return L1 > 0.95 ? N * (0.95 / L1) : N;
+	};
+	T.RouteNode1 = Node(Hologram.RouteNode1);
+	T.RouteNode2 = Node(Hologram.RouteNode2);
+	T.RouteNode3 = Node(Hologram.RouteNode3);
+	T.RouteNode4 = Node(Hologram.RouteNode4);
+	T.RouteNodeSize = FMath::Clamp(Hologram.RouteNodeSize, 2.f, 40.f);
+	T.RouteLineWidth = FMath::Clamp(Hologram.RouteLineWidth, 0.5f, 20.f);
+	T.BeamRods = FMath::Clamp(Hologram.BeamRods, 0, 32);
+	T.BeamRodRadius = FMath::Clamp(Hologram.BeamRodRadius, 0.f, 500.f);
+	T.BeamRodTop = FMath::Clamp(Hologram.BeamRodTop, 0.f, 300.f);
+	T.BeamRodAngle = FMath::Clamp(Hologram.BeamRodAngle, -180.f, 180.f);
+	T.BeamLength = FMath::Clamp(Hologram.BeamLength, 0.1f, 1.f);
+	T.BeamMargin = FMath::Clamp(Hologram.BeamMargin, 0.f, 100.f);
+	T.BeamFadePower = FMath::Clamp(Hologram.BeamFadePower, 1.f, 8.f);
+	T.BeamSpreadShare = FMath::Clamp(Hologram.BeamSpreadShare, 0.2f, 1.f);
+	T.BeamLevel = FMath::Clamp(Hologram.BeamLevel, 0.f, 1.f);
+	T.BeamFlicker = FMath::Clamp(Hologram.BeamFlicker, 0.f, 1.f);
+	T.BeamFlickerHz = FMath::Clamp(Hologram.BeamFlickerHz, 0.1f, 30.f);
 	return T;
 }
 

@@ -1566,11 +1566,16 @@ namespace LinksDebug
 	}
 
 	/** Screen rectangle of the closed long side's outer face (X 600, Y -600..600, Z 0..500) from the current view. */
+	/**
+	 * The closed long side's outer face on screen. Brief 18: the hull's vertical side, Y -360..360 (where its wedges begin)
+	 * and Z 35..340 (from the skin's bottom to the chamfer's break) at X = 600; Brief 15 to 17 took the old box's whole face,
+	 * Y -600..600, Z 0..500, which on the new hull also takes in the hangar's floor seen past the wedges and the chamfers.
+	 */
 	static FRect ShipRect(int32 Width, int32 Height)
 	{
 		FRect R;
 		R.X0 = Width; R.Y0 = Height; R.X1 = 0; R.Y1 = 0;
-		for (const float X : { 600.f }) for (const float Y : { -600.f, 600.f }) for (const float Z : { 0.f, 500.f })
+		for (const float X : { 600.f }) for (const float Y : { -360.f, 360.f }) for (const float Z : { 35.f, 340.f })
 		{
 			FVector2D P;
 			const APlayerController* C = PC();

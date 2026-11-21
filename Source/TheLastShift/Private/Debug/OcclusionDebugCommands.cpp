@@ -683,12 +683,30 @@ namespace OcclusionDebug
 	 * The same alive scans from the same view, once with the geometry visible and once hidden from rendering (age fade
 	 * held so the two frames match): the images must be the same. Hue, if not Any, is also measured in both (it must show).
 	 */
-	static void AddHiddenCompare(TArray<FStep>& S, const FString& Label, EHue Hue = EHue::Any, bool bCheck = true)
+	/**
+	 * A pixel of B differs from A as Compare counts it: dimmer (A lit above 6 levels) or brighter, by more than Tol levels of
+	 * its brightest channel.
+	 */
+	static bool Differs(const FColor& A, const FColor& B, int32 Tol)
+	{
+		const int32 MA = FMath::Max3(A.R, A.G, A.B);
+		const int32 MB = FMath::Max3(B.R, B.G, B.B);
+		return (MA > 6 && MB < MA - Tol) || MB > MA + Tol;
+	}
+
+	/**
+	 * IsolatedAllowed > 0 (tls.Occlusion.ShipCheck only, Brief 18): a differing pixel whose 8 neighbours all match within
+	 * the same 3 levels is isolated: a single pixel where the two point renderers' complementary depth tests disagree at a
+	 * tie (a sprite cut by the surface its point lies on). Up to IsolatedAllowed of them pass, each logged; a differing
+	 * pixel with a differing neighbour (a point is at least PointPixelSize wide, so a wrongly hidden or shown point is never
+	 * a single pixel) or one isolated pixel too many fails, as before.
+	 */
+	static void AddHiddenCompare(TArray<FStep>& S, const FString& Label, EHue Hue = EHue::Any, bool bCheck = true, int32 IsolatedAllowed = 0)
 	{
 		S.Add(Do(Label + TEXT(": hold the age fade"), []() { HoldAgeFade(true); return 0.3f; }));
 		AddShot(S, Label + TEXT("_Visible"), [](const FShot& Shot) { GVisibleShot = Shot; });
 		S.Add(Do(Label + TEXT(": geometry hidden from rendering"), [Label]() { Note(FString::Printf(TEXT("%s: %d primitives hidden"), *Label, HideGeometry())); return 0.3f; }));
-		AddShot(S, Label + TEXT("_Hidden"), [Label, Hue, bCheck](const FShot& Shot)
+		AddShot(S, Label + TEXT("_Hidden"), [Label, Hue, bCheck, IsolatedAllowed](const FShot& Shot)
 		{
 			ShowGeometry();
 			HoldAgeFade(false);
@@ -723,7 +741,56 @@ namespace OcclusionDebug
 			if (bCheck)
 			{
 				Check(Lit > 100, FString::Printf(TEXT("%s: the scan shows (%d lit pixels)"), *Label, Lit));
-				Check(Darker == 0 && Brighter == 0, FString::Printf(TEXT("%s: the image is the one with the geometry hidden (%d dimmer, %d brighter; none dark along the edges of what covers them)"), *Label, Darker, Brighter));
+				if (IsolatedAllowed <= 0)
+				{
+					Check(Darker == 0 && Brighter == 0, FString::Printf(TEXT("%s: the image is the one with the geometry hidden (%d dimmer, %d brighter; none dark along the edges of what covers them)"), *Label, Darker, Brighter));
+				}
+				else
+				{
+					const int32 Wd = Shot.Width;
+					const int32 Ht = Shot.Height;
+					int32 Isolated = 0, Grouped = 0;
+					const bool bSame = Wd == GVisibleShot.Width && Ht == GVisibleShot.Height && Shot.Pixels.Num() == GVisibleShot.Pixels.Num();
+					for (int32 Y = 0; bSame && Y < Ht; ++Y)
+					{
+						for (int32 X = 0; X < Wd; ++X)
+						{
+							const int32 Index = Y * Wd + X;
+							if (!Differs(GVisibleShot.Pixels[Index], Shot.Pixels[Index], 3))
+							{
+								continue;
+							}
+							bool bAlone = true;
+							for (int32 DY = -1; DY <= 1 && bAlone; ++DY)
+							{
+								for (int32 DX = -1; DX <= 1; ++DX)
+								{
+									const int32 NX = X + DX, NY = Y + DY;
+									if ((DX || DY) && NX >= 0 && NY >= 0 && NX < Wd && NY < Ht && Differs(GVisibleShot.Pixels[NY * Wd + NX], Shot.Pixels[NY * Wd + NX], 3))
+									{
+										bAlone = false;
+										break;
+									}
+								}
+							}
+							if (bAlone)
+							{
+								++Isolated;
+								const FColor& V = GVisibleShot.Pixels[Index];
+								const FColor& H = Shot.Pixels[Index];
+								Note(FString::Printf(TEXT("%s: isolated differing pixel %d at (%d, %d): geometry visible (%d, %d, %d), hidden (%d, %d, %d), %d levels; its 8 neighbours within 3"),
+									*Label, Isolated, X, Y, V.R, V.G, V.B, H.R, H.G, H.B, FMath::Max3(H.R, H.G, H.B) - FMath::Max3(V.R, V.G, V.B)));
+							}
+							else
+							{
+								++Grouped;
+							}
+						}
+					}
+					Check(bSame && Grouped == 0 && Isolated <= IsolatedAllowed,
+						FString::Printf(TEXT("%s: the image is the one with the geometry hidden but for isolated pixels (%d differing pixels with a differing neighbour, %d isolated, at most %d allowed; none dark along the edges of what covers them)"),
+							*Label, Grouped, Isolated, IsolatedAllowed));
+				}
 			}
 		});
 	}
@@ -1379,7 +1446,7 @@ namespace OcclusionDebug
 			SetOcclusion(1.f);
 			return 0.4f;
 		}));
-		AddHiddenCompare(S, Label + TEXT("_At1"));
+		AddHiddenCompare(S, Label + TEXT("_At1"), EHue::Any, true, 3);
 		// The margin of the attenuated path (values below 1), for the cause of the gap the developer saw at 1 before.
 		S.Add(Do(Label + TEXT(": 0.99, the attenuated path"), []() { SetOcclusion(0.99f); return 0.4f; }));
 		AddHiddenCompare(S, Label + TEXT("_At099"), EHue::Any, false);
@@ -1405,6 +1472,12 @@ namespace OcclusionDebug
 		};
 		TArray<FStep>& S = GRun.Steps;
 		S.Add(WaitFor(TEXT("a game world with the player's lidar and time states"), []() { return Lidar() && Pawn() && TS(); }, 15.f));
+		S.Add(Do(TEXT("Ship: the points' size"), []()
+		{
+			const ULidarScanComponent* L = Lidar();
+			Note(FString::Printf(TEXT("Ship: a point is drawn %.1f pixels wide (PointPixelSize), so a point wrongly hidden or shown changes more than one pixel"), L ? L->PointPixelSize : -1.f));
+			return 0.f;
+		}));
 		AddStopAndScanAt(S, TEXT("Ship"), ShipPoses::Entrance, ShipPoses::ShipBack, 1.f);
 		S.Add(Do(TEXT("Ship: in front of its closed long side"), []() { StandAt(ShipPoses::OutsideRight, ShipPoses::RightWallOuter); return 0.3f; }));
 		S.Add(Do(TEXT("Ship: scan its closed long side"), []()

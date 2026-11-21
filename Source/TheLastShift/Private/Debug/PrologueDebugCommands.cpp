@@ -1614,10 +1614,21 @@ namespace PrologueDebug
 				return -1.f;
 			}
 			const FBox Box = Holo->GetPointsBox();
-			const FVector Size = Box.GetSize();
+			// Brief 18: the hologram turns, so its size is measured in its own frame (the points' places in the octahedron's
+			// frame, plus a point's side), not by its box in the world, which grows and shrinks as it turns.
+			FBox Local(ForceInit);
+			for (int32 Index = 0; Index < Holo->GetPointCount(); ++Index)
+			{
+				FVector Rest, Now;
+				if (Holo->GetPointLocal(Index, Rest, Now))
+				{
+					Local += Now;
+				}
+			}
+			const FVector Size = Local.IsValid ? Local.GetSize() + FVector(Tuning.PointSize) : FVector::ZeroVector;
 			Check(Holo->GetPointCount() == Tuning.Points, FString::Printf(TEXT("A: hologram points %d (setting %d)"), Holo->GetPointCount(), Tuning.Points));
 			Check(FMath::Abs(Size.X - Tuning.Size) <= Tuning.PointSize * 2.f && FMath::Abs(Size.Y - Tuning.Size) <= Tuning.PointSize * 2.f && FMath::Abs(Size.Z - Tuning.Size) <= Tuning.PointSize * 2.f,
-				FString::Printf(TEXT("A: hologram %.0f x %.0f x %.0f cm (setting %.0f)"), Size.X, Size.Y, Size.Z, Tuning.Size));
+				FString::Printf(TEXT("A: hologram %.0f x %.0f x %.0f cm in its own frame (setting %.0f)"), Size.X, Size.Y, Size.Z, Tuning.Size));
 			FHitResult Floor;
 			const FVector Centre = Box.GetCenter();
 			const bool bFloor = W()->LineTraceSingleByChannel(Floor, Centre, Centre - FVector(0.f, 0.f, 2000.f), ECC_Visibility);
