@@ -870,6 +870,43 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsBeaconPowerCommand(
 		UE_LOG(LogTheLastShift, Log, TEXT("tls.Beacon.Power: %s %s (lit %d)."), *B->GetName(), bOn ? TEXT("on") : TEXT("off"), B->Device->GetLitCount());
 	}));
 
+// Brief 19: the beacons' cone and intensity for the session, to compare values before choosing them. Their one owner is
+// the area generator (BeaconConeAngle, BeaconIntensity); the command sets them there and pushes them to the lights it spawned.
+static FAutoConsoleCommandWithWorldAndArgs GTlsBeaconLightCommand(
+	TEXT("tls.Beacon.Light"),
+	TEXT("tls.Beacon.Light [ConeDeg] [Candelas]: (PIE or a package) sets the beacons' cone (half-angle, 1-45 deg) and intensity (candelas) on the area generator for the session "
+		"and applies them to every beacon's light; with no value, logs them. Not saved: the next map load takes the generator's own values again."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		UWorld* World = BeaconDebug::W();
+		AAreaGenerator* Gen = World ? AAreaGenerator::Find(World) : nullptr;
+		if (!Gen)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Beacon.Light: no area generator in the game world."));
+			return;
+		}
+		if (Args.Num() > 0)
+		{
+			Gen->BeaconConeAngle = FMath::Clamp(FCString::Atof(*Args[0]), 1.f, 45.f);
+		}
+		if (Args.Num() > 1)
+		{
+			Gen->BeaconIntensity = FMath::Clamp(FCString::Atof(*Args[1]), 0.f, 100000000.f);
+		}
+		int32 Lights = 0;
+		for (const ABeaconBody* B : BeaconDebug::Bodies(World))
+		{
+			if (USpotLightComponent* Spot = BeaconDebug::SpotOf(B))
+			{
+				Spot->SetOuterConeAngle(Gen->BeaconConeAngle);
+				Spot->SetIntensity(Gen->BeaconIntensity);
+				++Lights;
+			}
+		}
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.Beacon.Light: cone %.1f deg, intensity %.0f cd, range %.0f m, on %d beacon lights."),
+			Gen->BeaconConeAngle, Gen->BeaconIntensity, Gen->BeaconRange / 100.f, Lights);
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GTlsBeaconViewCommand(
 	TEXT("tls.Beacon.View"),
 	TEXT("tls.Beacon.View <Index> entrance|middle|under: (PIE) puts the pawn at the beacon's entrance (its terminal's standing place) or halfway across its space, looking at "

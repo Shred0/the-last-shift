@@ -249,6 +249,8 @@ namespace AreaGen
 	{
 		EAreaSegmentType Type = EAreaSegmentType::Corridor;
 		bool bClosed = true;
+		/** Hall only: a web of catwalks (its Legs are the junction platforms). */
+		bool bWeb = false;
 		float Width = 0.f;
 		int32 SpurTarget = 0;
 		TArray<FLeg> Legs;
@@ -808,6 +810,7 @@ namespace AreaGen
 			const float Sx = SnapLen((Lh - NS) / (Nx - 1));
 			const float Sy = Ny > 1 ? SnapLen((Wh - NS) / (Ny - 1)) : 0.f;
 			Body.Seg.Width = CW;
+			Body.Seg.bWeb = true;
 
 			const int32 JEntry = Attempt == 0 ? Ny / 2 : Rng.RandRange(0, Ny - 1);
 			const int32 JExit = Rng.RandRange(0, Ny - 1);
@@ -2184,7 +2187,7 @@ namespace AreaGen
 		}
 
 		// Floor plates over floors (and catwalk decks), turned over under ceilings: the long side across the box's short side.
-		auto Tile = [&](const FBox& Box, double Z, bool bTurnOver)
+		auto Tile = [&](const FBox& Box, double Z, bool bTurnOver, FFactorRange* LongSide = nullptr, FFactorRange* ShortSide = nullptr)
 		{
 			const double SX = Box.Max.X - Box.Min.X;
 			const double SY = Box.Max.Y - Box.Min.Y;
@@ -2212,8 +2215,8 @@ namespace AreaGen
 			const double PL = bLongAlongX ? CX : CY;
 			const double PS = bLongAlongX ? CY : CX;
 			const FVector2D Centre(0.5 * (Box.Min.X + Box.Max.X), 0.5 * (Box.Min.Y + Box.Max.Y));
-			PlateShort.Add(PL / PlateSize.X, Centre);
-			PlateLong.Add(PS / PlateSize.Y, Centre);
+			(LongSide ? *LongSide : PlateShort).Add(PL / PlateSize.X, Centre);
+			(ShortSide ? *ShortSide : PlateLong).Add(PS / PlateSize.Y, Centre);
 			for (int32 A = 0; A < NX; ++A)
 			{
 				for (int32 B = 0; B < NY; ++B)
@@ -2224,12 +2227,89 @@ namespace AreaGen
 				}
 			}
 		};
+		auto IsHall = [&Plan](int32 Segment) { return Plan.Segs.IsValidIndex(Segment) && Plan.Segs[Segment].Type == EAreaSegmentType::Hall; };
 		for (int32 I = 0; I < Geo.Floors.Num(); ++I)
 		{
-			if (Out.FloorHidden[I])
+			// Halls are tiled below, by their own parts.
+			if (Out.FloorHidden[I] && !(I < Geo.FloorRects.Num() && IsHall(Geo.FloorRects[I].Segment)))
 			{
 				Tile(Geo.Floors[I], -FT, false);
 			}
+		}
+
+		// Halls (Brief 19): their floors are tiled by the hall's own parts, not by its collision boxes (the greedy merge
+		// runs a web's walkways through its platforms and cuts the platforms into slivers): first its Legs (a web's
+		// junction platforms, a floor hall's whole floor), then the platforms at the ends of its spurs, then what remains
+		// (the walkways and the spurs' strips), merged. The same cells, the same top: only the joints of the plates move.
+		struct FHallPart { FBox Box; int32 Segment = -1; bool bPlatform = false; };
+		TArray<FHallPart> HallParts;
+		FFactorRange HallPlateLong, HallPlateShort;
+		int32 HallSegments = 0, HallPlatforms = 0;
+		for (int32 S = 0; S < Plan.Segs.Num(); ++S)
+		{
+			if (!IsHall(S) || !IsDressedSegment(Plan, S))
+			{
+				continue;
+			}
+			++HallSegments;
+			TSet<FIntPoint> Left;
+			for (const TPair<FIntPoint, FCell>& Pair : Plan.Cells)
+			{
+				if (Pair.Value.Segment == S && Pair.Value.Kind == EKind::Floor) { Left.Add(Pair.Key); }
+			}
+			auto AllLeft = [&Left](const FBox2D& R)
+			{
+				TArray<FIntPoint> Cells;
+				CellsIn(R, Cells);
+				for (const FIntPoint& C : Cells)
+				{
+					if (!Left.Contains(C)) { return false; }
+				}
+				return Cells.Num() > 0;
+			};
+			auto Take = [&](const FBox2D& R, bool bPlatform)
+			{
+				if (!AllLeft(R))
+				{
+					return;
+				}
+				TArray<FIntPoint> Cells;
+				CellsIn(R, Cells);
+				for (const FIntPoint& C : Cells) { Left.Remove(C); }
+				HallParts.Add({ FBox(FVector(R.Min.X, R.Min.Y, -FT), FVector(R.Max.X, R.Max.Y, 0.0)), S, bPlatform });
+				HallPlatforms += bPlatform ? 1 : 0;
+			};
+			for (const FLeg& Leg : Plan.Segs[S].Legs)
+			{
+				Take(Leg.Rect, true);
+			}
+			// A spur's platform: the largest square of the hall's cells around its centre.
+			for (const FSpot& Spot : Plan.SpurEnds)
+			{
+				if (Spot.Segment != S || !Spot.bOpen)
+				{
+					continue;
+				}
+				double Half = 0.0;
+				for (double H = Cell; H <= 3000.0 && AllLeft(FBox2D(Spot.Pos - FVector2D(H, H), Spot.Pos + FVector2D(H, H))); H += Cell)
+				{
+					Half = H;
+				}
+				if (Half > 0.0)
+				{
+					Take(FBox2D(Spot.Pos - FVector2D(Half, Half), Spot.Pos + FVector2D(Half, Half)), true);
+				}
+			}
+			TArray<FIntRect> Rects;
+			MergeRects(Left.Array(), Rects);
+			for (const FIntRect& R : Rects)
+			{
+				HallParts.Add({ FBox(FVector(R.Min.X * Cell, R.Min.Y * Cell, -FT), FVector((R.Max.X + 1) * Cell, (R.Max.Y + 1) * Cell, 0.0)), S, false });
+			}
+		}
+		for (const FHallPart& Part : HallParts)
+		{
+			Tile(Part.Box, -FT, false, &HallPlateLong, &HallPlateShort);
 		}
 		for (int32 I = 0; I < Geo.Ceilings.Num(); ++I)
 		{
@@ -2777,15 +2857,13 @@ namespace AreaGen
 		// Frames under catwalk decks and platforms, across each floor box's short side and its curbs.
 		const double FrameSpacing = G.DressFrameSpacing;
 		const double FrameSpan = FMath::Max(1.0, static_cast<double>(G.DressFrameSpan));
-		FFactorRange CatwalkFrameF;
-		for (int32 I = 0; I < Geo.FloorRects.Num() && FrameSpacing > 0.0; ++I)
+		FFactorRange CatwalkFrameF, HallFrameF;
+		int32 HallFramesSplit = 0;
+		// A web hall's frame across more than this many times SM_KitCatwalkFrame's span is made of several, end to end
+		// (the widest a Catwalk segment uses is its 6 m platforms, x1.88).
+		constexpr double FrameMaxFactor = 1.9;
+		auto FrameBox = [&](const FBox& Box, bool bHall)
 		{
-			const FAreaFloorRect& Rect = Geo.FloorRects[I];
-			if (!Out.FloorHidden[I] || !Plan.Segs.IsValidIndex(Rect.Segment) || Plan.Segs[Rect.Segment].Type != EAreaSegmentType::Catwalk)
-			{
-				continue;
-			}
-			const FBox& Box = Rect.Box;
 			const double SX = Box.Max.X - Box.Min.X;
 			const double SY = Box.Max.Y - Box.Min.Y;
 			const bool bAlongX = SX >= SY;  // frames step along the long side
@@ -2804,10 +2882,32 @@ namespace AreaGen
 				};
 				E0 -= Floor(E0 - Cell * 0.5) ? 0.0 : T;
 				E1 += Floor(E1 + Cell * 0.5) ? 0.0 : T;
-				const double Mid = 0.5 * (E0 + E1);
-				const FVector2D C = bAlongX ? FVector2D(S, Mid) : FVector2D(Mid, S);
-				CatwalkFrameF.Add((E1 - E0) / FrameSpan, C);
-				Out.Frames.Add(FitPiece(C, -FT, bAlongX ? 0 : 1, 1.0, E1 - E0, 1.0, FVector(1.0, FrameSpan, 1.0)));
+				const int32 Pieces = bHall ? FMath::Max(1, FMath::CeilToInt((E1 - E0) / (FrameSpan * FrameMaxFactor) - 1e-6)) : 1;
+				HallFramesSplit += Pieces > 1 ? 1 : 0;
+				const double Piece = (E1 - E0) / Pieces;
+				for (int32 P = 0; P < Pieces; ++P)
+				{
+					const double Mid = E0 + (P + 0.5) * Piece;
+					const FVector2D C = bAlongX ? FVector2D(S, Mid) : FVector2D(Mid, S);
+					(bHall ? HallFrameF : CatwalkFrameF).Add(Piece / FrameSpan, C);
+					Out.Frames.Add(FitPiece(C, -FT, bAlongX ? 0 : 1, 1.0, Piece, 1.0, FVector(1.0, FrameSpan, 1.0)));
+				}
+			}
+		};
+		for (int32 I = 0; I < Geo.FloorRects.Num() && FrameSpacing > 0.0; ++I)
+		{
+			const FAreaFloorRect& Rect = Geo.FloorRects[I];
+			if (Out.FloorHidden[I] && Plan.Segs.IsValidIndex(Rect.Segment) && Plan.Segs[Rect.Segment].Type == EAreaSegmentType::Catwalk)
+			{
+				FrameBox(Rect.Box, false);
+			}
+		}
+		// Web halls: under each of the hall's parts (its platforms and walkways), as under a catwalk. Floor halls have none.
+		for (const FHallPart& Part : HallParts)
+		{
+			if (FrameSpacing > 0.0 && Plan.Segs[Part.Segment].bWeb)
+			{
+				FrameBox(Part.Box, true);
 			}
 		}
 
@@ -2824,8 +2924,11 @@ namespace AreaGen
 		{
 			for (const bool bHidden : *Flags) { (bHidden ? HiddenBoxes : ShownStructure) += 1; }
 		}
-		Out.Report += FString::Printf(TEXT("; %s (cm); boxes collision only %d, shown %d (halls), shown boxes touching a modelled segment %d"),
+		Out.Report += FString::Printf(TEXT("; %s (cm); boxes collision only %d, shown %d, shown boxes touching a modelled segment %d"),
 			*Fillers.ToString(TEXT("filler blocks")), HiddenBoxes, ShownStructure, ShownMixed);
+		Out.Report += FString::Printf(TEXT("; halls %d, tiled in %d parts (%d platforms): %s, %s; %s, %d frame lines in several pieces"),
+			HallSegments, HallParts.Num(), HallPlatforms, *HallPlateLong.ToString(TEXT("hall plates, their 2 m side")), *HallPlateShort.ToString(TEXT("their 1 m side")),
+			*HallFrameF.ToString(TEXT("hall frames")), HallFramesSplit);
 		Out.Report += FString::Printf(TEXT("; conduit runs across %d niche and dead-end mouths, %s, brackets over a mouth %d, lines left unsolved %d"),
 			MouthsCrossed, *ConduitCrossF.ToString(TEXT("conduits across a mouth")), BracketsOverMouth, LinesUnsolved);
 	}
@@ -2903,8 +3006,9 @@ int32 AAreaGenerator::GetPCGInstanceCountOf(EAreaPieceKind Kind) const
 
 bool AAreaGenerator::IsDressedSegmentType(EAreaSegmentType Type)
 {
-	// Brief 16: corridors, rooms, gates and catwalks. Halls stay boxes until their own briefs.
-	return Type != EAreaSegmentType::Hall;
+	// Brief 16: corridors, rooms, gates and catwalks; Brief 19: halls too. Every walkable segment is modelled.
+	return Type == EAreaSegmentType::Corridor || Type == EAreaSegmentType::Room || Type == EAreaSegmentType::Gate
+		|| Type == EAreaSegmentType::Catwalk || Type == EAreaSegmentType::Hall;
 }
 
 int32 AAreaGenerator::GetDressingInstanceCount() const

@@ -13,6 +13,9 @@
 //    same poses before and after the modelling): area measures each segment's views like home; areashots shoots each
 //    segment from its entry with the flashlight and in a scan; areacheck shoots the first corridor, the first gate's
 //    terminal and the first catwalk as the checkpoint asks. Shots to Saved/Screenshots/Brief16.
+//  tls.Views <halls|hallbeacons|hallcheck> [Label] [Quit] (Brief 19): the halls' checkpoint views (entrance, a web's walkway
+//    from 20 m further and its second platform from 5 m, a floor hall's edge from 5 m, the joints) and the beacons' views at
+//    today's cone and intensity and at two others (tls.Beacon.Light). Shots to Saved/Screenshots/Brief19.
 
 #include "CoreMinimal.h"
 
@@ -26,6 +29,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/StaticMesh.h"
 #include "StaticMeshResources.h"
+#include "Energy/BeaconBody.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/PowerTerminal.h"
 #include "EngineUtils.h"
@@ -824,10 +828,203 @@ namespace RenderStatsDebug
 		}
 	}
 
+	// --- The halls' views (Brief 19) ---
+
+	static void ExecCommand(const FString& Command)
+	{
+		if (GEngine && GameWorld())
+		{
+			GEngine->Exec(GameWorld(), *Command);
+		}
+	}
+
+	/** The beacons' views: each powered, from its entrance and from under it with the flashlight, its body and rod in a scan; then the same two views at a wider cone and at a lower intensity, and the values put back. */
+	static void AddBeaconSteps(TArray<FStep>& S, const FString& Label)
+	{
+		const AAreaGenerator* Gen = AAreaGenerator::Find(GameWorld());
+		int32 Beacons = 0;
+		for (TActorIterator<ABeaconBody> It(GameWorld()); It; ++It)
+		{
+			++Beacons;
+		}
+		if (!Gen || Beacons == 0)
+		{
+			Note(TEXT("BEACONS none in this area"));
+			return;
+		}
+		const float Cone = Gen->BeaconConeAngle;
+		const float Intensity = Gen->BeaconIntensity;
+		// One wider cone and one lower intensity to compare with today's values.
+		const float WideCone = FMath::Min(45.f, Cone * 2.f);
+		const float LowIntensity = Intensity * 0.3f;
+		struct FVariant { FString Name; float Cone; float Intensity; bool bScan; };
+		const TArray<FVariant> Variants = {
+			{ FString::Printf(TEXT("Today_%.0fdeg_%.0fcd"), Cone, Intensity), Cone, Intensity, true },
+			{ FString::Printf(TEXT("WideCone_%.0fdeg_%.0fcd"), WideCone, Intensity), WideCone, Intensity, false },
+			{ FString::Printf(TEXT("LowIntensity_%.0fdeg_%.0fcd"), Cone, LowIntensity), Cone, LowIntensity, false } };
+		for (const FVariant& V : Variants)
+		{
+			S.Add({ TEXT("beacon light"), [V]() { ExecCommand(FString::Printf(TEXT("tls.Beacon.Light %.2f %.0f"), V.Cone, V.Intensity)); return 0.3f; } });
+			for (int32 B = 0; B < Beacons; ++B)
+			{
+				const FString Base = FString::Printf(TEXT("Beacon%d_%s"), B, *V.Name);
+				S.Add({ TEXT("beacon on"), [B]() { ExecCommand(FString::Printf(TEXT("tls.Beacon.Power %d on"), B)); return 0.3f; } });
+				for (const TCHAR* Where : { TEXT("entrance"), TEXT("under") })
+				{
+					const FString Name = FString::Printf(TEXT("%s_%s"), *Base, Where);
+					const FString W(Where);
+					S.Add({ Name, [B, W]()
+					{
+						if (W == TEXT("entrance"))
+						{
+							ExecCommand(FString::Printf(TEXT("tls.Beacon.View %d entrance"), B));
+						}
+						else
+						{
+							// Under it: on the floor nearest the point under its mount, 3 m along that floor from it, looking at the head.
+							TArray<ABeaconBody*> Bodies;
+							for (TActorIterator<ABeaconBody> It(GameWorld()); It; ++It) { Bodies.Add(*It); }
+							Bodies.Sort([](const ABeaconBody& X, const ABeaconBody& Y) { return X.Segment < Y.Segment; });
+							const AAreaInfo* Info = AAreaInfo::Find(GameWorld());
+							if (Bodies.IsValidIndex(B) && Info)
+							{
+								const FVector Mount = Bodies[B]->GetActorLocation();
+								const FVector2D M(Mount);
+								double Best = TNumericLimits<double>::Max();
+								FVector2D Stand = M;
+								for (const FAreaFloorRect& R : Info->FloorRects)
+								{
+									const FVector2D Lo(R.Box.Min), Hi(R.Box.Max);
+									const FVector2D C(FMath::Clamp(M.X, Lo.X + 60.0, Hi.X - 60.0), FMath::Clamp(M.Y, Lo.Y + 60.0, Hi.Y - 60.0));
+									const double D = FVector2D::Distance(C, M);
+									if (D < Best)
+									{
+										Best = D;
+										// 3 m along the floor's longer side, so the head is not straight above the eye.
+										const bool bAlongX = Hi.X - Lo.X >= Hi.Y - Lo.Y;
+										const FVector2D Step = bAlongX ? FVector2D(C.X + 300.0 <= Hi.X - 60.0 ? 300.0 : -300.0, 0.0) : FVector2D(0.0, C.Y + 300.0 <= Hi.Y - 60.0 ? 300.0 : -300.0);
+										Stand = C + Step;
+									}
+								}
+								Note(FString::Printf(TEXT("BEACON %d below: mount (%.0f, %.0f, %.0f), standing at (%.0f, %.0f), %.1f m from the point under the mount"), B, Mount.X, Mount.Y, Mount.Z, Stand.X, Stand.Y, FVector2D::Distance(Stand, M) / 100.0));
+								if (APawn* P = Pawn())
+								{
+									P->SetActorLocation(FVector(Stand.X, Stand.Y, 100.0), false, nullptr, ETeleportType::TeleportPhysics);
+								}
+								StandAt(Stand.X, Stand.Y, Mount - FVector(0.0, 0.0, 30.0));
+							}
+						}
+						SetFlashlight(true);
+						return 1.0f;
+					} });
+					AddSample(S, Name, 120);
+					AddShot(S, Label, Name + TEXT("_Flashlight"));
+					if (V.bScan && W == TEXT("under"))
+					{
+						// The body and the rod in a scan (the beacon's light goes out with time, as every light).
+						S.Add({ TEXT("stop"), []() { StopTime(); return 2.5f; } });
+						AddShot(S, Label, Name + TEXT("_Scan"));
+						S.Add({ TEXT("resume"), []() { ResumeTime(); return 1.0f; } });
+						S.Add({ TEXT("beacon on again"), [B]() { ExecCommand(FString::Printf(TEXT("tls.Beacon.Power %d on"), B)); return 0.3f; } });
+					}
+				}
+			}
+		}
+		S.Add({ TEXT("beacon light back"), [Cone, Intensity]() { ExecCommand(FString::Printf(TEXT("tls.Beacon.Light %.2f %.0f"), Cone, Intensity)); return 0.3f; } });
+	}
+
+	/** The checkpoint's views of each hall: from its entrance, a web's walkway from 20 m further and a platform from 5 m, a floor hall's edge from 5 m, the joints with the segments before and after it. */
+	static void AddHallSteps(TArray<FStep>& S, const FString& Label)
+	{
+		const AAreaInfo* Info = AAreaInfo::Find(GameWorld());
+		if (!Info)
+		{
+			return;
+		}
+		const double Eye = GetAreaPawnMetrics(GameWorld()).GetEyeAboveFloor();
+		int32 K = 0;
+		for (int32 I = 0; I < Info->Segments.Num(); ++I)
+		{
+			const FAreaSegmentRecord& Seg = Info->Segments[I];
+			if (Seg.Type != EAreaSegmentType::Hall)
+			{
+				continue;
+			}
+			// The route's points in the hall: the joint, then (a web) its platforms' centres in route order.
+			TArray<FVector2D> Pts;
+			for (int32 P = 0; P < Info->RoutePoints.Num() && P < Info->RoutePointSegments.Num(); ++P)
+			{
+				if (Info->RoutePointSegments[P] == I) { Pts.Add(FVector2D(Info->RoutePoints[P])); }
+			}
+			// The plan has one segment per recipe entry, in order.
+			const AAreaGenerator* Gen = AAreaGenerator::Find(GameWorld());
+			const FAreaRecipe* Recipe = Gen ? Gen->GetRecipe() : nullptr;
+			const bool bWeb = Recipe && Recipe->Segments.IsValidIndex(I) && Recipe->Segments[I].bWeb;
+			const FString Base = FString::Printf(TEXT("Hall%d_%s"), K++, bWeb ? TEXT("Web") : TEXT("Floor"));
+			const float S0 = Seg.RouteStart;
+			const float S1 = FMath::Max(Seg.RouteEnd, S0 + 1.f);
+			Note(FString::Printf(TEXT("HALL %s: segment %d, %.0f x %.0f m, route %.1f-%.1f m, %d route points"), *Base, I,
+				Seg.Bounds.GetSize().X / 100.0, Seg.Bounds.GetSize().Y / 100.0, S0 / 100.0, S1 / 100.0, Pts.Num()));
+			const FVector2D In = RouteAt(*Info, S0 + 150.f);
+			const FVector2D Ahead = RouteAt(*Info, FMath::Min(S0 + 1500.f, S1));
+			const FPose Entrance{ Base + TEXT("_FromEntrance"), In.X, In.Y, FVector(Ahead.X, Ahead.Y, Eye), 100.0 };
+			AddStand(Entrance);
+			AddSample(S, Entrance.Name, 120);
+			AddShotPair(S, Label, Entrance.Name, !bWeb);
+			if (bWeb)
+			{
+				// The same scan from 20 m further along the walkway.
+				const FVector2D Far = RouteAt(*Info, FMath::Min(S0 + 2150.f, S1));
+				const FVector2D FarAhead = RouteAt(*Info, FMath::Min(S0 + 3500.f, S1));
+				const FPose Further{ Base + TEXT("_ScanFrom20mFurther"), Far.X, Far.Y, FVector(FarAhead.X, FarAhead.Y, Eye), 100.0 };
+				AddStand(Further);
+				AddShot(S, Label, Further.Name);
+				S.Add({ TEXT("resume"), []() { ResumeTime(); return 1.0f; } });
+				// The second platform on the route, from 5 m off its edge, on the walkway that reaches it.
+				if (Pts.Num() >= 3)
+				{
+					const FVector2D Node = Pts[2];
+					const FVector2D Back = (Pts[1] - Pts[2]).GetSafeNormal();
+					const double HalfNode = 0.5 * (Gen ? Gen->HallNodeSize : 600.f);
+					const FVector2D From = Node + Back * (HalfNode + 500.0);
+					const FPose Platform{ Base + TEXT("_Platform5m"), From.X, From.Y, FVector(Node.X, Node.Y, 0.0), 100.0 };
+					AddStand(Platform);
+					AddSample(S, Platform.Name, 120);
+					AddShotPair(S, Label, Platform.Name);
+				}
+			}
+			else
+			{
+				// The floor's nearest edge to the middle of the route through it, from 5 m inside, looking at the edge.
+				const FVector2D Mid = RouteAt(*Info, 0.5f * (S0 + S1));
+				const FBox2D B(FVector2D(Seg.Bounds.Min), FVector2D(Seg.Bounds.Max));
+				const double D[4] = { Mid.X - B.Min.X, B.Max.X - Mid.X, Mid.Y - B.Min.Y, B.Max.Y - Mid.Y };
+				int32 Side = 0;
+				for (int32 J = 1; J < 4; ++J) { Side = D[J] < D[Side] ? J : Side; }
+				const FVector2D Edge = Side == 0 ? FVector2D(B.Min.X, Mid.Y) : Side == 1 ? FVector2D(B.Max.X, Mid.Y) : Side == 2 ? FVector2D(Mid.X, B.Min.Y) : FVector2D(Mid.X, B.Max.Y);
+				const FVector2D Inward = Side == 0 ? FVector2D(1, 0) : Side == 1 ? FVector2D(-1, 0) : Side == 2 ? FVector2D(0, 1) : FVector2D(0, -1);
+				const FVector2D From = Edge + Inward * 500.0;
+				const FPose EdgePose{ Base + TEXT("_Edge5m"), From.X, From.Y, FVector(Edge.X, Edge.Y, 0.0), 100.0 };
+				AddStand(EdgePose);
+				AddSample(S, EdgePose.Name, 120);
+				AddShotPair(S, Label, EdgePose.Name);
+			}
+			// Where the segment before meets the hall, seen from 5 m inside it, and where the hall meets the one after.
+			const FVector2D EntryFrom = RouteAt(*Info, FMath::Min(S0 + 500.f, S1));
+			const FVector2D EntryAt = RouteAt(*Info, FMath::Max(S0 - 300.f, 0.f));
+			AddStand({ Base + TEXT("_JointIn"), EntryFrom.X, EntryFrom.Y, FVector(EntryAt.X, EntryAt.Y, Eye), 100.0 });
+			AddShotPair(S, Label, Base + TEXT("_JointIn"));
+			const FVector2D ExitFrom = RouteAt(*Info, FMath::Max(S1 - 500.f, S0));
+			const FVector2D ExitAt = RouteAt(*Info, S1 + 300.f);
+			AddStand({ Base + TEXT("_JointOut"), ExitFrom.X, ExitFrom.Y, FVector(ExitAt.X, ExitAt.Y, Eye), 100.0 });
+			AddShotPair(S, Label, Base + TEXT("_JointOut"));
+		}
+	}
+
 	/** Waits for the area to be ready (repeating itself), then appends the set's steps. */
 	static void AddAreaSteps(const FString& Set, const FString& Label)
 	{
-		GViews.ShotFolder = TEXT("Brief16");
+		GViews.ShotFolder = Set.StartsWith(TEXT("hall")) ? TEXT("Brief19") : TEXT("Brief16");
 		GViews.Steps.Add({ TEXT("wait for the area"), [Set, Label]()
 		{
 			UWorld* World = GameWorld();
@@ -894,6 +1091,19 @@ namespace RenderStatsDebug
 					Note(TEXT("MOUTH none: no conduit run crosses a mouth in this area"));
 				}
 			}
+			else if (Set == TEXT("hallcheck"))
+			{
+				AddHallSteps(GViews.Steps, Label);
+				AddBeaconSteps(GViews.Steps, Label);
+			}
+			else if (Set == TEXT("halls"))
+			{
+				AddHallSteps(GViews.Steps, Label);
+			}
+			else if (Set == TEXT("hallbeacons"))
+			{
+				AddBeaconSteps(GViews.Steps, Label);
+			}
 			else
 			{
 				AddCheckSteps(GViews.Steps, Label);
@@ -912,7 +1122,7 @@ namespace RenderStatsDebug
 		GViews.Label = Label;
 		GViews.bQuit = bQuit;
 		TArray<FStep>& S = GViews.Steps;
-		if (Set.StartsWith(TEXT("area")))
+		if (Set.StartsWith(TEXT("area")) || Set.StartsWith(TEXT("hall")))
 		{
 			// Its steps are appended once the area is ready, after the two below.
 			AddAreaSteps(Set, Label);
@@ -1061,7 +1271,7 @@ namespace RenderStatsDebug
 				return 0.5f;
 			} });
 		}
-		else if (!Set.StartsWith(TEXT("area")))
+		else if (!Set.StartsWith(TEXT("area")) && !Set.StartsWith(TEXT("hall")))
 		{
 			AddMeasureSteps(S, HeavyPoses(Set == TEXT("home")));
 		}
@@ -1105,7 +1315,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsStandAtCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsViewsCommand(
 	TEXT("tls.Views"),
-	TEXT("tls.Views <home|arrival|lights|shots|arrivalshots|area|areashots|areacheck|areawalls|areamouth|terminals> [Label=Run] [Quit=0]: (PIE or a package) fixed views of Prologue_Home (home, lights, shots) or Prologue_Arrival (arrival, arrivalshots), or of the current area computed from its plan (area: two or three views per segment measured like home; areashots: each segment from its entry with the flashlight and in a scan; areacheck: Brief 16's checkpoint views of the first corridor, gate terminal and catwalk; areawalls: the most squeezed and the most stretched wall panel from 2.5 m, with the flashlight and in a scan; areamouth: the first niche or dead-end mouth a conduit run crosses, along the corridor and square on, with the flashlight and in a scan; terminals (any map): every terminal with the modelled body from 1.8 and 2.6 m, in the map's light and with the flashlight; shots to Saved/Screenshots/Brief16). shots/arrivalshots: each space's view in normal light and with a scan. home/arrival: each view's draw calls, primitives and GPU time over 240 frames, uncapped; at the heaviest view the same while Stopped with a scan alive, and the frame of 8 scans. lights: Prologue_Home from the entrance of each of its four spaces at eye height, and Brief 13's lit view: mean level and share of pixels under 20 levels. Shots to Saved/Screenshots/Brief15."),
+	TEXT("tls.Views <home|arrival|lights|shots|arrivalshots|area|areashots|areacheck|areawalls|areamouth|terminals|halls|hallbeacons|hallcheck> [Label=Run] [Quit=0]: (PIE or a package) fixed views of Prologue_Home (home, lights, shots) or Prologue_Arrival (arrival, arrivalshots), or of the current area computed from its plan (area: two or three views per segment measured like home; areashots: each segment from its entry with the flashlight and in a scan; areacheck: Brief 16's checkpoint views of the first corridor, gate terminal and catwalk; areawalls: the most squeezed and the most stretched wall panel from 2.5 m, with the flashlight and in a scan; areamouth: the first niche or dead-end mouth a conduit run crosses, along the corridor and square on, with the flashlight and in a scan; terminals (any map): every terminal with the modelled body from 1.8 and 2.6 m, in the map's light and with the flashlight; shots to Saved/Screenshots/Brief16); halls (Brief 19, any area): each hall from its entrance with the flashlight and in a scan (a web hall's scan also from 20 m further along the walkway), a web hall's second platform on the route from 5 m, a floor hall's edge from 5 m, and the joints with the segments before and after it; hallbeacons: each beacon powered, from its entrance and from under it with the flashlight and its body and rod in a scan, at today's cone and intensity, at twice the cone and at 0.3 times the intensity, then the values put back; hallcheck: both; shots to Saved/Screenshots/Brief19. shots/arrivalshots: each space's view in normal light and with a scan. home/arrival: each view's draw calls, primitives and GPU time over 240 frames, uncapped; at the heaviest view the same while Stopped with a scan alive, and the frame of 8 scans. lights: Prologue_Home from the entrance of each of its four spaces at eye height, and Brief 13's lit view: mean level and share of pixels under 20 levels. Shots to Saved/Screenshots/Brief15."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		const FString Set = Args.Num() > 0 ? Args[0].ToLower() : TEXT("home");

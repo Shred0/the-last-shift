@@ -341,7 +341,7 @@ public:
 
 	/** Half-angle of the beacon's cone (the spot light's outer cone angle). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "1.0", ClampMax = "45.0", Units = "deg"))
-	float BeaconConeAngle = 6.f;
+	float BeaconConeAngle = 12.f;
 
 	/** Luminous intensity on the beacon's axis, in candelas (does not change with the cone). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Beacon", meta = (ClampMin = "0.0", ClampMax = "100000000.0"))
@@ -359,7 +359,7 @@ public:
 	float BeaconClearPathHeight = 150.f;
 
 	// --- Dressing (Brief 16): the kit's meshes the structure graph places over the boxes of the modelled segments ---
-	// Where every cell along a box belongs to a modelled segment (Corridor, Room, Gate, Catwalk), the box is kept for collision and
+	// Where every cell along a box belongs to a modelled segment (Corridor, Room, Gate, Catwalk, Hall), the box is kept for collision and
 	// navigation only (Plan<Kind>Collision: not rendered, not seen by the scan's capture) and the kit's meshes are placed
 	// over it, look only (no collision, no navigation). Computed from the plan, with no random draw: the plan and the
 	// layout hash do not change. The sizes below are the meshes' own (in the graph); the dressing scales them to fit.
@@ -575,7 +575,7 @@ public:
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
 	TArray<FTransform> DressWallPanels;
 
-	/** SM_KitFloorPlate over floors and catwalk decks, and turned over under ceilings. */
+	/** SM_KitFloorPlate over floors, catwalk decks and halls, and turned over under ceilings. */
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
 	TArray<FTransform> DressFloorPlates;
 
@@ -595,7 +595,7 @@ public:
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
 	TArray<FTransform> DressCurbs;
 
-	/** SM_KitCatwalkFrame under catwalk decks. */
+	/** SM_KitCatwalkFrame under catwalk decks and under a web hall's walkways and platforms. */
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
 	TArray<FTransform> DressCatwalkFrames;
 
