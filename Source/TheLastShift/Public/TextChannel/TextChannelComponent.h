@@ -27,16 +27,23 @@ enum class ETextVoice : uint8
 	/** The home AI: degraded by the battery, typed at the battery's speed, discarded at Silent. */
 	Home,
 	/** The twin AI: barcode characters typed first and translated a few characters behind; never degraded or discarded. */
-	Twin
+	Twin,
+	/**
+	 * The engineer: rows of the message table whose trigger is the engineer's (EntitySeen). Never degraded or discarded at
+	 * any battery level: its full text, typed at the full battery's speed.
+	 */
+	Engineer
 };
 
 /**
- * The suit's text channel: one queue for two voices. The home AI's messages are degraded by the battery, filled with
- * their numbers and typed out. The twin AI's messages (ETextVoice::Twin, rows of the twin table) are never degraded and
+ * The suit's text channel: one queue for three voices. The home AI's messages are degraded by the battery, filled with
+ * their numbers and typed out. The engineer's messages (rows of the message table whose trigger GetVoiceForTrigger gives
+ * the engineer: EntitySeen) are filled with their numbers and typed out in full at every battery level, Silent included,
+ * at the full battery's speed: the battery's degradation is the home AI's. The twin AI's messages (ETextVoice::Twin, rows of the twin table) are never degraded and
  * never discarded at Silent; they are typed at the fixed TwinCharsPerSecond of the project settings as barcode
  * characters, and the translation follows TranslationLagChars behind and catches up after the last barcode
  * (GetShownCells / GetTranslatedCells, OnCellsUpdated). Every other rule (Normal time only, suspensions, restart from
- * the first character, hold and gap) is the same for both voices.
+ * the first character, hold and gap) is the same for every voice.
  *
  * It owns neither the battery nor the time state. Each push carries a context (FTextChannelContext) with the numbers
  * the message shows; the battery fraction in it fixes the level and the typing speed when the message starts, and they
@@ -200,6 +207,10 @@ public:
 
 	/** Rows of Trigger and Act in Table, in ascending Order (ties by row name). */
 	static TArray<FName> FindRows(const UDataTable* Table, ETextTrigger Trigger, int32 Act);
+
+	/** Who speaks a row of the message table with Trigger: the engineer for EntitySeen, the home AI for every other. */
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	static ETextVoice GetVoiceForTrigger(ETextTrigger Trigger);
 
 	// --- Events ---
 

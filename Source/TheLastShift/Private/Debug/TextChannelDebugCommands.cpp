@@ -12,21 +12,29 @@
 #include "Area/AreaGenerator.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Blueprint/WidgetTree.h"
+#include "Components/Border.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/TextBlock.h"
 #include "Containers/Ticker.h"
 #include "Energy/EnergySubsystem.h"
 #include "Energy/PowerTerminal.h"
 #include "Engine/DataTable.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
 #include "Flow/StdFlowSubsystem.h"
+#include "Framework/StdPlayerController.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
+#include "ImageUtils.h"
+#include "Misc/FileHelper.h"
 #include "Misc/OutputDeviceRedirector.h"
 #include "Misc/Paths.h"
 #include "Run/HomeAIComponent.h"
@@ -42,6 +50,7 @@
 #include "UI/StdRadialProgress.h"
 #include "UnrealClient.h"
 #include "UObject/StrongObjectPtr.h"
+#include "Widgets/SWindow.h"
 
 #if !UE_BUILD_SHIPPING
 
@@ -214,6 +223,9 @@ namespace TextDebug
 		int32 SavedWarnings = 0;
 		TMap<FString, double> TypingSeconds;
 		TMap<FString, double> TypingRate;
+		/** Brief 20: the channel an engineer's row was pushed on before a travel; the engineer's text at a battery. */
+		TWeakObjectPtr<UTextChannelComponent> EngineerChannel;
+		FString EngineerText;
 	};
 	static FRun GRun;
 
@@ -473,7 +485,7 @@ namespace TextDebug
 		const int32 ToAct = FromAct + 1;
 		const FString Label = FString::Printf(TEXT("travel %d -> %d at battery %.2f"), FromAct, ToAct, Battery);
 		S.Add(WaitIdle(Label));
-		S.Add(Do(Label, [Label, ToAct, Battery, bExpectLabel]()
+		S.Add(Do(Label, [Label, FromAct, ToAct, Battery, bExpectLabel]()
 		{
 			Home()->RestoreState(Battery, Home()->GetHomeSecondsElapsed());
 			const FName RowName(*FString::Printf(TEXT("A%d_AreaEntry_1"), ToAct));
@@ -482,6 +494,12 @@ namespace TextDebug
 			Context.BatteryFraction = Home()->GetBatteryFraction();
 			const FString Want = bExpectLabel ? Expected(RowName, Context) : FString();
 			const ETextDegradation Level = Channel() ? Channel()->GetLevelForBattery(Battery) : ETextDegradation::Full;
+			if (FromAct == 1)
+			{
+				// Brief 20: an engineer's row on the channel when the travel starts.
+				GRun.EngineerChannel = Channel();
+				Channel()->PushRow(TEXT("A1_EntitySeen_1"), SampleContext(W(), TOptional<double>()));
+			}
 			GRun.TravelFrom = W();
 			const bool bStarted = Run()->TravelToNextArea();
 			const FString Got = Run()->GetLastTravelLabel().ToString();
@@ -494,6 +512,23 @@ namespace TextDebug
 					Run()->GetLastTravelMinCoveredSeconds(), Hold, Got.IsEmpty() ? 0.f : Reading, Got.Len()));
 			return bStarted ? 0.f : -1.f;
 		}));
+		if (FromAct == 1)
+		{
+			// Brief 20: the engineer's row pushed as the travel started, on the old pawn's channel, once the screen is covered.
+			S.Add(WaitFor(Label + TEXT(": engineer: the screen covered"), []()
+			{
+				const UGameInstance* GI = W() ? W()->GetGameInstance() : nullptr;
+				const UStdFlowSubsystem* F = GI ? GI->GetSubsystem<UStdFlowSubsystem>() : nullptr;
+				return !GRun.EngineerChannel.IsValid() || (F && F->GetCoveredSeconds() > 0.f);
+			}, 30.f, []()
+			{
+				const UTextChannelComponent* Old = GRun.EngineerChannel.Get();
+				Check(Old && Old->IsSuspended() && !Old->IsVisible() && Old->GetCurrentVoice() == ETextVoice::Engineer,
+					FString::Printf(TEXT("engineer: behind the travel screen the channel is suspended and the engineer's row hidden (%s)"),
+						Old ? TEXT("the old pawn's channel") : TEXT("the old pawn's channel is already gone")));
+				return 0.f;
+			}));
+		}
 		if (!ShotName.IsEmpty())
 		{
 			S.Add(WaitFor(Label + TEXT(": covered"), []()
@@ -501,7 +536,11 @@ namespace TextDebug
 				const UGameInstance* GI = W() ? W()->GetGameInstance() : nullptr;
 				const UStdFlowSubsystem* F = GI ? GI->GetSubsystem<UStdFlowSubsystem>() : nullptr;
 				return F && F->GetCoveredSeconds() > 1.0f;
-			}, 30.f, [ShotName]() { Shot(ShotName); return 0.f; }));
+			}, 30.f, [ShotName]()
+			{
+				Shot(ShotName);
+				return 0.f;
+			}));
 		}
 		S.Add(WaitArrival(Label + TEXT(": arrival"), ToAct));
 		S.Add(Do(Label + TEXT(": black time"), [Label]()
@@ -567,6 +606,286 @@ namespace TextDebug
 					*Row.ToString(), *Got, *Want));
 			return 0.f;
 		});
+	}
+
+	// --- Brief 20: a shot with the UI, measured on its pixels ---
+
+	struct FUIShot
+	{
+		FString Label;
+		int32 Width = 0;
+		int32 Height = 0;
+		TArray<FColor> Pixels;
+		bool bReady = false;
+		FBox2D Rect = FBox2D(ForceInit);
+	};
+	static FUIShot GUIShot;
+	static FDelegateHandle GUIShotHandle;
+
+	static void HandleUIShot(int32 Width, int32 Height, const TArray<FColor>& Pixels)
+	{
+		// Unbound at once: while the delegate is bound the engine saves no other screenshot to its file.
+		UGameViewportClient::OnScreenshotCaptured().Remove(GUIShotHandle);
+		GUIShotHandle.Reset();
+		GUIShot.Width = Width;
+		GUIShot.Height = Height;
+		GUIShot.Pixels = Pixels;
+		TArray64<uint8> Png;
+		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief20"), GUIShot.Label + TEXT(".png")));
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+		FFileHelper::SaveArrayToFile(Png, *Path);
+		Note(FString::Printf(TEXT("shot %s saved (%d x %d): %s"), *GUIShot.Label, Width, Height, *Path));
+		GUIShot.bReady = true;
+	}
+
+	/** A shot of the game's window with its UI; the text box's rectangle is taken now, in the shot's pixels. */
+	static void RequestUIShot(const FString& Label)
+	{
+		GUIShot = FUIShot();
+		GUIShot.Label = Label;
+		const UTextChannelWidget* Widget = FindWidget<UTextChannelWidget>(W());
+		FBox2D Rect = Widget ? Widget->GetShownRect() : FBox2D(ForceInit);
+		if (GEngine && GEngine->GameViewport)
+		{
+			if (const TSharedPtr<SWindow> Window = GEngine->GameViewport->GetWindow())
+			{
+				Rect = Rect.ShiftBy(-Window->GetPositionInScreen());
+			}
+		}
+		GUIShot.Rect = Rect;
+		if (!GUIShotHandle.IsValid())
+		{
+			GUIShotHandle = UGameViewportClient::OnScreenshotCaptured().AddStatic(&HandleUIShot);
+		}
+		FScreenshotRequest::RequestScreenshot(FString(), true, false);
+	}
+
+	/** Mean colour of the brightest pixels of the text box (the glyphs' cores, and the engineer's bar); false when the box is empty. */
+	static bool MeasureBox(FColor& OutMean, int32& OutCount)
+	{
+		const FUIShot& Shot = GUIShot;
+		OutCount = 0;
+		if (!Shot.Rect.bIsValid || Shot.Pixels.Num() < Shot.Width * Shot.Height)
+		{
+			return false;
+		}
+		const int32 X0 = FMath::Clamp(FMath::FloorToInt32(Shot.Rect.Min.X) + 2, 0, Shot.Width);
+		const int32 X1 = FMath::Clamp(FMath::CeilToInt32(Shot.Rect.Max.X) - 2, 0, Shot.Width);
+		const int32 Y0 = FMath::Clamp(FMath::FloorToInt32(Shot.Rect.Min.Y) + 2, 0, Shot.Height);
+		const int32 Y1 = FMath::Clamp(FMath::CeilToInt32(Shot.Rect.Max.Y) - 2, 0, Shot.Height);
+		auto Lum = [](const FColor& C) { return C.R * 2 + C.G * 5 + C.B; };
+		int32 MaxLum = 0;
+		for (int32 Y = Y0; Y < Y1; ++Y)
+		{
+			for (int32 X = X0; X < X1; ++X)
+			{
+				MaxLum = FMath::Max(MaxLum, Lum(Shot.Pixels[Y * Shot.Width + X]));
+			}
+		}
+		int64 R = 0, G = 0, B = 0;
+		for (int32 Y = Y0; Y < Y1; ++Y)
+		{
+			for (int32 X = X0; X < X1; ++X)
+			{
+				const FColor& C = Shot.Pixels[Y * Shot.Width + X];
+				if (MaxLum > 0 && Lum(C) * 100 >= MaxLum * 92)
+				{
+					R += C.R;
+					G += C.G;
+					B += C.B;
+					++OutCount;
+				}
+			}
+		}
+		if (OutCount == 0)
+		{
+			return false;
+		}
+		OutMean = FColor(static_cast<uint8>(R / OutCount), static_cast<uint8>(G / OutCount), static_cast<uint8>(B / OutCount));
+		return true;
+	}
+
+	/** The colour Color reaches on screen (sRGB): drawn with its alpha over the box's dark backdrop (taken as black). */
+	static FColor OnScreen(const FLinearColor& Color)
+	{
+		return FLinearColor(Color.R * Color.A, Color.G * Color.A, Color.B * Color.A, 1.f).ToFColor(true);
+	}
+
+	static bool Near(const FColor& A, const FColor& B, int32 Tolerance)
+	{
+		return FMath::Abs(A.R - B.R) <= Tolerance && FMath::Abs(A.G - B.G) <= Tolerance && FMath::Abs(A.B - B.B) <= Tolerance;
+	}
+
+	/** A shot of the box now, its brightest pixels measured against the voice's colour of TextColors (and not the other voice's). */
+	static void AddBoxShot(TArray<FStep>& S, const FString& Label, const FString& ShotName, bool bEngineer)
+	{
+		S.Add(Do(Label + TEXT(": shot"), [ShotName]() { RequestUIShot(ShotName); return 0.f; }));
+		S.Add(WaitFor(Label + TEXT(": shot taken"), []() { return GUIShot.bReady; }, 5.f, [Label, bEngineer]()
+		{
+			const FSuitTextColors& Colors = UTheLastShiftSettings::GetTextColors();
+			const FLinearColor Want = bEngineer ? Colors.Engineer : Colors.HomeAI;
+			const FColor Expected = OnScreen(Want);
+			const FColor Other = OnScreen(bEngineer ? Colors.HomeAI : Colors.Engineer);
+			FColor Mean;
+			int32 Count = 0;
+			const bool bMeasured = MeasureBox(Mean, Count);
+			Check(bMeasured && Count >= 10 && Near(Mean, Expected, 14) && !Near(Mean, Other, 14),
+				FString::Printf(TEXT("%s: the brightest %d pixels of the box are (%d, %d, %d) on the shot: the %s colour of TextColors (%s, on screen (%d, %d, %d)), not the %s one ((%d, %d, %d)); box %s"),
+					*Label, Count, Mean.R, Mean.G, Mean.B, bEngineer ? TEXT("Engineer") : TEXT("HomeAI"), *Want.ToString(), Expected.R, Expected.G, Expected.B,
+					bEngineer ? TEXT("HomeAI") : TEXT("Engineer"), Other.R, Other.G, Other.B, *GUIShot.Rect.ToString()));
+			return 0.f;
+		}));
+	}
+
+	static bool RowTypedOut(const TCHAR* Row)
+	{
+		const UTextChannelComponent* C = Channel();
+		return C && C->GetCurrentRowName() == FName(Row) && C->GetVisibleText().Len() > 0 && C->GetVisibleText().Len() == C->GetCurrentText().Len();
+	}
+
+	static FString FullText(FName RowName, const FTextChannelContext& Context)
+	{
+		const UDataTable* Table = UTheLastShiftSettings::Get()->LoadAIMessagesTable();
+		const FAIMessageRow* Row = Table ? Table->FindRow<FAIMessageRow>(RowName, TEXT("Test"), false) : nullptr;
+		return Row ? UTextChannelComponent::ComposeMessage(*Row, ETextDegradation::Full, Context) : FString();
+	}
+
+	/**
+	 * Brief 20: the engineer's row in full at five battery levels, each followed by a home AI row at the same battery
+	 * (shortened, or dropped at Silent); shots at 0.35; hidden while Stopped, restarted, suspended behind the pause menu.
+	 */
+	static void AddEngineerVoice(TArray<FStep>& S)
+	{
+		S.Add(WaitIdle(TEXT("engineer")));
+		S.Add(Do(TEXT("engineer: the trigger decides the voice"), []()
+		{
+			bool bOk = UTextChannelComponent::GetVoiceForTrigger(ETextTrigger::EntitySeen) == ETextVoice::Engineer;
+			for (const ETextTrigger T : { ETextTrigger::JumpReturn, ETextTrigger::AreaEntry, ETextTrigger::AreaStart, ETextTrigger::FirstEnergy, ETextTrigger::Spend,
+				ETextTrigger::EntityFound, ETextTrigger::EntityContact })
+			{
+				bOk &= UTextChannelComponent::GetVoiceForTrigger(T) == ETextVoice::Home;
+			}
+			Check(bOk, TEXT("engineer: EntitySeen rows are the engineer's, every other trigger the home AI's"));
+			return 0.f;
+		}));
+		for (const double Battery : { 1.0, 0.65, 0.35, 0.05, 0.02 })
+		{
+			const FString Label = FString::Printf(TEXT("engineer at battery %.2f"), Battery);
+			S.Add(WaitIdle(Label));
+			S.Add(Do(Label + TEXT(": push the engineer's row, then a home AI row"), [Battery]()
+			{
+				Home()->RestoreState(Battery, Home()->GetHomeSecondsElapsed());
+				GRun.SavedStarts = Starts();
+				const FTextChannelContext Context = SampleContext(W(), TOptional<double>());
+				GRun.EngineerText = FullText(TEXT("A1_EntitySeen_1"), Context);
+				Channel()->PushRow(TEXT("A1_EntitySeen_1"), Context);
+				Channel()->PushRow(TEXT("A1_JumpReturn_1"), Context);
+				return 0.f;
+			}));
+			S.Add(WaitFor(Label + TEXT(": typed out"), []() { return RowTypedOut(TEXT("A1_EntitySeen_1")); }, 30.f, [Label]()
+			{
+				const UTextChannelComponent* C = Channel();
+				const UTextChannelWidget* Widget = FindWidget<UTextChannelWidget>(W());
+				const FString Text = GRun.Text->StartedTexts.Last();
+				const double Seconds = GRun.Text->LastTypingSeconds;
+				const double Rate = Seconds > 0.0 ? Text.Len() / Seconds : 0.0;
+				const double Full = C->GetCharsPerSecond(1.0);
+				Check(C->GetCurrentVoice() == ETextVoice::Engineer && GRun.Text->StartedVoices.Last() == ETextVoice::Engineer && GRun.Text->StartedLevels.Last() == ETextDegradation::Full
+					&& Text == GRun.EngineerText && !Text.IsEmpty(),
+					FString::Printf(TEXT("%s: the engineer's row in full, never shortened (%d characters): \"%s\""), *Label, Text.Len(), *Text));
+				Check(Rate > Full * 0.75 && Rate < Full * 1.3, FString::Printf(TEXT("%s: typed at the full battery's speed (%.1f chars/s, %.1f at full)"), *Label, Rate, Full));
+				const UBorder* Bar = Widget ? Widget->GetVoiceBar() : nullptr;
+				Check(Widget && Widget->IsShowingEngineer() && Widget->GetShownText() == Text && Widget->GetHomeTextBlock()
+					&& Widget->GetHomeTextBlock()->GetColorAndOpacity().GetSpecifiedColor().Equals(UTheLastShiftSettings::GetTextColors().Engineer)
+					&& Bar && Bar->IsVisible() && Bar->GetBrushColor().Equals(UTheLastShiftSettings::GetTextColors().Engineer),
+					FString::Printf(TEXT("%s: the widget shows it in the Engineer colour of TextColors, with its bar"), *Label));
+				return 0.f;
+			}));
+			if (FMath::IsNearlyEqual(Battery, 0.35))
+			{
+				AddBoxShot(S, Label, TEXT("Engineer_Row_035"), true);
+			}
+			if (Battery >= 0.03)
+			{
+				S.Add(WaitFor(Label + TEXT(": the home AI row after it"), []() { return RowTypedOut(TEXT("A1_JumpReturn_1")); }, 40.f, [Label, Battery]()
+				{
+					const UTextChannelWidget* Widget = FindWidget<UTextChannelWidget>(W());
+					const ETextDegradation Level = GRun.Text->StartedLevels.Last();
+					const FString HomeText = GRun.Text->StartedTexts.Last();
+					const FString HomeFull = FullText(TEXT("A1_JumpReturn_1"), SampleContext(W(), TOptional<double>()));
+					const bool bAsWanted = Battery >= 0.70 ? (Level == ETextDegradation::Full && HomeText == HomeFull) : (Level != ETextDegradation::Full && HomeText != HomeFull);
+					Check(GRun.Text->StartedVoices.Last() == ETextVoice::Home && bAsWanted && Widget && !Widget->IsShowingEngineer() && Widget->GetVoiceBar() && !Widget->GetVoiceBar()->IsVisible(),
+						FString::Printf(TEXT("%s: the home AI row after it at %s, %s, without the bar: \"%s\""), *Label, LexToString(Level),
+							Battery >= 0.70 ? TEXT("in full") : TEXT("shortened"), *HomeText));
+					return 0.f;
+				}));
+				if (FMath::IsNearlyEqual(Battery, 0.35))
+				{
+					AddBoxShot(S, Label + TEXT(": the home AI row"), TEXT("HomeAI_Row_After_Engineer_035"), false);
+				}
+			}
+			else
+			{
+				S.Add(Do(Label + TEXT(": the home AI row"), []() { return 3.0f; }));
+				S.Add(Do(Label + TEXT(": Silent"), [Label]()
+				{
+					Check(Starts() == GRun.SavedStarts + 1 && LastStarted() == FName(TEXT("A1_EntitySeen_1")),
+						FString::Printf(TEXT("%s: at Silent the home AI row is dropped, the engineer's was said in full (%d started)"), *Label, Starts() - GRun.SavedStarts));
+					return 0.f;
+				}));
+			}
+		}
+
+		// Hidden while Stopped, restarted after the Stop, suspended behind the pause menu.
+		S.Add(WaitIdle(TEXT("engineer: Stop and menu")));
+		S.Add(Do(TEXT("engineer: Stop and menu: push"), []()
+		{
+			Home()->RestoreState(0.6, Home()->GetHomeSecondsElapsed());
+			Channel()->PushRow(TEXT("A1_EntitySeen_1"), SampleContext(W(), TOptional<double>()));
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("engineer: being typed"), []() { const UTextChannelComponent* C = Channel(); return C && C->GetCurrentVoice() == ETextVoice::Engineer && C->GetVisibleText().Len() >= 12; }, 10.f, []()
+		{
+			GRun.SavedStarts = Starts();
+			StopTime();
+			const UTextChannelComponent* C = Channel();
+			const UTextChannelWidget* Widget = FindWidget<UTextChannelWidget>(W());
+			Check(!C->IsVisible() && C->GetVisibleText().IsEmpty() && Widget && !Widget->IsShown(), TEXT("engineer: a Stop hides its row at once (channel and widget)"));
+			return 1.0f;
+		}));
+		S.Add(Do(TEXT("engineer: Resume"), []()
+		{
+			const UTextChannelComponent* C = Channel();
+			Check(IsStopped() && !C->IsVisible() && C->GetCurrentRowName() == FName(TEXT("A1_EntitySeen_1")), TEXT("engineer: 1 s Stopped, nothing shown, its row kept"));
+			ResumeTime();
+			Check(C->IsVisible() && C->GetVisibleText().Len() <= 1 && C->GetCurrentVoice() == ETextVoice::Engineer && Starts() == GRun.SavedStarts,
+				FString::Printf(TEXT("engineer: after the Stop the row restarts from its first character (\"%s\")"), *C->GetVisibleText()));
+			return 0.f;
+		}));
+		S.Add(WaitFor(TEXT("engineer: typed again"), []() { const UTextChannelComponent* C = Channel(); return C && C->GetVisibleText().Len() >= 12; }, 10.f, []()
+		{
+			AStdPlayerController* SPC = Cast<AStdPlayerController>(PC());
+			const bool bOpened = SPC && SPC->PauseGame();
+			Check(bOpened, TEXT("engineer: the pause menu opens during its row"));
+			return 1.0f;
+		}));
+		S.Add(Do(TEXT("engineer: close the menu"), []()
+		{
+			const UTextChannelComponent* C = Channel();
+			Check(C->IsSuspended() && !C->IsVisible() && C->GetVisibleText().IsEmpty(), TEXT("engineer: behind the pause menu the channel is suspended, nothing typed or shown"));
+			AStdPlayerController* SPC = Cast<AStdPlayerController>(PC());
+			const bool bClosed = SPC && SPC->ResumeGame();
+			return bClosed ? 0.1f : -1.f;
+		}));
+		S.Add(Do(TEXT("engineer: after the menu"), []()
+		{
+			const UTextChannelComponent* C = Channel();
+			Check(!C->IsSuspended() && C->IsVisible() && C->GetCurrentVoice() == ETextVoice::Engineer && C->GetVisibleText().Len() < 12,
+				FString::Printf(TEXT("engineer: the menu closed, the row restarts from its first character (\"%s\")"), *C->GetVisibleText()));
+			return 0.f;
+		}));
+		S.Add(WaitIdle(TEXT("engineer: done")));
 	}
 
 	// --- tls.TextChannelTest ---
@@ -780,7 +1099,22 @@ namespace TextDebug
 			Check(GRun.Jumps->Jumps == GRun.SavedJumps, TEXT("an act 1 contact rewinds without a jump"));
 			return 0.f;
 		}));
-		AddSilence(S, TEXT("act 1 rewind"), 2.f);
+		// Brief 20: the run's first contact found the entity: the home AI's EntityContact row, then its EntityFound row.
+		S.Add(WaitFor(TEXT("act 1 rewind: the first contact's rows"), []()
+		{
+			const UTextChannelComponent* C = Channel();
+			return Starts() >= GRun.SavedStarts + 2 && C && !C->IsBusy();
+		}, 40.f, []()
+		{
+			FString Rows;
+			for (int32 I = GRun.SavedStarts; I < Starts(); ++I)
+			{
+				Rows += (Rows.IsEmpty() ? TEXT("") : TEXT(",")) + GRun.Text->Started[I].ToString();
+			}
+			Check(Rows == TEXT("A1_EntityContact_1,A1_EntityFound_1") && Run()->HasFirstContact() && Run()->IsEntityFound(),
+				FString::Printf(TEXT("act 1 rewind: the first contact of the run says A1_EntityContact_1 then A1_EntityFound_1, no return message (%s)"), *Rows));
+			return 0.f;
+		}));
 		S.Add(Do(TEXT("act 1 graze: stop"), []()
 		{
 			AEntity* E = Entity();
@@ -864,6 +1198,8 @@ namespace TextDebug
 				GRun.TypingSeconds.FindRef(TEXT("battery 0.05")), Fast, GRun.TypingSeconds.FindRef(TEXT("battery 0.65"))));
 			return 0.f;
 		}));
+
+		AddEngineerVoice(S);
 
 		// Criterion 12: travel labels; criterion 8 in act 2; criterion 10 in areas 2 to 4.
 		AddTravel(S, 1, 1.0, true, TEXT("Travel_Area1_to_Area2_Full"));

@@ -17,7 +17,23 @@ THELASTSHIFT_API DECLARE_LOG_CATEGORY_EXTERN(LogRun, Log, All);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAreaEntered, int32, ActIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRunSnapshotsChanged);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSuitArchiveChanged);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityFound);
+/** How the entity was found. */
+UENUM(BlueprintType)
+enum class EEntityFoundBy : uint8
+{
+	/** Two scans in a row of one Stop each kept more than half of its figure (AEntity::ClearSightingShare, ClearSightingScans). */
+	Sighting,
+	/** It touched the player (the first contact of the run). */
+	Contact
+};
+
+inline const TCHAR* LexToString(EEntityFoundBy By)
+{
+	return By == EEntityFoundBy::Contact ? TEXT("Contact") : TEXT("Sighting");
+}
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEntityFound, EEntityFoundBy, By);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityFirstContact);
 
 /** One moment of the last travel started by the run: what happened, when, and where the bar and the marker stood after it. */
 USTRUCT(BlueprintType)
@@ -59,9 +75,11 @@ struct THELASTSHIFT_API FTravelStepRecord
  * It is run state like battery, home time and banked energy: it survives map changes, every snapshot carries a copy,
  * restoring a snapshot restores it, a new run empties it. It stores which items, never their text.
  *
- * Sole owner of whether the entity has been found (IsEntityFound): false in a new run, set once, at the end of the first
- * Stop during which a scan kept at least one of the entity's points (AEntity, MarkEntityFound). It is run state like the
- * archive: it survives map changes, every snapshot carries it, restoring a snapshot restores it, a new run clears it.
+ * Sole owner of whether the entity has been found (IsEntityFound) and whether its first contact with the player has
+ * happened (HasFirstContact): both false in a new run and set once, at the end of a Stop (AEntity): found at the end of
+ * the first Stop with a clear sighting or a contact (MarkEntityFound), first contact at the end of the first Stop that
+ * ended with a contact (MarkFirstContact). They are run state like the archive: they survive map changes, every snapshot
+ * carries them, restoring a snapshot restores them, a new run clears them.
  *
  * On UHomeStateSubsystem::OnRunLost it shows the loss screen (URunActListWidget, RunLost): game input off, the pause
  * menu refused, UI input on the screen.
@@ -98,7 +116,7 @@ public:
 	/**
 	 * "New game" after the text scene. With the prologue's maps on (UTheLastShiftSettings::ArePrologueMapsOn): the run's
 	 * state in memory becomes a new run's (battery full, no home time, no banked energy, an empty archive, the entity not
-	 * found) so the home AI speaks as at the start of a run, the save is left as it is, and the travel goes to the
+	 * found, no first contact) so the home AI speaks as at the start of a run, the save is left as it is, and the travel goes to the
 	 * prologue's home map. Off:
 	 * StartNewRun. Refused while time is Stopped or while a transition runs.
 	 */
@@ -205,19 +223,38 @@ public:
 	bool IsEntityFound() const { return bEntityFound; }
 
 	/**
-	 * The entity was found now (the end of a Stop during which a scan kept one of its points). True, with OnEntityFound,
+	 * The entity was found now (the end of a Stop with a clear sighting or a contact), By how. True, with OnEntityFound,
 	 * only the first time in a run; false when it was already found.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Run|Entity")
-	bool MarkEntityFound(const FString& Why);
+	bool MarkEntityFound(const FString& Why, EEntityFoundBy By = EEntityFoundBy::Sighting);
 
 	/** Sets the state without OnEntityFound (debug: tls.Run.EntityFound; restoring a snapshot does the same). */
 	UFUNCTION(BlueprintCallable, Category = "Run|Entity")
 	void SetEntityFound(bool bFound, const FString& Why);
 
-	/** Once in a run, when the entity becomes found (MarkEntityFound). The home AI says its message on it. */
+	/** Once in a run, when the entity becomes found (MarkEntityFound), with how. The home AI says its rows on it. */
 	UPROPERTY(BlueprintAssignable, Category = "Run|Entity")
 	FOnEntityFound OnEntityFound;
+
+	/** The first contact with the entity has happened in this run. */
+	UFUNCTION(BlueprintPure, Category = "Run|Entity")
+	bool HasFirstContact() const { return bFirstContact; }
+
+	/**
+	 * The entity touched the player now (the end of the Stop that ended with the contact). True, with OnFirstContact,
+	 * only the first time in a run; false after that.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Run|Entity")
+	bool MarkFirstContact(const FString& Why);
+
+	/** Sets the state without OnFirstContact (debug: tls.Run.FirstContact; restoring a snapshot does the same). */
+	UFUNCTION(BlueprintCallable, Category = "Run|Entity")
+	void SetFirstContact(bool bHappened, const FString& Why);
+
+	/** Once in a run, at the end of the Stop of the first contact (MarkFirstContact). The home AI says its lines on it. */
+	UPROPERTY(BlueprintAssignable, Category = "Run|Entity")
+	FOnEntityFirstContact OnFirstContact;
 
 	/** Version of the save file read last by LoadSave (0 when there was none). */
 	int32 GetLoadedSaveVersion() const { return LoadedSaveVersion; }
@@ -257,7 +294,7 @@ private:
 	 */
 	bool TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FText& Label, float ReadingSeconds, const FString& What);
 
-	/** Battery full, no home time, no banked energy, an empty archive, the entity not found (the save is not touched). */
+	/** Battery full, no home time, no banked energy, an empty archive, the entity not found, no first contact (the save is not touched). */
 	void ResetRunState(const TCHAR* Why);
 
 	UFUNCTION()
@@ -281,6 +318,7 @@ private:
 	TArray<FAreaSnapshot> Snapshots;
 	FSuitArchive Archive;
 	bool bEntityFound = false;
+	bool bFirstContact = false;
 	int32 LoadedSaveVersion = 0;
 	int32 SaveWrites = 0;
 	bool bLastSaveOk = false;

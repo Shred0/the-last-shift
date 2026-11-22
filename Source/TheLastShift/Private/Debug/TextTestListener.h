@@ -49,6 +49,7 @@ public:
 		Started.Reset();
 		StartedLevels.Reset();
 		StartedTexts.Reset();
+		StartedVoices.Reset();
 		Finished.Reset();
 		Visibility.Reset();
 		TextUpdates = 0;
@@ -65,6 +66,8 @@ public:
 	TArray<FName> Started;
 	TArray<ETextDegradation> StartedLevels;
 	TArray<FString> StartedTexts;
+	/** The voice of each started message (the channel's GetCurrentVoice when it started). */
+	TArray<ETextVoice> StartedVoices;
 	TArray<FName> Finished;
 	TArray<bool> Visibility;
 	int32 TextUpdates = 0;
@@ -86,6 +89,7 @@ private:
 		Started.Add(RowName);
 		StartedLevels.Add(Level);
 		StartedTexts.Add(Channel.IsValid() ? Channel->GetCurrentText() : FString());
+		StartedVoices.Add(Channel.IsValid() ? Channel->GetCurrentVoice() : ETextVoice::Home);
 		LastStartClock = Now();
 		LastCompleteClock = -1.0;
 	}

@@ -16,7 +16,9 @@ class UTextChannelComponent;
 /**
  * Shows the suit's text channel in the lower left corner of the screen, away from the Interact prompt and the
  * scan-ready ring (both bottom centre). A home AI message is the text the channel's OnTextUpdated gives it; a twin AI
- * message is drawn with StdCore's barcode text, the cells the channel's OnCellsUpdated gives it. Hides on
+ * message is drawn with StdCore's barcode text, the cells the channel's OnCellsUpdated gives it. An engineer's message is
+ * a home AI's text block in the engineer's colour, with a thin bar of that colour along the left edge of the box
+ * (VoiceBarWidth), so that the two read apart at a glance. Hides on
  * OnVisibilityChanged: it holds no copy of any value and decides nothing. Engine font; each voice in its colour of
  * UTheLastShiftSettings::TextColors (never a scan colour). The tree is built in C++, so the class is used as is; created
  * by the pawn, which owns the HUD.
@@ -46,6 +48,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|UI", meta = (ClampMin = "8", ClampMax = "48"))
 	int32 FontSize = 18;
 
+	/** Width of the bar along the left edge of an engineer's message, in its colour, and the gap between it and the text. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|UI", meta = (ClampMin = "1.0", ClampMax = "16.0"))
+	float VoiceBarWidth = 3.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|UI", meta = (ClampMin = "0.0", ClampMax = "32.0"))
+	float VoiceBarGap = 10.f;
+
 
 	/** Panel behind the text, so it stays readable over a lit surface. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TextChannel|UI")
@@ -66,6 +75,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "TextChannel|UI")
 	bool IsShowingTwin() const;
 
+	/** True while an engineer's message is on screen (its colour and its bar). */
+	UFUNCTION(BlueprintPure, Category = "TextChannel|UI")
+	bool IsShowingEngineer() const;
+
+	/** The bar along the left edge of an engineer's message. */
+	UBorder* GetVoiceBar() const { return Border_Voice; }
+
 	/** The barcode text that draws twin AI messages (tests read its counts and colours). */
 	UStdBarcodeText* GetTwinBarcode() const { return Barcode_Message; }
 
@@ -83,6 +99,9 @@ protected:
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "TextChannel|UI")
 	TObjectPtr<UTextBlock> Text_Message;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "TextChannel|UI")
+	TObjectPtr<UBorder> Border_Voice;
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "TextChannel|UI")
 	TObjectPtr<UStdBarcodeText> Barcode_Message;
@@ -109,6 +128,8 @@ private:
 	bool bChannelVisible = false;
 	/** The current message is the twin voice, its full text and its cells as the channel gave them. */
 	bool bTwin = false;
+	/** The current message is the engineer's. */
+	bool bEngineer = false;
 	FString TwinText;
 	int32 TwinShown = 0;
 	int32 TwinTranslated = 0;

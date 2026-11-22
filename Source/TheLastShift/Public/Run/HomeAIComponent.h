@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Run/RunSubsystem.h"
 #include "TextChannel/TextTokens.h"
 #include "Time/TimeState.h"
 #include "HomeAIComponent.generated.h"
@@ -14,8 +15,9 @@ class UTextChannelComponent;
 struct FHomeJump;
 
 /**
- * The one place where the suit's text channel is driven, for both voices: it gives the channel its tables (the home AI's
- * messages and the twin AI's), pushes every message and suspends the channel. Nothing else pushes to it. Sits next to a
+ * The one place where the suit's text channel is driven, for every voice (the home AI, the twin AI, the engineer): it
+ * gives the channel its tables (the home AI's messages, with the engineer's rows among them, and the twin AI's), pushes
+ * every message and suspends the channel. Nothing else pushes to it. Sits next to a
  * UTextChannelComponent on the player's pawn.
  *
  * - Suspended while time is Stopped, while StdCore's pause menu is open, while a map transition covers the screen and
@@ -27,9 +29,11 @@ struct FHomeJump;
  * - A successful payment at a terminal: one Spend row of the act; at the twin AI's terminal, then every row of the part
  *   that payment played (ATwinAITerminal::GetLastPlayedPart), as the twin voice, after the spending comment. A terminal
  *   that costs nothing takes no payment: it says nothing.
- * - The entity found (URunSubsystem::OnEntityFound, once in a run, at the end of the Stop in which a scan first kept one
- *   of its points): one EntityFound row of the act, pushed on the next frame, so after the return message of that Stop's
- *   jump when there is one. Not said once the run is lost.
+ * - The entity (URunSubsystem::OnEntityFound and OnFirstContact, each once in a run, at the end of a Stop), pushed on
+ *   the next frame, so after the return message of that Stop's jump when there is one. Found by a clear sighting: every
+ *   EntitySeen row of the act (the engineer's voice), then every EntityFound row of the act. The first contact: every
+ *   EntityContact row of the act, then every EntityFound row of the act if the contact found it (it was not found before
+ *   that Stop); a sighting in the same Stop adds nothing. Not said once the run is lost.
  * - The loss: the channel is cleared and hidden (the loss screen shows the Loss ending, not an AI message).
  * - The prologue's maps (outside the run): every row of a group of the prologue table (FPrologueRow), once per map, in
  *   order: Wake when the home map begins, the others when the map's triggers fire (APrologueLineTrigger::OnAnyLine:
@@ -60,9 +64,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "HomeAI")
 	FTextChannelContext MakeContext() const;
 
-	/** True between the entity being found and its message being pushed (the next frame). */
+	/** True between the entity being found or its first contact and their rows being pushed (the next frame). */
 	UFUNCTION(BlueprintPure, Category = "HomeAI")
-	bool IsEntityFoundMessagePending() const { return bEntityFoundPending; }
+	bool IsEntityFoundMessagePending() const { return bEntityFoundPending || bFirstContactPending; }
 
 	/** True once the FirstEnergy rows of this map were pushed. */
 	UFUNCTION(BlueprintPure, Category = "HomeAI")
@@ -110,10 +114,13 @@ private:
 	void HandleSessionBanked(int32 BankedAmount);
 
 	UFUNCTION()
-	void HandleEntityFound();
+	void HandleEntityFound(EEntityFoundBy By);
 
-	/** Pushes the EntityFound message when one is pending (from the tick: after the frame's return message). */
-	void PushEntityFound();
+	UFUNCTION()
+	void HandleFirstContact();
+
+	/** Pushes the entity's rows when some are pending (from the tick: after the frame's return message). */
+	void PushEntityLines();
 
 	void HandleTerminalActivated(APowerTerminal* Terminal, int32 Cost);
 
@@ -128,4 +135,6 @@ private:
 	bool bAreaStartDone = false;
 	bool bFirstEnergyDone = false;
 	bool bEntityFoundPending = false;
+	bool bFirstContactPending = false;
+	bool bFoundBySighting = false;
 };

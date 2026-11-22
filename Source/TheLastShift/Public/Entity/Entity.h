@@ -145,10 +145,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityContact);
  * until the next scan starts, then gone over PointVanishSeconds, so at most one snapshot of it is ever on screen.
  *
  * Until it is found its points show in the scan's own colour (ScanColors.Scan), after in its own (ScanColors.Entity);
- * nothing else about them changes. It is found at the end of the first Stop during which a scan kept at least one of its
- * points, however that Stop ends: at each scan, while it is not found, the points the lidar keeps (inside the capture's
- * coverage, the same test as the lidar's) are traced from the capture origin on the visibility channel, and one that no
- * geometry hides by more than OcclusionTolerance counts as kept. URunSubsystem owns the state (MarkEntityFound).
+ * nothing else about them changes. It is found at the end of a Stop, however that Stop ends, in which one of two things
+ * happened: a clear sighting (ClearSightingScans scans in a row of the Stop each kept more than ClearSightingShare of the
+ * figure's points; a scan that keeps less, or in which the figure is not there, starts the count again; the trail never
+ * counts) or a contact with the player. At each scan, while it is not found and not yet sighted in the Stop, the figure's
+ * points inside the capture's coverage (the same test as the lidar's) are traced from the capture origin on the
+ * visibility channel, and one that no geometry hides by more than OcclusionTolerance counts as kept; the traces stop as
+ * soon as the scan's outcome is certain. URunSubsystem owns the state (MarkEntityFound, MarkFirstContact).
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API AEntity : public AActor, public ILidarPointSource
@@ -276,6 +279,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Figure")
 	int32 FigureSeed = 1977;
 
+	// --- Found ---
+
+	/**
+	 * A scan keeps a clear sighting of the figure when it keeps more than this share of the figure's points (inside the
+	 * capture's coverage and not hidden by geometry). The trail never counts.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Found", meta = (ClampMin = "0.0", ClampMax = "0.95"))
+	float ClearSightingShare = 0.5f;
+
+	/** Scans in a row of one Stop that must each keep a clear sighting for the entity to be found at the end of the Stop. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Found", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 ClearSightingScans = 2;
+
 	// --- Render ---
 
 	// Colour of every entity point: ScanColors.Scan until the entity is found (URunSubsystem::IsEntityFound), then
@@ -360,9 +376,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Entity")
 	int32 GetLastGatheredTrailPoints() const { return LastGatheredTrailPoints; }
 
-	/** True when a scan of the current Stop (or of the last one, until the next Stop) kept at least one of its points. */
+	/** True when the current Stop (or the last one, until the next Stop) had a clear sighting of the figure. */
 	UFUNCTION(BlueprintPure, Category = "Entity")
-	bool WasShownThisStop() const { return bShownThisStop || bLastStopShown; }
+	bool WasSightedThisStop() const { return bSightedThisStop || bLastStopSighted; }
+
+	/** Scans in a row of the current Stop that kept a clear sighting (0 after a scan that did not, and at every Stop). */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	int32 GetSightingStreak() const { return SightingStreak; }
+
+	/** True when the figure touched the player in the current Stop (or the last one, until the next Stop). */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	bool WasContactThisStop() const { return bContactThisStop || bLastStopContact; }
 
 	/** The run's entity state: true once found (URunSubsystem::IsEntityFound), false without a run subsystem. */
 	UFUNCTION(BlueprintPure, Category = "Entity")
@@ -372,10 +396,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Entity")
 	FLinearColor GetPointColor() const;
 
-	/** The last scan's kept-point check: its scan index (-1 when none ran), traces made, whether a point was kept, and its cost. */
+	/**
+	 * The last scan's check of the figure: its scan index (-1 when none ran), traces made, whether it kept a clear
+	 * sighting, the figure's points kept when the outcome was certain (all of them with bMeasureFullShare), the figure's
+	 * points, and its cost.
+	 */
 	int32 GetLastKeptCheckScan() const { return LastKeptCheckScan; }
 	int32 GetLastKeptCheckTraces() const { return LastKeptCheckTraces; }
 	bool GetLastKeptCheckResult() const { return bLastKeptCheckResult; }
+	int32 GetLastKeptCheckKept() const { return LastKeptCheckKept; }
+	int32 GetLastKeptCheckFigurePoints() const { return LastKeptCheckFigurePoints; }
 	double GetLastKeptCheckMs() const { return LastKeptCheckMs; }
 
 	// --- Actions ---
@@ -422,6 +452,9 @@ public:
 	/** Debug lines for the figure, path and trail (development builds; tls.Entity.Draw). */
 	bool bDebugDraw = false;
 
+	/** Tests: the check traces every figure point instead of stopping when the outcome is certain (the exact share). */
+	bool bMeasureFullShare = false;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -460,8 +493,12 @@ private:
 	void RecordExit(EStopExitReason Reason);
 	void CheckContact();
 
-	/** True when the lidar keeps at least one of Points[First..] for Context (see the class comment). */
-	bool KeepsAnyPoint(const FLidarScanContext& Context, const TArray<FLidarInjectedPoint>& Points, int32 First, int32& OutTraces) const;
+	/**
+	 * Counts the points of Points[First, First + Count) the lidar keeps for Context (see the class comment) and returns
+	 * whether more than Needed are kept. Stops as soon as that is certain, unless bExact.
+	 */
+	bool KeepsMoreThan(const FLidarScanContext& Context, const TArray<FLidarInjectedPoint>& Points, int32 First, int32 Count, int32 Needed, bool bExact,
+		int32& OutKept, int32& OutTraces) const;
 
 	/** The run's clock (UTimeStateSubsystem::GetRunSeconds), world time before the time state is bound. */
 	double GetRunSeconds() const;
@@ -492,12 +529,17 @@ private:
 	bool bExitPending = false;
 	bool bLastExitGraze = false;
 
-	/** A scan of the current Stop kept one of its points; the same for the last Stop, until the next one begins. */
-	bool bShownThisStop = false;
-	bool bLastStopShown = false;
+	/** The current Stop had a clear sighting / a contact; the same for the last Stop, until the next one begins. */
+	bool bSightedThisStop = false;
+	bool bLastStopSighted = false;
+	bool bContactThisStop = false;
+	bool bLastStopContact = false;
+	int32 SightingStreak = 0;
 
 	int32 LastKeptCheckScan = INDEX_NONE;
 	int32 LastKeptCheckTraces = 0;
+	int32 LastKeptCheckKept = 0;
+	int32 LastKeptCheckFigurePoints = 0;
 	bool bLastKeptCheckResult = false;
 	double LastKeptCheckMs = 0.0;
 

@@ -7,6 +7,8 @@
 #include "Components/Border.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
+#include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
 #include "Components/Overlay.h"
 #include "Components/TextBlock.h"
 #include "Run/TheLastShiftSettings.h"
@@ -28,8 +30,21 @@ bool UTextChannelWidget::Initialize()
 		Border_Text->SetPadding(FMargin(14.f, 8.f));
 		Canvas->AddChildToCanvas(Border_Text);
 
+		// The bar of an engineer's message (collapsed for the other voices, so their box is as before), then the message.
+		UHorizontalBox* Row = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("Box_Message"));
+		Border_Text->SetContent(Row);
+		Border_Voice = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("Border_Voice"));
+		Border_Voice->SetVisibility(ESlateVisibility::Collapsed);
+		if (UHorizontalBoxSlot* BarSlot = Row->AddChildToHorizontalBox(Border_Voice))
+		{
+			BarSlot->SetVerticalAlignment(VAlign_Fill);
+		}
+
 		UOverlay* Content = WidgetTree->ConstructWidget<UOverlay>(UOverlay::StaticClass(), TEXT("Overlay_Message"));
-		Border_Text->SetContent(Content);
+		if (UHorizontalBoxSlot* ContentSlot = Row->AddChildToHorizontalBox(Content))
+		{
+			ContentSlot->SetVerticalAlignment(VAlign_Center);
+		}
 
 		Text_Message = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("Text_Message"));
 		Content->AddChildToOverlay(Text_Message);
@@ -83,6 +98,16 @@ void UTextChannelWidget::ApplyStyle()
 	{
 		Border_Text->SetBrush(FSlateRoundedBoxBrush(BackdropColor, 4.f));
 	}
+	if (Border_Voice)
+	{
+		// An empty border as wide as its padding, as tall as the text: the engineer's bar.
+		Border_Voice->SetPadding(FMargin(FMath::Clamp(VoiceBarWidth, 1.f, 16.f) * 0.5f, 0.f));
+		Border_Voice->SetBrushColor(UTheLastShiftSettings::GetTextColors().Engineer);
+		if (UHorizontalBoxSlot* BarSlot = Cast<UHorizontalBoxSlot>(Border_Voice->Slot))
+		{
+			BarSlot->SetPadding(FMargin(0.f, 0.f, FMath::Clamp(VoiceBarGap, 0.f, 32.f), 0.f));
+		}
+	}
 	if (UCanvasPanelSlot* CanvasSlot = Border_Text ? Cast<UCanvasPanelSlot>(Border_Text->Slot) : nullptr)
 	{
 		CanvasSlot->SetAnchors(FAnchors(0.f, 1.f));
@@ -100,6 +125,7 @@ void UTextChannelWidget::SetChannel(UTextChannelComponent* InChannel)
 		ShownText = Bound->GetVisibleText();
 		bChannelVisible = Bound->IsVisible();
 		bTwin = Bound->GetCurrentVoice() == ETextVoice::Twin;
+		bEngineer = Bound->GetCurrentVoice() == ETextVoice::Engineer;
 		TwinText = bTwin ? Bound->GetCurrentText() : FString();
 		TwinShown = bTwin ? Bound->GetShownCells() : 0;
 		TwinTranslated = bTwin ? Bound->GetTranslatedCells() : 0;
@@ -109,6 +135,7 @@ void UTextChannelWidget::SetChannel(UTextChannelComponent* InChannel)
 		ShownText.Reset();
 		bChannelVisible = false;
 		bTwin = false;
+		bEngineer = false;
 		TwinText.Reset();
 		TwinShown = TwinTranslated = 0;
 	}
@@ -150,6 +177,7 @@ void UTextChannelWidget::HandleMessageStarted(FName RowName, ETextDegradation Le
 {
 	const UTextChannelComponent* Bound = Channel.Get();
 	bTwin = Bound && Bound->GetCurrentVoice() == ETextVoice::Twin;
+	bEngineer = Bound && Bound->GetCurrentVoice() == ETextVoice::Engineer;
 	TwinText = bTwin ? Bound->GetCurrentText() : FString();
 	TwinShown = bTwin ? Bound->GetShownCells() : 0;
 	TwinTranslated = bTwin ? Bound->GetTranslatedCells() : 0;
@@ -168,14 +196,24 @@ bool UTextChannelWidget::IsShowingTwin() const
 	return bTwin && IsShown();
 }
 
+bool UTextChannelWidget::IsShowingEngineer() const
+{
+	return bEngineer && IsShown();
+}
+
 void UTextChannelWidget::Refresh()
 {
 	const FSuitTextColors& Colors = UTheLastShiftSettings::GetTextColors();
 	if (Text_Message)
 	{
 		Text_Message->SetText(FText::FromString(bTwin ? FString() : ShownText));
-		Text_Message->SetColorAndOpacity(FSlateColor(Colors.HomeAI));
+		Text_Message->SetColorAndOpacity(FSlateColor(bEngineer ? Colors.Engineer : Colors.HomeAI));
 		Text_Message->SetVisibility(bTwin ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+	if (Border_Voice)
+	{
+		Border_Voice->SetBrushColor(Colors.Engineer);
+		Border_Voice->SetVisibility(bEngineer ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	}
 	if (Barcode_Message)
 	{

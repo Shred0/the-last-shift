@@ -250,12 +250,13 @@ void URunSubsystem::TakeSnapshot(int32 Act)
 	Snapshot.BankedEnergy = Energy ? Energy->GetBankedEnergy() : 0;
 	Snapshot.Archive = Archive;
 	Snapshot.bEntityFound = bEntityFound;
+	Snapshot.bFirstContact = bFirstContact;
 
 	const int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& Old) { return Old.ActIndex >= Act; });
 	Snapshots.Add(Snapshot);
-	UE_LOG(LogRun, Log, TEXT("Snapshot: act %d, battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s (%d replaced or discarded, %d snapshots)."),
+	UE_LOG(LogRun, Log, TEXT("Snapshot: act %d, battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s, first contact %s (%d replaced or discarded, %d snapshots)."),
 		Act, Snapshot.BatteryFraction, Snapshot.HomeSecondsElapsed, Snapshot.BankedEnergy, Snapshot.Archive.LogOrders.Num(), Snapshot.Archive.TwinPartsPlayed,
-		Snapshot.bEntityFound ? TEXT("found") : TEXT("not found"), Discarded, Snapshots.Num());
+		Snapshot.bEntityFound ? TEXT("found") : TEXT("not found"), Snapshot.bFirstContact ? TEXT("happened") : TEXT("not happened"), Discarded, Snapshots.Num());
 	WriteSave();
 	OnSnapshotsChanged.Broadcast();
 }
@@ -284,7 +285,8 @@ bool URunSubsystem::LoadSave()
 		if (const URunSaveGame* Save = Cast<URunSaveGame>(UGameplayStatics::LoadGameFromSlot(SaveSlotName(), 0)))
 		{
 			// Tagged properties: a version 1 file has no archive in its snapshots, which then load with an empty one; a file
-			// before version 3 has no entity state, which then loads as not found.
+			// before version 3 has no entity state, which then loads as not found; a file before version 4 has no first
+			// contact, which then loads as not happened.
 			LoadedSaveVersion = Save->Version;
 			const int32 ActCount = UTheLastShiftSettings::Get()->AreaMaps.Num();
 			for (const FAreaSnapshot& Snapshot : Save->Snapshots)
@@ -359,16 +361,34 @@ void URunSubsystem::ClearArchive()
 
 // --- The entity ---
 
-bool URunSubsystem::MarkEntityFound(const FString& Why)
+bool URunSubsystem::MarkEntityFound(const FString& Why, EEntityFoundBy By)
 {
 	if (bEntityFound)
 	{
 		return false;
 	}
 	bEntityFound = true;
-	UE_LOG(LogRun, Log, TEXT("Entity found (%s): from the next Stop on its points show in its own colour."), *Why);
-	OnEntityFound.Broadcast();
+	UE_LOG(LogRun, Log, TEXT("Entity found by %s (%s): from the next Stop on its points show in its own colour."), LexToString(By), *Why);
+	OnEntityFound.Broadcast(By);
 	return true;
+}
+
+bool URunSubsystem::MarkFirstContact(const FString& Why)
+{
+	if (bFirstContact)
+	{
+		return false;
+	}
+	bFirstContact = true;
+	UE_LOG(LogRun, Log, TEXT("First contact with the entity (%s)."), *Why);
+	OnFirstContact.Broadcast();
+	return true;
+}
+
+void URunSubsystem::SetFirstContact(bool bHappened, const FString& Why)
+{
+	bFirstContact = bHappened;
+	UE_LOG(LogRun, Log, TEXT("First contact (%s): %s."), *Why, bFirstContact ? TEXT("happened") : TEXT("not happened"));
 }
 
 void URunSubsystem::SetEntityFound(bool bFound, const FString& Why)
@@ -410,7 +430,7 @@ bool URunSubsystem::StartNewRun()
 	}
 	ResetRunState(TEXT("new run"));
 	ClearSave();
-	UE_LOG(LogRun, Log, TEXT("New run: battery 1, home 0 s, banked 0, archive empty, entity not found, save cleared."));
+	UE_LOG(LogRun, Log, TEXT("New run: battery 1, home 0 s, banked 0, archive empty, entity not found, no first contact, save cleared."));
 	return TravelToArea(1);
 }
 
@@ -427,6 +447,7 @@ void URunSubsystem::ResetRunState(const TCHAR* Why)
 	}
 	SetArchive(FSuitArchive(), Why);
 	SetEntityFound(false, Why);
+	SetFirstContact(false, Why);
 }
 
 bool URunSubsystem::RestartFromAct(int32 Act)
@@ -457,10 +478,11 @@ bool URunSubsystem::RestartFromAct(int32 Act)
 	}
 	SetArchive(Restored.Archive, *FString::Printf(TEXT("restart from act %d"), Act));
 	SetEntityFound(Restored.bEntityFound, FString::Printf(TEXT("restart from act %d"), Act));
+	SetFirstContact(Restored.bFirstContact, FString::Printf(TEXT("restart from act %d"), Act));
 	const int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& S) { return S.ActIndex > Act; });
-	UE_LOG(LogRun, Log, TEXT("Restart from act %d: battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s; %d later snapshots discarded."),
+	UE_LOG(LogRun, Log, TEXT("Restart from act %d: battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s, first contact %s; %d later snapshots discarded."),
 		Act, Restored.BatteryFraction, Restored.HomeSecondsElapsed, Restored.BankedEnergy, Restored.Archive.LogOrders.Num(), Restored.Archive.TwinPartsPlayed,
-		Restored.bEntityFound ? TEXT("found") : TEXT("not found"), Discarded);
+		Restored.bEntityFound ? TEXT("found") : TEXT("not found"), Restored.bFirstContact ? TEXT("happened") : TEXT("not happened"), Discarded);
 	WriteSave();
 	OnSnapshotsChanged.Broadcast();
 	return TravelToArea(Act);

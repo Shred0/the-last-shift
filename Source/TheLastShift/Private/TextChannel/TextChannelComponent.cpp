@@ -145,6 +145,11 @@ TArray<FName> UTextChannelComponent::FindRows(const UDataTable* Table, ETextTrig
 	return Names;
 }
 
+ETextVoice UTextChannelComponent::GetVoiceForTrigger(ETextTrigger Trigger)
+{
+	return Trigger == ETextTrigger::EntitySeen ? ETextVoice::Engineer : ETextVoice::Home;
+}
+
 // --- Pushes ---
 
 bool UTextChannelComponent::Enqueue(FQueued&& Item, const TCHAR* What)
@@ -173,6 +178,11 @@ bool UTextChannelComponent::PushRow(FName RowName, const FTextChannelContext& Co
 	FQueued Item;
 	Item.RowName = RowName;
 	Item.Context = Context;
+	// The row's trigger decides who speaks it.
+	if (const FAIMessageRow* Row = MessageTable->FindRow<FAIMessageRow>(RowName, TEXT("TextChannel"), false))
+	{
+		Item.Voice = GetVoiceForTrigger(Row->Trigger);
+	}
 	return Enqueue(MoveTemp(Item), *FString::Printf(TEXT("row '%s'"), *RowName.ToString()));
 }
 
@@ -267,6 +277,30 @@ void UTextChannelComponent::StartNext()
 			PhaseLeft = 0.f;
 			UE_LOG(LogTextChannel, Log, TEXT("%s: twin message '%s' started (%.1f chars/s, translation %d behind): \"%s\""), *GetNameSafe(GetOwner()),
 				*Current.RowName.ToString(), Typewriter.GetCharsPerSecond(), TwinLag, *TwinText);
+			OnMessageStarted.Broadcast(Current.RowName, CurrentLevel);
+			SetVisible(true);
+			BroadcastText();
+			return;
+		}
+
+		if (Item.Voice == ETextVoice::Engineer)
+		{
+			// The engineer: the full text at every battery level, typed at the full battery's speed.
+			const FAIMessageRow* Row = MessageTable ? MessageTable->FindRow<FAIMessageRow>(Item.RowName, TEXT("TextChannel"), false) : nullptr;
+			const FString EngineerText = Row ? ComposeMessage(*Row, ETextDegradation::Full, Item.Context) : FString();
+			if (EngineerText.IsEmpty())
+			{
+				UE_LOG(LogTextChannel, Log, TEXT("%s: engineer '%s' discarded: no text."), *GetNameSafe(GetOwner()), *Item.RowName.ToString());
+				continue;
+			}
+			Current = MoveTemp(Item);
+			bHasCurrent = true;
+			CurrentLevel = ETextDegradation::Full;
+			Typewriter.Start(EngineerText, GetCharsPerSecond(1.0));
+			Phase = EPhase::Typing;
+			PhaseLeft = 0.f;
+			UE_LOG(LogTextChannel, Log, TEXT("%s: engineer message '%s' started in full (battery %.3f, %.1f chars/s): \"%s\""), *GetNameSafe(GetOwner()),
+				*Current.RowName.ToString(), Current.Context.BatteryFraction, Typewriter.GetCharsPerSecond(), *EngineerText);
 			OnMessageStarted.Broadcast(Current.RowName, CurrentLevel);
 			SetVisible(true);
 			BroadcastText();

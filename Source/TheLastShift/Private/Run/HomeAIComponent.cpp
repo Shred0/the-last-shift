@@ -71,6 +71,7 @@ void UHomeAIComponent::BeginPlay()
 	{
 		Run->OnAreaEntered.AddUniqueDynamic(this, &UHomeAIComponent::HandleAreaEntered);
 		Run->OnEntityFound.AddUniqueDynamic(this, &UHomeAIComponent::HandleEntityFound);
+		Run->OnFirstContact.AddUniqueDynamic(this, &UHomeAIComponent::HandleFirstContact);
 	}
 	if (UEnergySubsystem* Energy = UEnergySubsystem::Get(this))
 	{
@@ -116,6 +117,7 @@ void UHomeAIComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		Run->OnAreaEntered.RemoveDynamic(this, &UHomeAIComponent::HandleAreaEntered);
 		Run->OnEntityFound.RemoveDynamic(this, &UHomeAIComponent::HandleEntityFound);
+		Run->OnFirstContact.RemoveDynamic(this, &UHomeAIComponent::HandleFirstContact);
 	}
 	if (UEnergySubsystem* Energy = UEnergySubsystem::Get(this))
 	{
@@ -133,7 +135,7 @@ void UHomeAIComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	// The pause menu and the map transitions have no event the channel needs to react to within the frame.
 	UpdateSuspension();
-	PushEntityFound();
+	PushEntityLines();
 }
 
 void UHomeAIComponent::UpdateSuspension()
@@ -240,30 +242,48 @@ void UHomeAIComponent::HandleSessionBanked(int32 BankedAmount)
 	UE_LOG(LogTextChannel, Log, TEXT("%s: first energy banked in act %d (%d): %d messages queued."), *GetName(), GetAct(), BankedAmount, Queued);
 }
 
-void UHomeAIComponent::HandleEntityFound()
+void UHomeAIComponent::HandleEntityFound(EEntityFoundBy By)
 {
 	// Found inside the Stop's exit, before or after the time-state listeners that push the return message: wait a frame.
 	bEntityFoundPending = true;
-	UE_LOG(LogTextChannel, Log, TEXT("%s: the entity is found in act %d: its message follows on the next frame."), *GetName(), GetAct());
+	bFoundBySighting = By == EEntityFoundBy::Sighting;
+	UE_LOG(LogTextChannel, Log, TEXT("%s: the entity is found by %s in act %d: its rows follow on the next frame."), *GetName(), LexToString(By), GetAct());
 }
 
-void UHomeAIComponent::PushEntityFound()
+void UHomeAIComponent::HandleFirstContact()
 {
-	if (!bEntityFoundPending)
+	bFirstContactPending = true;
+	UE_LOG(LogTextChannel, Log, TEXT("%s: the first contact with the entity in act %d: its rows follow on the next frame."), *GetName(), GetAct());
+}
+
+void UHomeAIComponent::PushEntityLines()
+{
+	if (!bEntityFoundPending && !bFirstContactPending)
 	{
 		return;
 	}
+	const bool bFound = bEntityFoundPending;
+	const bool bContact = bFirstContactPending;
 	bEntityFoundPending = false;
+	bFirstContactPending = false;
 	UTextChannelComponent* Text = Channel.Get();
 	const UHomeStateSubsystem* Home = UHomeStateSubsystem::Get(this);
 	if (!Text || (Home && Home->IsRunLost()))
 	{
-		UE_LOG(LogTextChannel, Log, TEXT("%s: entity found: nothing said (%s)."), *GetName(), Text ? TEXT("the run is lost") : TEXT("no channel"));
+		UE_LOG(LogTextChannel, Log, TEXT("%s: the entity: nothing said (%s)."), *GetName(), Text ? TEXT("the run is lost") : TEXT("no channel"));
 		return;
 	}
-	const bool bPushed = Text->PushTrigger(ETextTrigger::EntityFound, GetAct(), MakeContext());
-	UE_LOG(LogTextChannel, Log, TEXT("%s: entity found in act %d: %s (%d queued before it)."), *GetName(), GetAct(),
-		bPushed ? TEXT("its message queued") : TEXT("no EntityFound row"), Text->GetQueuedCount() - (bPushed ? 1 : 0));
+	const int32 Act = GetAct();
+	const FTextChannelContext Context = MakeContext();
+	const int32 Before = Text->GetQueuedCount() + (Text->IsBusy() ? 1 : 0);
+	// The first contact: the home AI's lines about the entity, then the red marking if the contact found it. A clear
+	// sighting (in a Stop without a contact): the engineer's rows, then the home AI switches the red marking on.
+	const int32 Contact = bContact ? Text->PushSequence(ETextTrigger::EntityContact, Act, Context) : 0;
+	const int32 Seen = bFound && !bContact && bFoundBySighting ? Text->PushSequence(ETextTrigger::EntitySeen, Act, Context) : 0;
+	const int32 Found = bFound ? Text->PushSequence(ETextTrigger::EntityFound, Act, Context) : 0;
+	UE_LOG(LogTextChannel, Log, TEXT("%s: the entity in act %d (%s%s): %d EntityContact, %d EntitySeen and %d EntityFound rows queued (%d messages before them)."),
+		*GetName(), Act, bContact ? TEXT("first contact") : TEXT("no contact"), bFound ? (bFoundBySighting && !bContact ? TEXT(", found by a sighting") : TEXT(", found by the contact")) : TEXT(", found before"),
+		Contact, Seen, Found, Before);
 }
 
 void UHomeAIComponent::HandleTerminalActivated(APowerTerminal* Terminal, int32 Cost)

@@ -25,8 +25,18 @@ enum class ETextTrigger : uint8
 	FirstEnergy,
 	/** A successful payment at a terminal. */
 	Spend,
-	/** Once in a run, on the return to Normal time after the Stop in which the entity was first found (after the return message). */
-	EntityFound
+	/**
+	 * Once in a run, on the return to Normal time after the Stop in which the entity was found (after the return message,
+	 * the EntitySeen rows or the EntityContact rows): the home AI switches the entity's own colour on.
+	 */
+	EntityFound,
+	/**
+	 * Once in a run, on the return to Normal time after the Stop in which a clear sighting found the entity (a Stop that
+	 * did not end with a contact), before the EntityFound rows. The engineer's voice: the trigger decides it.
+	 */
+	EntitySeen,
+	/** Once in a run, on the return to Normal time after the first contact with the entity (after the return message): the home AI's lines about it. */
+	EntityContact
 };
 
 inline const TCHAR* LexToString(ETextTrigger Trigger)
@@ -39,6 +49,8 @@ inline const TCHAR* LexToString(ETextTrigger Trigger)
 	case ETextTrigger::FirstEnergy: return TEXT("FirstEnergy");
 	case ETextTrigger::Spend: return TEXT("Spend");
 	case ETextTrigger::EntityFound: return TEXT("EntityFound");
+	case ETextTrigger::EntitySeen: return TEXT("EntitySeen");
+	case ETextTrigger::EntityContact: return TEXT("EntityContact");
 	}
 	return TEXT("Unknown");
 }

@@ -26,6 +26,8 @@ namespace EntityTuning
 	static float Initial(float V) { return FMath::Clamp(V, 100.f, 10000.f); }
 	static float Speed(float V) { return FMath::Clamp(V, 0.f, 1000.f); }
 	static float Contact(float V) { return FMath::Clamp(V, 10.f, 1000.f); }
+	static float SightingShare(float V) { return FMath::Clamp(V, 0.f, 0.95f); }
+	static int32 SightingScans(int32 V) { return FMath::Clamp(V, 1, 8); }
 
 	/** Heights above the feet sampled for line-of-sight and scan visibility checks (shins, waist, head). */
 	static constexpr float VisibilityHeights[] = { 30.f, 100.f, 165.f };
@@ -160,8 +162,11 @@ void AEntity::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, E
 	{
 		bExitPending = true;
 		bLastExitGraze = false;
-		bShownThisStop = false;
-		bLastStopShown = false;
+		bSightedThisStop = false;
+		bLastStopSighted = false;
+		bContactThisStop = false;
+		bLastStopContact = false;
+		SightingStreak = 0;
 		if (State == EEntityState::Awake)
 		{
 			Manifest(GetSpawnDistanceForNextStop(), TEXT("stop"));
@@ -184,15 +189,22 @@ void AEntity::RecordStopExit(EStopExitReason Reason)
 	}
 	bExitPending = false;
 	bLastExitGraze = false;
-	// Found at the end of the first Stop in which a scan kept one of its points, however the Stop ends.
-	bLastStopShown = bShownThisStop;
-	if (bShownThisStop)
+	// Found at the end of a Stop with a clear sighting or a contact, however the Stop ends; a contact is the first one too.
+	const bool bContact = bContactThisStop;
+	const bool bSighted = bSightedThisStop;
+	bLastStopSighted = bSighted;
+	bLastStopContact = bContact;
+	bSightedThisStop = false;
+	bContactThisStop = false;
+	SightingStreak = 0;
+	if (URunSubsystem* Run = URunSubsystem::Get(this); Run && (bContact || bSighted))
 	{
-		bShownThisStop = false;
-		if (URunSubsystem* Run = URunSubsystem::Get(this))
+		if (bContact)
 		{
-			Run->MarkEntityFound(FString::Printf(TEXT("%s: a scan kept its points in the Stop that ended %s"), *GetName(), LexToString(Reason)));
+			Run->MarkFirstContact(FString::Printf(TEXT("%s: the Stop ended %s with a contact"), *GetName(), LexToString(Reason)));
 		}
+		Run->MarkEntityFound(FString::Printf(TEXT("%s: %s in the Stop that ended %s"), *GetName(), bContact ? TEXT("a contact") : TEXT("a clear sighting"), LexToString(Reason)),
+			bContact ? EEntityFoundBy::Contact : EEntityFoundBy::Sighting);
 	}
 	if (!bManifested)
 	{
@@ -823,6 +835,7 @@ void AEntity::CheckContact()
 	const EStopExitReason Reason = GetExitReasonForContact(ContactResponse);
 	UE_LOG(LogEntity, Log, TEXT("%s: contact at %.1f cm, %.3f s into the stop: response %s, exit %s."), *GetName(), Distance,
 		TimeState ? TimeState->GetCurrentStopDuration() : 0.f, LexToString(ContactResponse), LexToString(Reason));
+	bContactThisStop = true;
 	OnContact.Broadcast();
 
 	// Every response resumes time, which unmanifests the entity through HandleTimeStateChanged.
@@ -855,6 +868,8 @@ void AEntity::GatherLidarPoints_Implementation(const FLidarScanContext& Context,
 	LastGatheredTrailPoints = 0;
 	if (!bManifested || !TimeState || !TimeState->IsStopped())
 	{
+		// A scan without the figure is not a clear sighting: the row starts again.
+		SightingStreak = 0;
 		return;
 	}
 
@@ -917,26 +932,38 @@ void AEntity::GatherLidarPoints_Implementation(const FLidarScanContext& Context,
 	}
 	LastGatheredTrailPoints = OutPoints.Num() - FirstTrail;
 
-	// Until it is found: did this scan keep one of its points? Once one has, the Stop has shown it.
-	if (!bShownThisStop && !IsFound())
+	// Until it is found: did this scan keep more than ClearSightingShare of the figure (never the trail)? ClearSightingScans
+	// such scans in a row make a clear sighting, and the Stop has it.
+	if (!bSightedThisStop && !IsFound())
 	{
 		const double Start = FPlatformTime::Seconds();
+		const int32 FigureCount = LastGatheredFigurePoints;
+		const int32 Needed = FMath::FloorToInt32(EntityTuning::SightingShare(ClearSightingShare) * FigureCount);
+		int32 Kept = 0;
 		int32 Traces = 0;
-		bLastKeptCheckResult = KeepsAnyPoint(Context, OutPoints, FirstFigure, Traces);
+		bLastKeptCheckResult = KeepsMoreThan(Context, OutPoints, FirstFigure, FigureCount, Needed, bMeasureFullShare, Kept, Traces);
 		LastKeptCheckMs = (FPlatformTime::Seconds() - Start) * 1000.0;
 		LastKeptCheckScan = Context.ScanIndex;
 		LastKeptCheckTraces = Traces;
-		bShownThisStop = bLastKeptCheckResult;
-		UE_LOG(LogEntity, Log, TEXT("%s: scan %d %s its points (%d traces, %.3f ms)."), *GetName(), Context.ScanIndex,
-			bLastKeptCheckResult ? TEXT("keeps") : TEXT("keeps none of"), Traces, LastKeptCheckMs);
+		LastKeptCheckKept = Kept;
+		LastKeptCheckFigurePoints = FigureCount;
+		SightingStreak = bLastKeptCheckResult ? SightingStreak + 1 : 0;
+		bSightedThisStop = SightingStreak >= EntityTuning::SightingScans(ClearSightingScans);
+		UE_LOG(LogEntity, Log, TEXT("%s: scan %d keeps %s%d of the figure's %d points (more than %d needed: %s; %d traces, %.3f ms); %d in a row%s."), *GetName(),
+			Context.ScanIndex, bMeasureFullShare ? TEXT("") : TEXT("at least "), Kept, FigureCount, Needed, bLastKeptCheckResult ? TEXT("yes") : TEXT("no"), Traces,
+			LastKeptCheckMs, SightingStreak, bSightedThisStop ? TEXT(": a clear sighting") : TEXT(""));
 	}
 }
 
-bool AEntity::KeepsAnyPoint(const FLidarScanContext& Context, const TArray<FLidarInjectedPoint>& Points, int32 First, int32& OutTraces) const
+bool AEntity::KeepsMoreThan(const FLidarScanContext& Context, const TArray<FLidarInjectedPoint>& Points, int32 First, int32 Count, int32 Needed, bool bExact,
+	int32& OutKept, int32& OutTraces) const
 {
+	OutKept = 0;
 	OutTraces = 0;
 	const UWorld* World = GetWorld();
-	if (!World)
+	const int32 Begin = FMath::Max(First, 0);
+	const int32 End = FMath::Min(Begin + FMath::Max(Count, 0), Points.Num());
+	if (!World || End <= Begin)
 	{
 		return false;
 	}
@@ -946,8 +973,13 @@ bool AEntity::KeepsAnyPoint(const FLidarScanContext& Context, const TArray<FLida
 		Params.AddIgnoredActor(Pawn);
 	}
 	const float Tolerance = FMath::Clamp(OcclusionTolerance, 0.f, 200.f);
-	for (int32 Index = FMath::Max(First, 0); Index < Points.Num(); ++Index)
+	for (int32 Index = Begin; Index < End; ++Index)
 	{
+		// Certain either way: more than Needed kept already, or too few points left to get there.
+		if (!bExact && (OutKept > Needed || OutKept + (End - Index) <= Needed))
+		{
+			break;
+		}
 		const FVector& Point = Points[Index].WorldPosition;
 		double Depth = 0.0;
 		// The lidar drops what lies outside the capture's coverage (bOccludeByCapture); the rest is depth tested.
@@ -960,10 +992,10 @@ bool AEntity::KeepsAnyPoint(const FLidarScanContext& Context, const TArray<FLida
 		const float Length = static_cast<float>(FVector::Dist(Context.CaptureOrigin, Point));
 		if (!World->LineTraceSingleByChannel(Hit, Context.CaptureOrigin, Point, ECC_Visibility, Params) || Hit.Distance >= Length - Tolerance)
 		{
-			return true;
+			++OutKept;
 		}
 	}
-	return false;
+	return OutKept > Needed;
 }
 
 bool AEntity::IsFound() const

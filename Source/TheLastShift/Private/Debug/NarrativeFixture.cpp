@@ -63,6 +63,8 @@ namespace NarrativeFixture
 			AddMessage(Table, ETextTrigger::AreaEntry, Act, 1, FString::Printf(TEXT("Fixture entry line of act %d: {home} at home, battery {battery}, a neutral test."), Act));
 			AddMessage(Table, ETextTrigger::Spend, Act, 1, FString::Printf(TEXT("Fixture spend line of act %d: one unit spent at a terminal, battery {battery}."), Act));
 			AddMessage(Table, ETextTrigger::EntityFound, Act, 1, FString::Printf(TEXT("Fixture entity found line of act %d: a neutral sentence, battery {battery}."), Act));
+			AddMessage(Table, ETextTrigger::EntitySeen, Act, 1, FString::Printf(TEXT("Fixture engineer line of act %d: the engineer saw it, a neutral sentence that stays whole at any battery, {battery}."), Act));
+			AddMessage(Table, ETextTrigger::EntityContact, Act, 1, FString::Printf(TEXT("Fixture entity contact line of act %d: the home AI on the first contact, battery {battery}."), Act));
 		}
 		return Table;
 	}
