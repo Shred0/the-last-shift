@@ -59,8 +59,9 @@ public:
 	TObjectPtr<UStaticMesh> PanelMesh;
 
 	/**
-	 * Gives InPanel the modelled mesh when Modelled is set (and returns true: the caller then places it by its bottom
-	 * centre at scale 1); does nothing and returns false when it is empty. Shared by the prologue's moving panels.
+	 * Gives InPanel the modelled mesh when Modelled is set, with no material override, so that the mesh's own material
+	 * (its surface family) shows (and returns true: the caller then places it by its bottom centre at scale 1); when it is
+	 * empty, gives the engine's cube SurfaceLook.PanelFallbackMaterial and returns false. Shared by the prologue's moving panels.
 	 */
 	static bool ApplyPanelMesh(UStaticMeshComponent* InPanel, UStaticMesh* Modelled);
 

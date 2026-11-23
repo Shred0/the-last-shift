@@ -43,11 +43,7 @@ ATestLidarCharacter::ATestLidarCharacter()
 	Flashlight = CreateDefaultSubobject<USpotLightComponent>(TEXT("Flashlight"));
 	Flashlight->SetupAttachment(Camera);
 	Flashlight->SetRelativeLocation(FVector(10.f, 15.f, -10.f));
-	Flashlight->SetIntensityUnits(ELightUnits::Lumens);
-	Flashlight->SetIntensity(1500.f);
-	Flashlight->SetAttenuationRadius(2500.f);
-	Flashlight->SetInnerConeAngle(14.f);
-	Flashlight->SetOuterConeAngle(26.f);
+	// Its intensity, falloff, radius and cones have one owner, UTheLastShiftSettings::Flashlight (ApplyFlashlightTuning).
 
 	LidarScan = CreateDefaultSubobject<ULidarScanComponent>(TEXT("LidarScan"));
 	LidarScan->SetupAttachment(Camera);
@@ -67,6 +63,7 @@ void ATestLidarCharacter::BeginPlay()
 	Super::BeginPlay();
 	// The map decides whether the flashlight works and how it starts (the prologue's maps, in the settings); elsewhere
 	// it works and starts as bFlashlightOnAtStart says.
+	ApplyFlashlightTuning();
 	bool bOnAtStart = bFlashlightOnAtStart;
 	bFlashlightAvailable = UTheLastShiftSettings::Get()->GetMapFlashlight(URunSubsystem::GetPrologueStageOf(GetWorld()), bOnAtStart);
 	Flashlight->SetVisibility(bFlashlightAvailable && bOnAtStart);
@@ -239,6 +236,23 @@ void ATestLidarCharacter::OnScan()
 {
 	// The director is the only path to the lidar plugin; it ignores requests during the cooldown and in Normal time.
 	ScanDirector->RequestScan();
+}
+
+void ATestLidarCharacter::ApplyFlashlightTuning()
+{
+	if (!Flashlight)
+	{
+		return;
+	}
+	const FFlashlightTuning F = UTheLastShiftSettings::Get()->GetFlashlightTuning();
+	Flashlight->bUseInverseSquaredFalloff = F.bInverseSquaredFalloff;
+	Flashlight->SetIntensityUnits(F.bInverseSquaredFalloff ? ELightUnits::Lumens : ELightUnits::Unitless);
+	Flashlight->SetIntensity(F.Intensity);
+	Flashlight->SetLightFalloffExponent(F.FalloffExponent);
+	Flashlight->SetAttenuationRadius(F.AttenuationRadius);
+	Flashlight->SetInnerConeAngle(F.InnerConeAngle);
+	Flashlight->SetOuterConeAngle(F.OuterConeAngle);
+	Flashlight->MarkRenderStateDirty();
 }
 
 bool ATestLidarCharacter::IsFlashlightOn() const

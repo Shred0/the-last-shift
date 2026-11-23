@@ -50,6 +50,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Test")
 	bool IsFlashlightOn() const;
 
+	/** Gives the flashlight the values of UTheLastShiftSettings::Flashlight (BeginPlay, and again after a change for the session). */
+	UFUNCTION(BlueprintCallable, Category = "Test")
+	void ApplyFlashlightTuning();
+
 	/**
 	 * Starts the flashlight hint (UFlashlightHintWidget::Activate): the suit shows the Flashlight key until the flashlight
 	 * is on. The arrival's hatch asks for it. False without a hint widget.

@@ -36,6 +36,42 @@ int32 UTheLastShiftSettings::GetPrologueStageOfMap(const FString& PackageName) c
 	return 0;
 }
 
+bool UTheLastShiftSettings::IsHomeLookMap(const FString& PackageName) const
+{
+	const FString Clean = UWorld::RemovePIEPrefix(PackageName);
+	for (const TSoftObjectPtr<UWorld>& Map : SurfaceLook.HomeMaps)
+	{
+		if (!Map.IsNull() && Map.ToSoftObjectPath().GetLongPackageName() == Clean)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+FFlashlightTuning UTheLastShiftSettings::GetFlashlightTuning() const
+{
+	FFlashlightTuning F = Flashlight;
+	F.Intensity = FMath::Clamp(F.Intensity, 0.f, 1000000.f);
+	F.FalloffExponent = FMath::Clamp(F.FalloffExponent, 0.5f, 16.f);
+	F.AttenuationRadius = FMath::Clamp(F.AttenuationRadius, 100.f, 20000.f);
+	F.InnerConeAngle = FMath::Clamp(F.InnerConeAngle, 0.f, 80.f);
+	F.OuterConeAngle = FMath::Clamp(F.OuterConeAngle, FMath::Max(1.f, F.InnerConeAngle), 80.f);
+	return F;
+}
+
+FSurfaceVariant UTheLastShiftSettings::GetSurfaceVariant(bool bHome) const
+{
+	FSurfaceVariant V = bHome ? SurfaceLook.Home : SurfaceLook.Twin;
+	V.AccentStrength = FMath::Clamp(V.AccentStrength, 0.f, 1.f);
+	V.AccentLevel = FMath::Clamp(V.AccentLevel, 0.f, 8.f);
+	V.Tone = FMath::Clamp(V.Tone, 0.1f, 4.f);
+	V.Wear = FMath::Clamp(V.Wear, 0.f, 1.f);
+	V.Dirt = FMath::Clamp(V.Dirt, 0.f, 1.f);
+	V.PanelVariation = FMath::Clamp(V.PanelVariation, 0.f, 0.5f);
+	return V;
+}
+
 bool UTheLastShiftSettings::GetMapFlashlight(int32 PrologueStage, bool& bInOutOnAtStart) const
 {
 	switch (PrologueStage)

@@ -575,9 +575,13 @@ public:
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
 	TArray<FTransform> DressWallPanels;
 
-	/** SM_KitFloorPlate over floors, catwalk decks and halls, and turned over under ceilings. */
+	/** SM_KitFloorPlate over floors, catwalk decks and halls (the floors' family). */
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
 	TArray<FTransform> DressFloorPlates;
+
+	/** SM_KitFloorPlate turned over under ceilings: the same plates in the panels' family (Brief 21). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressCeilingPlates;
 
 	/** SM_KitCornerPost in the corners of walls and curbs. */
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")

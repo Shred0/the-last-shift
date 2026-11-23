@@ -10,6 +10,8 @@
 #include "TheLastShiftSettings.generated.h"
 
 class UDataTable;
+class UMaterialInterface;
+class UMaterialParameterCollection;
 class UStaticMesh;
 class UWorld;
 
@@ -376,6 +378,114 @@ struct THELASTSHIFT_API FHologramTuning
 };
 
 /**
+ * The flashlight (Brief 21): the pawn's spot light, the one owner of its values. Normal time only (it is off while
+ * Stopped). With bInverseSquaredFalloff (the physical falloff) Intensity is in lumens; without it Intensity is the
+ * engine's unitless brightness, and the light falls only as (1 - (d / AttenuationRadius)^2)^FalloffExponent, flat near
+ * the player. The values live in Config/DefaultGame.ini; tls.Look.Flashlight changes them for a session.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FFlashlightTuning
+{
+	GENERATED_BODY()
+
+	/** Lumens with the inverse squared falloff; the unitless brightness without it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flashlight", meta = (ClampMin = "0.0", ClampMax = "1000000.0"))
+	float Intensity = 20.f;
+
+	/** The physical falloff (1 / d^2). Off: the flatter falloff of FalloffExponent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flashlight")
+	bool bInverseSquaredFalloff = false;
+
+	/** Without the inverse squared falloff: how fast the light falls toward AttenuationRadius (higher = flatter near, steeper far). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flashlight", meta = (ClampMin = "0.5", ClampMax = "16.0"))
+	float FalloffExponent = 2.f;
+
+	/** Beyond this the flashlight lights nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flashlight", meta = (ClampMin = "100.0", ClampMax = "20000.0", Units = "cm"))
+	float AttenuationRadius = 2500.f;
+
+	/** Full-strength cone (half angle). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flashlight", meta = (ClampMin = "0.0", ClampMax = "80.0", Units = "deg"))
+	float InnerConeAngle = 14.f;
+
+	/** Outer cone (half angle): the light fades to nothing between the two. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flashlight", meta = (ClampMin = "1.0", ClampMax = "80.0", Units = "deg"))
+	float OuterConeAngle = 26.f;
+};
+
+/**
+ * One structure's look (Brief 21): the values the surface materials read in the maps of that structure, Normal time only
+ * (nothing of it is emissive, so nothing shows while Stopped, and a scan captures only depth and stencil). The four
+ * families (floors and decks, wall and ceiling panels, structure, objects) keep their own tone, metal and roughness in
+ * their material instance; these values move all of them together. The values live in Config/DefaultGame.ini and are
+ * pushed into MPC_Surface by USurfaceLookSubsystem when a map begins; nothing copies them.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FSurfaceVariant
+{
+	GENERATED_BODY()
+
+	/** The structure's accent paint: the curbs of walkways and halls, the frames of doors and gates, the terminals' bodies. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look")
+	FLinearColor Tint = FLinearColor(0.4f, 0.85f, 1.f, 1.f);
+
+	/** How much of Tint the accent paint keeps (1 = fresh, lower = faded toward the grey under it). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AccentStrength = 1.f;
+
+	/** How bright the accent paint is, as a factor of the panels' tone (the paint is a surface, not a light). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look", meta = (ClampMin = "0.0", ClampMax = "8.0"))
+	float AccentLevel = 1.f;
+
+	/** The hue of the unpainted surfaces: a grey that leans warm or cold (its level is normalised away). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look")
+	FLinearColor BaseTint = FLinearColor(1.f, 1.f, 1.f, 1.f);
+
+	/** Lightness of every family together (1 = the families' own tones). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look", meta = (ClampMin = "0.1", ClampMax = "4.0"))
+	float Tone = 1.f;
+
+	/** Wear: the share of paint scuffed to bare metal and of floor polished by feet (0 = new). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Wear = 0.3f;
+
+	/** Dirt: grime in patches, in the joints and low on the walls (0 = clean). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Dirt = 0.3f;
+
+	/** How far one panel's tone may stand from the next one's, as a share of the tone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float PanelVariation = 0.1f;
+};
+
+/** The look of the two structures (Brief 21): home and the twin structure, and which maps show home's. */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FSurfaceLook
+{
+	GENERATED_BODY()
+
+	/** Home: cleaner, lighter, warmer; its tint is the hue of the scan's points, stored here as values of its own. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look")
+	FSurfaceVariant Home;
+
+	/** The structure to explore: darker, colder, more worn, its accents faded; its tint is yellow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look")
+	FSurfaceVariant Twin;
+
+	/** Maps that show home's variant; every other map shows the twin's. The ship shows home's everywhere (its material). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look")
+	TArray<TSoftObjectPtr<UWorld>> HomeMaps;
+
+	/** The material of a door or hatch panel that has no modelled PanelMesh (the engine's cube): a moving object's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look", meta = (AllowedClasses = "/Script/Engine.MaterialInterface"))
+	TSoftObjectPtr<UMaterialInterface> PanelFallbackMaterial;
+
+	/** The parameter collection the surface materials read (MPC_Surface): the one owner of the reference. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surface Look", meta = (AllowedClasses = "/Script/Engine.MaterialParameterCollection"))
+	TSoftObjectPtr<UMaterialParameterCollection> Parameters;
+};
+
+/**
  * Project settings of the game (Project Settings > Game > The Last Shift), stored as text in Config/DefaultGame.ini.
  * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning, of the scan colours, of
  * the suit's text colours and log and twin AI typing, of the home AI's text degradation (thresholds and typing speeds),
@@ -573,6 +683,23 @@ public:
 	/** The twin structure's hologram in the monitor room. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
 	FHologramTuning Hologram;
+
+	/** The look of home and of the twin structure (Brief 21): the one owner of every value of the two variants. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Surface Look")
+	FSurfaceLook SurfaceLook;
+
+	/** True when the map named PackageName shows home's variant (SurfaceLook.HomeMaps; PIE prefix ignored). */
+	bool IsHomeLookMap(const FString& PackageName) const;
+
+	/** SurfaceLook's Home (bHome) or Twin variant, every value clamped. */
+	FSurfaceVariant GetSurfaceVariant(bool bHome) const;
+
+	/** The flashlight's values (Brief 21): the one owner; the pawn applies them at BeginPlay. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Flashlight")
+	FFlashlightTuning Flashlight;
+
+	/** Flashlight, every value clamped (the outer cone at least the inner one). */
+	FFlashlightTuning GetFlashlightTuning() const;
 
 	/** bPrologueMaps, with both prologue maps set. */
 	bool ArePrologueMapsOn() const { return bPrologueMaps && !PrologueHomeMap.IsNull() && !PrologueArrivalMap.IsNull(); }

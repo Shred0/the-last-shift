@@ -1149,8 +1149,12 @@ namespace TwinWritingDebug
 			const FSuitTextColors& C = UTheLastShiftSettings::GetTextColors();
 			Check(SameColor(Base.Home, C.HomeAI) && SameColor(Base.TwinBars, C.TwinAI) && SameColor(Base.TwinText, C.TwinAI) && SameColor(Base.LogBars, C.LogTranslation)
 				&& SameColor(Base.LogText, C.LogTranslation), TEXT("colors: every reader shows the ini colour of its voice"));
-			Check(!SameColor(C.TwinAI, UTheLastShiftSettings::GetScanColors().Scan) && !SameColor(C.HomeAI, UTheLastShiftSettings::GetScanColors().Scan)
-				&& !SameColor(C.LogTranslation, UTheLastShiftSettings::GetScanColors().Scan), TEXT("colors: none of the three is the scan colour"));
+			// Brief 21: the home AI's text is in home's tint, the hue of the scan's points, by decision (the channel is hidden
+			// while Stopped, so text and scans are never on screen together); the twin AI's and the logs' are not the scan colour.
+			const FLinearColor Scan = UTheLastShiftSettings::GetScanColors().Scan;
+			const float HueGap = FMath::Abs(FMath::Fmod(C.HomeAI.LinearRGBToHSV().R - Scan.LinearRGBToHSV().R + 540.f, 360.f) - 180.f);
+			Check(!SameColor(C.TwinAI, Scan) && !SameColor(C.LogTranslation, Scan) && HueGap <= 2.f,
+				FString::Printf(TEXT("colors: the twin AI's and the logs' are not the scan colour; the home AI's has its hue (%.1f degrees apart)"), HueGap));
 			Note(FString::Printf(TEXT("colors: home %s, twin %s, log %s"), *C.HomeAI.ToString(), *C.TwinAI.ToString(), *C.LogTranslation.ToString()));
 			return 0.f;
 		}));

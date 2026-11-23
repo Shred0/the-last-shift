@@ -2042,7 +2042,7 @@ namespace AreaGen
 	struct FDressing
 	{
 		TArray<bool> FloorHidden, WallHidden, CurbHidden, PillarHidden, CeilingHidden;
-		TArray<FTransform> Panels, Plates, Posts, Beams, Conduits, Curbs, Frames, GateFrames;
+		TArray<FTransform> Panels, Plates, CeilingPlates, Posts, Beams, Conduits, Curbs, Frames, GateFrames;
 		FString Report;
 		AAreaGenerator::FDressPanelPick Squeezed, Stretched, FirstMouth;
 	};
@@ -2223,7 +2223,7 @@ namespace AreaGen
 				{
 					const FVector2D C(Box.Min.X + (A + 0.5) * CX, Box.Min.Y + (B + 0.5) * CY);
 					const FRotator R(0.0, bLongAlongX ? 0.0 : 90.0, bTurnOver ? 180.0 : 0.0);
-					Out.Plates.Add(FTransform(R, FVector(C.X, C.Y, Z), FVector(PL / PlateSize.X, PS / PlateSize.Y, FT / PlateSize.Z)));
+					(bTurnOver ? Out.CeilingPlates : Out.Plates).Add(FTransform(R, FVector(C.X, C.Y, Z), FVector(PL / PlateSize.X, PS / PlateSize.Y, FT / PlateSize.Z)));
 				}
 			}
 		};
@@ -2931,6 +2931,7 @@ namespace AreaGen
 			*HallFrameF.ToString(TEXT("hall frames")), HallFramesSplit);
 		Out.Report += FString::Printf(TEXT("; conduit runs across %d niche and dead-end mouths, %s, brackets over a mouth %d, lines left unsolved %d"),
 			MouthsCrossed, *ConduitCrossF.ToString(TEXT("conduits across a mouth")), BracketsOverMouth, LinesUnsolved);
+		Out.Report += FString::Printf(TEXT("; plates by family: floors %d, ceilings %d"), Out.Plates.Num(), Out.CeilingPlates.Num());
 	}
 }
 
@@ -3218,7 +3219,7 @@ int32 AAreaGenerator::ClearArea()
 	PublishedPieces.Reset();
 	for (TArray<FTransform>* Plan : { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop,
 		&PlanFloorsCollision, &PlanWallsCollision, &PlanCurbsCollision, &PlanPillarsCollision, &PlanCeilingsCollision,
-		&DressWallPanels, &DressFloorPlates, &DressCornerPosts, &DressCeilingBeams, &DressConduits, &DressCurbs, &DressCatwalkFrames, &DressGateFrames })
+		&DressWallPanels, &DressFloorPlates, &DressCeilingPlates, &DressCornerPosts, &DressCeilingBeams, &DressConduits, &DressCurbs, &DressCatwalkFrames, &DressGateFrames })
 	{
 		Plan->Reset();
 	}
@@ -3855,6 +3856,7 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		}
 		DressWallPanels = MoveTemp(Dressing.Panels);
 		DressFloorPlates = MoveTemp(Dressing.Plates);
+		DressCeilingPlates = MoveTemp(Dressing.CeilingPlates);
 		DressCornerPosts = MoveTemp(Dressing.Posts);
 		DressCeilingBeams = MoveTemp(Dressing.Beams);
 		DressConduits = MoveTemp(Dressing.Conduits);
