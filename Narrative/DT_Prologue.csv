@@ -1,8 +1,9 @@
 ---,Group,Order,Text
-Wake_1,Wake,1,"[PLACEHOLDER] Wake line, in the print room."
-Hologram_1,Hologram,1,"[PLACEHOLDER] Hologram line, in the monitor room."
-Hangar_1,Hangar,1,"[PLACEHOLDER] Hangar line, by the ship."
-Flight_1,Flight,1,"[PLACEHOLDER] Flight line, on the travel screen."
-Hatch_1,Hatch,1,"[PLACEHOLDER] Hatch line, once the hatch has closed."
-Door_1,Door,1,"[PLACEHOLDER] Door line, as the door to area 1 opens."
-Light_1,Light,1,"[PLACEHOLDER] Light line, when the player steps out of the ship, before the Hatch lines."
+Wake_1,Wake,1,Your suit's motor systems are online. Step into the monitor room down the corridor for your briefing before launch.
+Hologram_1,Hologram,1,"It is a drifting twin structure, and the energy lies inside it. You will cross its hull, its server halls and its core."
+Hologram_2,Hologram,2,"I will mark in green, in your scans, what you can interact with. The hangar terminal is unlocked: proceed to the ship."
+Hangar_1,Hangar,1,I am sealing our structure behind you. Board the ship once its hatch is open.
+Flight_1,Flight,1,Crossing the void between the two hulls. Docking with the twin hangar now.
+Hatch_1,Hatch,1,The bay is sealed from the void. The ship will wait here until your shift ends.
+Door_1,Door,1,Overriding the lock from our bridge. I am opening the door to the structure now.
+Light_1,Light,1,Their lighting systems are dead. Switch on your suit's light to see ahead.
