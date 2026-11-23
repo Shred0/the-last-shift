@@ -180,6 +180,11 @@ UDataTable* UTheLastShiftSettings::LoadTwinAITable() const
 	return TwinAITable.IsNull() ? nullptr : TwinAITable.LoadSynchronous();
 }
 
+UDataTable* UTheLastShiftSettings::LoadEngineerLinesTable() const
+{
+	return EngineerLinesTable.IsNull() ? nullptr : EngineerLinesTable.LoadSynchronous();
+}
+
 FText UTheLastShiftSettings::GetEndingText(FName RowName) const
 {
 	const UDataTable* Table = LoadEndingsTable();
@@ -218,6 +223,11 @@ void UTheLastShiftSettings::GetSceneVoiceColors(ESceneVoice Voice, FLinearColor&
 	{
 	case ESceneVoice::Paradise:
 		OutText = TextColors.ParadiseText;
+		OutBackground = TextColors.ParadiseBackground;
+		return;
+	case ESceneVoice::EngineerParadise:
+		// The engineer inside the paradise: the paradise's background, no cut to black.
+		OutText = TextColors.EngineerParadise;
 		OutBackground = TextColors.ParadiseBackground;
 		return;
 	case ESceneVoice::Engineer:

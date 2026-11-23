@@ -181,7 +181,8 @@ void APrologueHatch::UpdateLightLines(double Now)
 		return;
 	}
 	bLightRowSeen |= Channel->GetCurrentRowName() == LastLightRow;
-	if (bLightRowSeen && Channel->IsTypedOut())
+	// The last Light row shown, or gone from the queue without being shown (dropped at Silent, its engineer lines said).
+	if ((bLightRowSeen || !Channel->IsQueued(LastLightRow)) && Channel->IsTypedOut())
 	{
 		FinishLightLines(Now, *FString::Printf(TEXT("%s typed out"), *LastLightRow.ToString()));
 	}

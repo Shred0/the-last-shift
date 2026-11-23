@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Energy/PowerTerminal.h"
+#include "Narrative/NarrativeRows.h"
 #include "Run/RunSubsystem.h"
 #include "TextChannel/TextTokens.h"
 #include "Time/TimeState.h"
@@ -26,9 +28,14 @@ struct FHomeJump;
  *   numbers of that jump. A plain Resume or a rewind without a jump says nothing.
  * - The player released in an area that is ready (URunSubsystem::OnAreaEntered): every AreaStart row of the act.
  * - Banked energy rising from zero through a voluntary Resume, once per map load: every FirstEnergy row of the act.
- * - A successful payment at a terminal: one Spend row of the act; at the twin AI's terminal, then every row of the part
- *   that payment played (ATwinAITerminal::GetLastPlayedPart), as the twin voice, after the spending comment. A terminal
- *   that costs nothing takes no payment: it says nothing.
+ * - A successful payment at a terminal: one row of the trigger of its kind (APowerTerminal::GetPaymentKind: SpendDoor,
+ *   SpendLights, SpendBeacon, SpendLog, SpendTwin) when the act has rows of it, each kind counting on its own; else one
+ *   Spend row of the act, as before. At the twin AI's terminal, then every row of the part that payment played
+ *   (ATwinAITerminal::GetLastPlayedPart), as the twin voice, after the spending comment. A terminal that costs nothing
+ *   takes no payment: it says nothing.
+ * - Before any row it pushes, the channel says the engineer's lines before that row (the engineer table it gives the
+ *   channel, DT_EngineerLines), the first time that row is said in the map: the first contact's sequence is the return
+ *   message, the engineer's lines before the first EntityContact row, the EntityContact rows, then the EntityFound rows.
  * - The entity (URunSubsystem::OnEntityFound and OnFirstContact, each once in a run, at the end of a Stop), pushed on
  *   the next frame, so after the return message of that Stop's jump when there is one. Found by a clear sighting: every
  *   EntitySeen row of the act (the engineer's voice), then every EntityFound row of the act. The first contact: every
@@ -84,6 +91,10 @@ public:
 
 	/** Rows of Group in a prologue table (FPrologueRow), in ascending Order (ties by row name). */
 	static TArray<FName> FindPrologueRows(const UDataTable* Table, FName Group);
+
+	/** The trigger of a payment's kind: SpendDoor, SpendLights, SpendBeacon, SpendLog, SpendTwin; Spend for Other. */
+	UFUNCTION(BlueprintPure, Category = "HomeAI")
+	static ETextTrigger GetSpendTrigger(EPaymentKind Kind);
 
 	/**
 	 * Queues every row of Group of the prologue table, in order, the first time it is asked in this map; later asks say

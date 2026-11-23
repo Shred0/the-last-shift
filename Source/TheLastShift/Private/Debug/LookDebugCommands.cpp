@@ -7,7 +7,7 @@
 //    connected (each must be no).
 //  tls.Look.Set <Home|Twin> <Field> <Value...>: sets a value of SurfaceLook for the session and pushes it at once. Fields:
 //    Tint R G B, BaseTint R G B, AccentStrength, AccentLevel, Tone, Wear, Dirt, PanelVariation.
-//  tls.Look.Text <HomeAI|Engineer|TwinAI> R G B [A]: sets a text colour of TextColors for the session (what is shown next).
+//  tls.Look.Text <HomeAI|Engineer|TwinAI|EngineerParadise> R G B [A]: sets a text colour of TextColors for the session (what is shown next).
 //  tls.Look.EngineerTone <Share>: the engineer's colour for the session: the home AI's lightened toward white by Share
 //    (0 to 1), with the home AI's alpha.
 //  tls.Look.Print: the ini lines of SurfaceLook and TextColors as they are now (to store what was chosen).
@@ -254,7 +254,7 @@ namespace LookDebug
 		UE_LOG(LogTheLastShift, Display, TEXT("LOOK ini: SurfaceLook Home=%s"), *VariantText(S->SurfaceLook.Home));
 		UE_LOG(LogTheLastShift, Display, TEXT("LOOK ini: SurfaceLook Twin=%s"), *VariantText(S->SurfaceLook.Twin));
 		const FSuitTextColors& T = S->TextColors;
-		UE_LOG(LogTheLastShift, Display, TEXT("LOOK ini: TextColors HomeAI=%s, Engineer=%s, TwinAI=%s"), *ColorText(T.HomeAI), *ColorText(T.Engineer), *ColorText(T.TwinAI));
+		UE_LOG(LogTheLastShift, Display, TEXT("LOOK ini: TextColors HomeAI=%s, Engineer=%s, TwinAI=%s, EngineerParadise=%s"), *ColorText(T.HomeAI), *ColorText(T.Engineer), *ColorText(T.TwinAI), *ColorText(T.EngineerParadise));
 		const FFlashlightTuning& F = S->Flashlight;
 		UE_LOG(LogTheLastShift, Display, TEXT("LOOK ini: Flashlight=(Intensity=%.3f,bInverseSquaredFalloff=%s,FalloffExponent=%.3f,AttenuationRadius=%.1f,InnerConeAngle=%.1f,OuterConeAngle=%.1f)"),
 			F.Intensity, F.bInverseSquaredFalloff ? TEXT("True") : TEXT("False"), F.FalloffExponent, F.AttenuationRadius, F.InnerConeAngle, F.OuterConeAngle);
@@ -1349,16 +1349,16 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLookFlashlightLevelsCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLookTextCommand(
 	TEXT("tls.Look.Text"),
-	TEXT("tls.Look.Text <HomeAI|Engineer|TwinAI> R G B [A]: sets a text colour of TextColors for the session (what is shown next)."),
+	TEXT("tls.Look.Text <HomeAI|Engineer|TwinAI|EngineerParadise> R G B [A]: sets a text colour of TextColors for the session (what is shown next)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic([](const TArray<FString>& Args, UWorld*)
 	{
 		if (Args.Num() < 4)
 		{
-			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Look.Text <HomeAI|Engineer|TwinAI> R G B [A]"));
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Look.Text <HomeAI|Engineer|TwinAI|EngineerParadise> R G B [A]"));
 			return;
 		}
 		FSuitTextColors& T = MutableSettings()->TextColors;
-		FLinearColor* C = Args[0] == TEXT("HomeAI") ? &T.HomeAI : (Args[0] == TEXT("Engineer") ? &T.Engineer : (Args[0] == TEXT("TwinAI") ? &T.TwinAI : nullptr));
+		FLinearColor* C = Args[0] == TEXT("HomeAI") ? &T.HomeAI : (Args[0] == TEXT("Engineer") ? &T.Engineer : (Args[0] == TEXT("TwinAI") ? &T.TwinAI : (Args[0] == TEXT("EngineerParadise") ? &T.EngineerParadise : nullptr)));
 		if (!C)
 		{
 			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Look.Text: unknown voice %s."), *Args[0]);

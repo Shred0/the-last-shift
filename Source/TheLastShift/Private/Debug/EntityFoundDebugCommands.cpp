@@ -698,6 +698,8 @@ namespace EntityFoundDebug
 		S.Add(WaitFor(Label + TEXT(": the channel is idle"), []() { const UTextChannelComponent* C = Channel(); return C && !C->IsBusy(); }, 60.f, [Then]()
 		{
 			MarkCase();
+			// Brief 22: every case is a first time for the engineer's lines, as in a new map (the run's states are reset too).
+			Channel()->ResetSaidEngineerLines();
 			if (Then)
 			{
 				Then();
@@ -918,8 +920,11 @@ namespace EntityFoundDebug
 			for (int32 I = 0; I < Want.Num(); ++I)
 			{
 				FString Prefix = Want[I];
-				const bool bEngineer = Prefix.RemoveFromEnd(TEXT("(engineer)"));
-				Prefix = FString::Printf(TEXT("A%d_%s_"), Act, *Prefix);
+				bool bEngineer = Prefix.RemoveFromEnd(TEXT("(engineer)"));
+				// Brief 22: "Engineer(<Trigger>)" is an engineer line before that trigger's row: E_A<act>_<Trigger>_<order>_<line>.
+				const bool bLine = Prefix.RemoveFromStart(TEXT("Engineer(")) && Prefix.RemoveFromEnd(TEXT(")"));
+				bEngineer |= bLine;
+				Prefix = FString::Printf(TEXT("%sA%d_%s_"), bLine ? TEXT("E_") : TEXT(""), Act, *Prefix);
 				Expected += (I ? TEXT(" ") : TEXT("")) + Prefix + TEXT("*") + (bEngineer ? TEXT("(engineer)") : TEXT(""));
 				const int32 At = GFound.StartedMark + I;
 				bOk &= L->Started.IsValidIndex(At) && L->Started[At].ToString().StartsWith(Prefix)
@@ -992,6 +997,9 @@ namespace EntityFoundDebug
 			UWorld* World = W();
 			Note(FString::Printf(TEXT("map %s, act %d"), *MapName(), URunSubsystem::GetActIndexOf(World)));
 			NarrativeFixture::Install(World);
+			// Brief 22: an engineer line before every act's first EntityContact row (the first contact's sequence).
+			NarrativeFixture::SetEngineerLines(World, { { TEXT("A1_EntityContact_1"), 1 }, { TEXT("A2_EntityContact_1"), 1 }, { TEXT("A3_EntityContact_1"), 1 },
+				{ TEXT("A4_EntityContact_1"), 1 } });
 			GFound = FFoundTest();
 			GBehind = FBehind();
 			GFound.Text.Reset(NewObject<UTlsTextTestListener>());
@@ -1444,7 +1452,7 @@ namespace EntityFoundDebug
 		// --- The first contact after a clear sighting, then a second contact (area 2: a jump) ---
 		AddCaseStart(S, TEXT("contact after the sighting"));
 		AddContact(S, TEXT("contact after the sighting"), EEntityContactResponse::Jump, true);
-		AddExpectRows(S, TEXT("contact after the sighting"), { TEXT("JumpReturn"), TEXT("EntityContact") });
+		AddExpectRows(S, TEXT("contact after the sighting"), { TEXT("JumpReturn"), TEXT("Engineer(EntityContact)"), TEXT("EntityContact") });
 		AddCaseStart(S, TEXT("second contact"));
 		AddContact(S, TEXT("second contact"), EEntityContactResponse::Jump, true);
 		AddExpectRows(S, TEXT("second contact"), { TEXT("JumpReturn") });
@@ -1504,11 +1512,11 @@ namespace EntityFoundDebug
 			AddContact(S, Label, Response, true);
 			if (Response == EEntityContactResponse::Rewind)
 			{
-				AddExpectRows(S, Label, { TEXT("EntityContact"), TEXT("EntityFound") });
+				AddExpectRows(S, Label, { TEXT("Engineer(EntityContact)"), TEXT("EntityContact"), TEXT("EntityFound") });
 			}
 			else
 			{
-				AddExpectRows(S, Label, { TEXT("JumpReturn"), TEXT("EntityContact"), TEXT("EntityFound") });
+				AddExpectRows(S, Label, { TEXT("JumpReturn"), TEXT("Engineer(EntityContact)"), TEXT("EntityContact"), TEXT("EntityFound") });
 			}
 			AddOwnColourNextStop(S, Label);
 		}
@@ -1524,7 +1532,30 @@ namespace EntityFoundDebug
 		AddLookScan(S, TEXT("sighting and contact: scan 1"), TEXT('F'), 1, false);
 		AddLookScan(S, TEXT("sighting and contact: scan 2"), TEXT('F'), 2, true);
 		AddContact(S, TEXT("sighting and contact"), EEntityContactResponse::Jump, false);
-		AddExpectRows(S, TEXT("sighting and contact"), { TEXT("JumpReturn"), TEXT("EntityContact"), TEXT("EntityFound") });
+		AddExpectRows(S, TEXT("sighting and contact"), { TEXT("JumpReturn"), TEXT("Engineer(EntityContact)"), TEXT("EntityContact"), TEXT("EntityFound") });
+
+		// --- Brief 22: a clear sighting and a graze in the same Stop: the graze's return message, EntitySeen, EntityFound ---
+		AddCaseStart(S, TEXT("sighting and graze"), []()
+		{
+			Run()->SetEntityFound(false, TEXT("tls.EntityFoundTest: sighting and graze"));
+			Run()->SetFirstContact(false, TEXT("tls.EntityFoundTest: sighting and graze"));
+		});
+		AddStopManifested(S, TEXT("sighting and graze"));
+		AddClearPose(S, TEXT("sighting and graze"), 350.f, 700.f);
+		AddLookScan(S, TEXT("sighting and graze: scan 1"), TEXT('F'), 1, false);
+		AddLookScan(S, TEXT("sighting and graze: scan 2"), TEXT('F'), 2, true);
+		S.Add(Do(TEXT("sighting and graze: Resume with the figure within the graze radius"), []()
+		{
+			AEntity* E = FindEntity();
+			// The pose holds the figure 3.5 to 7 m away (path distance up to about twice that): a graze radius above it, no contact.
+			E->GrazeRadius = 2000.f;
+			ResumeTime();
+			E->GrazeRadius = 0.f;
+			Check(E->WasLastExitGraze() && !E->WasContactThisStop() && Run()->IsEntityFound() && !Run()->HasFirstContact(),
+				FString::Printf(TEXT("sighting and graze: the Resume was a graze (path distance %.0f cm), not a contact: found, no first contact"), E->GetLastExitPathDistance()));
+			return 0.f;
+		}));
+		AddExpectRows(S, TEXT("sighting and graze"), { TEXT("JumpReturn"), TEXT("EntitySeen(engineer)"), TEXT("EntityFound") });
 
 		Launch();
 	}

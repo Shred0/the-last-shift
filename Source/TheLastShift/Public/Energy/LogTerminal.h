@@ -37,6 +37,7 @@ public:
 	virtual bool AcceptsPayment() const override { return !bUnlocked; }
 	virtual bool OffersPayment() const override { return !bUnlocked; }
 	virtual bool OffersRead() const override { return bUnlocked && Entries.Num() > 0; }
+	virtual EPaymentKind GetPaymentKind() const override { return EPaymentKind::Log; }
 
 	UFUNCTION(BlueprintPure, Category = "Terminal|Logs")
 	bool IsUnlocked() const { return bUnlocked; }

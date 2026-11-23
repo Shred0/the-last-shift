@@ -380,6 +380,92 @@ bool FTextChannelSelectionTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// --- Brief 22: the engineer's lines before a row ---
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTextChannelEngineerLinesTest, "TheLastShift.TextChannel.EngineerLines", TextChannelTests::Flags)
+
+bool FTextChannelEngineerLinesTest::RunTest(const FString& Parameters)
+{
+	using namespace TextChannelTests;
+	UDataTable* Table = NewObject<UDataTable>(GetTransientPackage());
+	Table->RowStruct = FAIMessageRow::StaticStruct();
+	Table->AddRow(TEXT("A1_AreaStart_1"), MakeRow(ETextTrigger::AreaStart, 1, 1, TEXT("first start line")));
+	Table->AddRow(TEXT("A1_AreaStart_2"), MakeRow(ETextTrigger::AreaStart, 1, 2, TEXT("second start line")));
+	Table->AddRow(TEXT("A1_Spend_1"), MakeRow(ETextTrigger::Spend, 1, 1, TEXT("the only spend line")));
+	Table->AddRow(TEXT("A1_EntityFound_1"), MakeRow(ETextTrigger::EntityFound, 1, 1, TEXT("the entity found line")));
+	UDataTable* Lines = NewObject<UDataTable>(GetTransientPackage());
+	Lines->RowStruct = FEngineerLineRow::StaticStruct();
+	auto AddLine = [Lines](const TCHAR* Name, const TCHAR* Before, int32 Order, const TCHAR* Text)
+	{
+		FEngineerLineRow Row;
+		Row.Before = Before;
+		Row.Order = Order;
+		Row.Text = FText::FromString(Text);
+		Lines->AddRow(Name, Row);
+	};
+	// Added out of order: the Order column decides.
+	AddLine(TEXT("E_A1_AreaStart_2_2"), TEXT("A1_AreaStart_2"), 2, TEXT("engineer two before the second start line"));
+	AddLine(TEXT("E_A1_AreaStart_2_1"), TEXT("A1_AreaStart_2"), 1, TEXT("engineer one before the second start line"));
+	AddLine(TEXT("E_A1_AreaStart_1_1"), TEXT("A1_AreaStart_1"), 1, TEXT("engineer before the first start line"));
+	AddLine(TEXT("E_A1_Spend_1_1"), TEXT("A1_Spend_1"), 1, TEXT("engineer before the spend line"));
+	AddLine(TEXT("E_A1_EntityFound_1_1"), TEXT("A1_EntityFound_1"), 1, TEXT("engineer before the found line, battery {battery}"));
+	AddLine(TEXT("E_Light_1_1"), TEXT("Light_1"), 1, TEXT("engineer before a prologue line"));
+
+	UTextChannelComponent* Channel = NewChannel();
+	Channel->SetMessageTable(Table);
+	Channel->SetEngineerTable(Lines);
+	TStrongObjectPtr<UTlsTextTestListener> Listener(NewObject<UTlsTextTestListener>());
+	Listener->Bind(Channel);
+	auto Run = [&]() { RunUntil(Channel, Listener.Get(), [&]() { return !Channel->IsBusy(); }, 300.0); };
+	auto Order = [&]() { return FString::JoinBy(Listener->Started, TEXT(","), [](const FName& N) { return N.ToString(); }); };
+	auto Voices = [&]() { return FString::JoinBy(Listener->StartedVoices, TEXT(","), [](ETextVoice V) { return V == ETextVoice::Engineer ? FString(TEXT("E")) : FString(TEXT("H")); }); };
+
+	TestEqual(TEXT("FindEngineerLines: two lines before A1_AreaStart_2, in their order"),
+		FString::JoinBy(UTextChannelComponent::FindEngineerLines(Lines, TEXT("A1_AreaStart_2")), TEXT(","), [](const FName& N) { return N.ToString(); }),
+		FString(TEXT("E_A1_AreaStart_2_1,E_A1_AreaStart_2_2")));
+	TestEqual(TEXT("PushSequence queues the two rows (the engineer lines are not counted)"), Channel->PushSequence(ETextTrigger::AreaStart, 1, Context(1.0)), 2);
+	Run();
+	TestEqual(TEXT("A sequence: a line before its first row, two lines in order before the row in its middle"), Order(),
+		FString(TEXT("E_A1_AreaStart_1_1,A1_AreaStart_1,E_A1_AreaStart_2_1,E_A1_AreaStart_2_2,A1_AreaStart_2")));
+	TestEqual(TEXT("The lines are the engineer's voice, the rows the home AI's"), Voices(), FString(TEXT("E,H,E,E,H")));
+	TestEqual(TEXT("The row after the lines is unchanged"), Listener->StartedTexts.IsValidIndex(4) ? Listener->StartedTexts[4] : FString(), FString(TEXT("second start line")));
+
+	Listener->Reset();
+	for (int32 I = 0; I < 3; ++I)
+	{
+		Channel->PushTrigger(ETextTrigger::Spend, 1, Context(1.0));
+	}
+	Run();
+	TestEqual(TEXT("A row that repeats: its engineer line the first time only"), Order(), FString(TEXT("E_A1_Spend_1_1,A1_Spend_1,A1_Spend_1,A1_Spend_1")));
+
+	Listener->Reset();
+	Channel->PushSequence(ETextTrigger::AreaStart, 1, Context(1.0));
+	Run();
+	TestEqual(TEXT("The same rows again in the same map: no engineer line"), Order(), FString(TEXT("A1_AreaStart_1,A1_AreaStart_2")));
+
+	Listener->Reset();
+	Channel->PushText(TEXT("a prologue line"), Context(1.0), TEXT("Light_1"));
+	Channel->PushText(TEXT("a text without a row"), Context(1.0));
+	Run();
+	TestEqual(TEXT("A prologue line pushed with its row name: its engineer line first; a nameless text: none"), Order(), FString(TEXT("E_Light_1_1,Light_1,None")));
+
+	Listener->Reset();
+	Channel->PushRow(TEXT("A1_EntityFound_1"), Context(0.02));
+	Run();
+	TestEqual(TEXT("At Silent the home AI's row is dropped, the engineer line before it is said"), Order(), FString(TEXT("E_A1_EntityFound_1_1")));
+	TestTrue(TEXT("At Silent the engineer line is in full, with its token"),
+		Listener->StartedTexts.Num() == 1 && Listener->StartedTexts[0].StartsWith(TEXT("engineer before the found line, battery ")) && !Listener->StartedTexts[0].Contains(TEXT("{"))
+		&& Listener->StartedLevels.Num() == 1 && Listener->StartedLevels[0] == ETextDegradation::Full);
+
+	Listener->Reset();
+	Channel->ResetSaidEngineerLines();
+	Channel->PushTrigger(ETextTrigger::Spend, 1, Context(1.0));
+	Run();
+	TestEqual(TEXT("After ResetSaidEngineerLines (a new map) the line is said again"), Order(), FString(TEXT("E_A1_Spend_1_1,A1_Spend_1")));
+	Listener->Unbind();
+	return true;
+}
+
 // --- Structure of the narrative CSV files (Brief 7): never their wording, their number or their length ---
 
 #if WITH_EDITOR
@@ -665,7 +751,7 @@ namespace NarrativeCsv
 
 	/**
 	 * Every problem of DT_Scenes.csv (empty: the structure is right): it parses, rows <Scene>_<order> matching their Scene
-	 * and Order columns, (Scene, Order) unique, every Voice one of Paradise, HomeAI and Engineer, no line break, no empty text.
+	 * and Order columns, (Scene, Order) unique, every Voice one of Paradise, HomeAI, Engineer and EngineerParadise, no line break, no empty text.
 	 */
 	static TArray<FString> CheckScenes(const FString& Csv, const TCHAR* File = TEXT("DT_Scenes.csv"))
 	{
@@ -691,7 +777,7 @@ namespace NarrativeCsv
 			const FString Voice = Cells[3].TrimStartAndEnd().TrimQuotes();
 			if (VoiceEnum->GetValueByNameString(Voice) == INDEX_NONE)
 			{
-				Problems.Add(FString::Printf(TEXT("%s, row %s: voice '%s' is not Paradise, HomeAI or Engineer"), File, *Cells[0], *Voice));
+				Problems.Add(FString::Printf(TEXT("%s, row %s: voice '%s' is not Paradise, HomeAI, Engineer or EngineerParadise"), File, *Cells[0], *Voice));
 			}
 		}
 		const FRegexPattern NamePattern(TEXT("^([A-Za-z]+)_([0-9]+)$"));
@@ -775,6 +861,83 @@ namespace NarrativeCsv
 		return Problems;
 	}
 
+	/**
+	 * Every problem of DT_EngineerLines.csv (empty: the structure is right), against the message and prologue tables it
+	 * points into: it parses, rows E_<Before>_<Order> matching their columns, orders 1-999, every Before the key of a row
+	 * of DT_AIMessages or DT_Prologue and never of a row shown as a label (an AreaEntry row, a Flight row), the text not
+	 * empty, no line break, only the four tokens and {jump} only before a JumpReturn row. An empty table is right: the
+	 * engineer then says nothing before a row.
+	 */
+	static TArray<FString> CheckEngineerLines(const FString& Csv, const FString& MessagesCsv, const FString& PrologueCsv, const TCHAR* File = TEXT("DT_EngineerLines.csv"))
+	{
+		TArray<FString> Problems;
+		TArray<FString> Ignored;
+		const UDataTable* Messages = Parse(MessagesCsv, FAIMessageRow::StaticStruct(), Ignored, TEXT("DT_AIMessages.csv"));
+		const UDataTable* Prologue = Parse(PrologueCsv, FPrologueRow::StaticStruct(), Ignored, TEXT("DT_Prologue.csv"));
+		UScriptStruct* Struct = FEngineerLineRow::StaticStruct();
+		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
+		const FRegexPattern NamePattern(TEXT("^E_(.+)_([0-9]+)$"));
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FString Name = Pair.Key.ToString();
+			const FEngineerLineRow& Row = *reinterpret_cast<const FEngineerLineRow*>(Pair.Value);
+			FRegexMatcher Match(NamePattern, Name);
+			if (!Match.FindNext())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not follow E_<Before>_<Order>"), File, *Name));
+			}
+			else if (FName(*Match.GetCaptureGroup(1)) != Row.Before || FCString::Atoi(*Match.GetCaptureGroup(2)) != Row.Order)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not match its columns (before %s, order %d)"), File, *Name, *Row.Before.ToString(), Row.Order));
+			}
+			if (Row.Order < 1 || Row.Order > 999)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: order %d is not 1-999"), File, *Name, Row.Order));
+			}
+			const FAIMessageRow* Message = Messages->FindRow<FAIMessageRow>(Row.Before, TEXT("Csv"), false);
+			const FPrologueRow* Line = Prologue->FindRow<FPrologueRow>(Row.Before, TEXT("Csv"), false);
+			if (!Message && !Line)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: Before '%s' names no row of DT_AIMessages or DT_Prologue"), File, *Name, *Row.Before.ToString()));
+			}
+			else if ((Message && Message->Trigger == ETextTrigger::AreaEntry) || (Line && Line->Group == PrologueGroups::Flight))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: Before '%s' names a row shown as a label, never typed on the channel (%s)"), File, *Name, *Row.Before.ToString(),
+					Message ? TEXT("an AreaEntry row") : TEXT("a Flight row")));
+			}
+			const FString Text = TextCell(Struct, Pair.Value, TEXT("Text"));
+			CheckLineBreaks(File, Pair.Key, TEXT("Text"), Text, Problems);
+			if (Text.IsEmpty())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: empty text"), File, *Name));
+			}
+			for (int32 I = 0; I < Text.Len(); ++I)
+			{
+				if (Text[I] != TEXT('{'))
+				{
+					continue;
+				}
+				const int32 Close = Text.Find(TEXT("}"), ESearchCase::CaseSensitive, ESearchDir::FromStart, I);
+				const FString Token = Close == INDEX_NONE ? Text.Mid(I) : Text.Mid(I, Close - I + 1);
+				bool bKnown = false;
+				for (const TCHAR* Allowed : AllowedTokens)
+				{
+					bKnown |= Token.Equals(Allowed, ESearchCase::CaseSensitive);
+				}
+				if (!bKnown)
+				{
+					Problems.Add(FString::Printf(TEXT("%s, row %s: unknown token %s (allowed: {still}, {jump}, {home}, {battery})"), File, *Name, *Token));
+				}
+				else if (Token == TEXT("{jump}") && !(Message && Message->Trigger == ETextTrigger::JumpReturn))
+				{
+					Problems.Add(FString::Printf(TEXT("%s, row %s: {jump} before a row that is no JumpReturn row"), File, *Name));
+				}
+				I = Close == INDEX_NONE ? Text.Len() : Close;
+			}
+		}
+		return Problems;
+	}
+
 	/** Csv with one more data line, on a line of its own. */
 	static FString WithLine(const FString& Csv, const FString& Line)
 	{
@@ -825,6 +988,12 @@ bool FTextChannelCsvTest::RunTest(const FString& Parameters)
 	for (const FString& Problem : PrologueProblems) { AddError(Problem); }
 	AddInfo(FString::Printf(TEXT("DT_Prologue.csv: %d data lines, %d problems."), CountDataLines(Prologue), PrologueProblems.Num()));
 	TestEqual(TEXT("DT_Prologue.csv: structure right (parse, <Group>_<order> names, groups, line breaks)"), PrologueProblems.Num(), 0);
+	const FString EngineerLines = Load(TEXT("DT_EngineerLines.csv"));
+	TestFalse(TEXT("Narrative/DT_EngineerLines.csv is read"), EngineerLines.IsEmpty());
+	const TArray<FString> EngineerProblems = CheckEngineerLines(EngineerLines, Messages, Prologue);
+	for (const FString& Problem : EngineerProblems) { AddError(Problem); }
+	AddInfo(FString::Printf(TEXT("DT_EngineerLines.csv: %d data lines, %d problems."), CountDataLines(EngineerLines), EngineerProblems.Num()));
+	TestEqual(TEXT("DT_EngineerLines.csv: structure right (parse, E_<Before>_<Order> names, Before names a row and no label row, line breaks, tokens)"), EngineerProblems.Num(), 0);
 #endif
 	return true;
 }
@@ -887,7 +1056,7 @@ bool FTextChannelCsvCheckTest::RunTest(const FString& Parameters)
 	const FCase SceneCases[] = {
 		{ TEXT("a scene row with a bad name"), TEXT("Prologue-901,Prologue,901,HomeAI,,\"A test line.\""), TEXT("does not follow <Scene>_<order>") },
 		{ TEXT("a scene row whose name does not match its order"), TEXT("Prologue_902,Prologue,903,HomeAI,,\"A test line.\""), TEXT("does not match its columns") },
-		{ TEXT("a scene row with an unknown voice"), TEXT("Prologue_904,Prologue,904,Narrator,,\"A test line.\""), TEXT("is not Paradise, HomeAI or Engineer") },
+		{ TEXT("a scene row with an unknown voice"), TEXT("Prologue_904,Prologue,904,Narrator,,\"A test line.\""), TEXT("is not Paradise, HomeAI, Engineer or EngineerParadise") },
 		{ TEXT("a scene row with a line break"), TEXT("Prologue_905,Prologue,905,HomeAI,,\"A test line,\nbroken in two.\""), TEXT("line break") },
 	};
 	for (const FCase& Case : SceneCases)
@@ -900,6 +1069,52 @@ bool FTextChannelCsvCheckTest::RunTest(const FString& Parameters)
 	const FString NoLoss = Load(TEXT("DT_Endings.csv")).Replace(TEXT("\nLoss,"), TEXT("\nLost,"));
 	TestTrue(TEXT("DT_Endings.csv without the Loss row fails"),
 		FString::Join(CheckEndings(NoLoss, TEXT("DT_Endings.csv (copy)")), TEXT(" | ")).Contains(TEXT("no row Loss")));
+
+	// Brief 22: the spending triggers by kind of device are accepted, each with its own row name.
+	{
+		FString WithKinds = Base;
+		for (const TCHAR* Kind : { TEXT("SpendDoor"), TEXT("SpendLights"), TEXT("SpendBeacon"), TEXT("SpendLog"), TEXT("SpendTwin") })
+		{
+			WithKinds = WithLine(WithKinds, FString::Printf(TEXT("A2_%s_1,%s,2,1,\"A test spending line of its kind, battery {battery}.\",,,"), Kind, Kind));
+		}
+		const TArray<FString> Problems = CheckAIMessages(WithKinds, TEXT("DT_AIMessages.csv (copy with the five spending kinds)"));
+		AddInfo(FString::Printf(TEXT("the five spending triggers by kind: %d problems (%s)"), Problems.Num(), *FString::Join(Problems, TEXT(" | "))));
+		TestEqual(TEXT("A2_SpendDoor_1, A2_SpendLights_1, A2_SpendBeacon_1, A2_SpendLog_1 and A2_SpendTwin_1 are accepted"), Problems.Num(), 0);
+		const FString BadKind = WithLine(Base, TEXT("A2_SpendLog_9,SpendDoor,2,9,\"A test line whose name is not its trigger.\",,,"));
+		TestTrue(TEXT("a SpendDoor row named SpendLog fails"), FString::Join(CheckAIMessages(BadKind, TEXT("DT_AIMessages.csv (copy)")), TEXT(" | ")).Contains(TEXT("does not match its columns")));
+	}
+
+	// Brief 22: the engineer's lines, against the committed message and prologue tables, with fixture files of one bad row each.
+	const FString EngineerBase = Load(TEXT("DT_EngineerLines.csv"));
+	const FString MessageBase = Load(TEXT("DT_AIMessages.csv"));
+	const FString PrologueBase = Load(TEXT("DT_Prologue.csv"));
+	TestEqual(TEXT("The committed DT_EngineerLines.csv has no problem before a bad row is added"), CheckEngineerLines(EngineerBase, MessageBase, PrologueBase).Num(), 0);
+	const FCase EngineerCases[] = {
+		{ TEXT("an engineer line before a row that does not exist"), TEXT("E_A1_AreaStart_99_1,A1_AreaStart_99,1,\"A test line.\""), TEXT("names no row of DT_AIMessages or DT_Prologue") },
+		{ TEXT("an engineer line before the area entry label"), TEXT("E_A1_AreaEntry_1_1,A1_AreaEntry_1,1,\"A test line.\""), TEXT("names a row shown as a label") },
+		{ TEXT("an engineer line before the Flight label"), TEXT("E_Flight_1_1,Flight_1,1,\"A test line.\""), TEXT("names a row shown as a label") },
+		{ TEXT("an engineer line whose name is not its columns"), TEXT("E_A1_AreaStart_1_7,A1_AreaStart_1,8,\"A test line.\""), TEXT("does not match its columns") },
+		{ TEXT("an engineer line with {jump} before a row that is no return"), TEXT("E_A1_AreaStart_1_9,A1_AreaStart_1,9,\"A test line with {jump} in it.\""), TEXT("{jump} before a row") },
+	};
+	for (const FCase& Case : EngineerCases)
+	{
+		const FString Fixture = WithLine(EngineerBase, Case.Line);
+		const FString All = FString::Join(CheckEngineerLines(Fixture, MessageBase, PrologueBase, TEXT("DT_EngineerLines.csv (fixture)")), TEXT(" | "));
+		AddInfo(FString::Printf(TEXT("%s: fixture file:\n%s\nproblems: %s"), Case.What, *Fixture, *All));
+		TestTrue(FString::Printf(TEXT("%s fails with a clear message (\"%s\" in: %s)"), Case.What, Case.Expected, *All), All.Contains(Case.Expected, ESearchCase::CaseSensitive));
+	}
+	{
+		// Good lines before a row in the middle of a sequence, two before the same row, before a prologue line and a return.
+		FString Good = EngineerBase;
+		for (const TCHAR* Line : { TEXT("E_A1_AreaStart_2_1,A1_AreaStart_2,1,\"A test line.\""), TEXT("E_A1_AreaStart_2_2,A1_AreaStart_2,2,\"A second test line.\""),
+			TEXT("E_Door_1_1,Door_1,1,\"A test line before a prologue line.\""), TEXT("E_A1_JumpReturn_1_1,A1_JumpReturn_1,1,\"A test line with {jump} before a return.\"") })
+		{
+			Good = WithLine(Good, Line);
+		}
+		const TArray<FString> Problems = CheckEngineerLines(Good, MessageBase, PrologueBase, TEXT("DT_EngineerLines.csv (fixture, good rows)"));
+		AddInfo(FString::Printf(TEXT("good engineer lines: %d problems (%s)"), Problems.Num(), *FString::Join(Problems, TEXT(" | "))));
+		TestEqual(TEXT("engineer lines in the middle of a sequence, two before one row, before a prologue line and {jump} before a return are accepted"), Problems.Num(), 0);
+	}
 #endif
 	return true;
 }

@@ -3,7 +3,10 @@
 #include "Energy/PowerTerminal.h"
 
 #include "Components/StaticMeshComponent.h"
+#include "Energy/BeaconBody.h"
+#include "Energy/DoorDevice.h"
 #include "Energy/EnergySubsystem.h"
+#include "Energy/LightGroupDevice.h"
 #include "Energy/PoweredDevice.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -81,6 +84,44 @@ bool APowerTerminal::HasUnpoweredTarget() const
 		}
 	}
 	return false;
+}
+
+EPaymentKind APowerTerminal::GetPaymentKind() const
+{
+	EPaymentKind Kind = EPaymentKind::Other;
+	bool bAny = false;
+	for (const APoweredDevice* Device : Targets)
+	{
+		if (!Device)
+		{
+			continue;
+		}
+		EPaymentKind This = EPaymentKind::Other;
+		if (Device->IsA<ADoorDevice>())
+		{
+			This = EPaymentKind::Door;
+		}
+		else if (Device->IsA<ALightGroupDevice>())
+		{
+			// A beacon is a light group with a body that names it.
+			This = EPaymentKind::Lights;
+			for (TActorIterator<ABeaconBody> It(GetWorld()); It; ++It)
+			{
+				if (It->Device == Device)
+				{
+					This = EPaymentKind::Beacon;
+					break;
+				}
+			}
+		}
+		if (bAny && This != Kind)
+		{
+			return EPaymentKind::Other;
+		}
+		Kind = This;
+		bAny = true;
+	}
+	return bAny ? Kind : EPaymentKind::Other;
 }
 
 int32 APowerTerminal::GetCost() const

@@ -310,6 +310,15 @@ namespace PrologueDebug
 		double TriggerFiredRun = -1.0;
 		float Progress = 0.f;
 		float PhaseMark = 0.f;
+
+		// Brief 22: the briefing's share, sampled every frame: when each line started and was typed out, and whether it went back.
+		TMap<FName, float> BriefAtStart;
+		TMap<FName, float> BriefAtTyped;
+		float LastBriefProgress = 0.f;
+		bool bBriefBack = false;
+		float BriefFinal = -1.f;
+		int32 HomeMark = 0;
+		double StepOutToDoorNoLines = -1.0;
 	};
 	static FRun GRun;
 
@@ -358,6 +367,10 @@ namespace PrologueDebug
 			GRun.LastRow = Row;
 			if (!Row.IsNone())
 			{
+				if (const APrologueBriefingTerminal* Brief = First<APrologueBriefingTerminal>(); Brief && Brief->HasBriefingStarted())
+				{
+					GRun.BriefAtStart.Add(Row, Brief->GetBriefingProgress01());
+				}
 				GRun.Lines.Add({ Row, Map, Now, Time() ? Time()->GetRunSeconds() : -1.0, -1.0 });
 				Note(FString::Printf(TEXT("line %s started in %s"), *Row.ToString(), *Map));
 			}
@@ -367,7 +380,22 @@ namespace PrologueDebug
 			&& Text->GetShownCells() > 0 && Text->GetShownCells() >= Text->GetCurrentText().Len())
 		{
 			GRun.Lines.Last().TypedRun = Time() ? Time()->GetRunSeconds() : -1.0;
+			if (const APrologueBriefingTerminal* Brief = First<APrologueBriefingTerminal>(); Brief && Brief->HasBriefingStarted())
+			{
+				GRun.BriefAtTyped.Add(Row, Brief->GetBriefingProgress01());
+			}
 			Note(FString::Printf(TEXT("line %s typed out (run clock %.3f s)"), *Row.ToString(), GRun.Lines.Last().TypedRun));
+		}
+		// Brief 22: the briefing's share never goes back.
+		if (const APrologueBriefingTerminal* Brief = First<APrologueBriefingTerminal>(); Brief && Brief->HasBriefingStarted())
+		{
+			const float P = Brief->GetBriefingProgress01();
+			GRun.bBriefBack |= P < GRun.LastBriefProgress - 1.e-5f;
+			GRun.LastBriefProgress = P;
+			if (Brief->IsBriefed() && GRun.BriefFinal < 0.f)
+			{
+				GRun.BriefFinal = P;
+			}
 		}
 		if (GRun.bWalking)
 		{
@@ -1321,7 +1349,7 @@ namespace PrologueDebug
 		if (bHologramRows)
 		{
 			AddBriefingLocked(S, Label + TEXT(" (during the briefing)"));
-			S.Add(WaitFor(Label + TEXT(": the briefing said"), []() { return Briefing() && Briefing()->IsBriefed(); }, 20.f, [Label]()
+			S.Add(WaitFor(Label + TEXT(": the briefing said"), []() { return Briefing() && Briefing()->IsBriefed(); }, 45.f, [Label]()
 			{
 				CheckBriefed(Label, true);
 				return 0.3f;
@@ -2366,6 +2394,110 @@ namespace PrologueDebug
 			return 0.5f;
 		}));
 		AddBackToMenu(S, TEXT("G"));
+
+		// --- H (Brief 22): every group with its rows, without (H0) and with (H1) engineer lines in Hologram, Hangar, Light, Hatch and Door ---
+		for (int32 Pass = 0; Pass < 2; ++Pass)
+		{
+			const bool bLines = Pass == 1;
+			const FString L = bLines ? TEXT("H1") : TEXT("H0");
+			S.Add(Do(L + (bLines ? TEXT(": engineer lines before Hologram_1, Hangar_1, Light_1, Hatch_2 and Door_2") : TEXT(": no engineer line")), [bLines]()
+			{
+				TArray<NarrativeFixture::FEngineerLine> Lines;
+				if (bLines)
+				{
+					Lines = { { TEXT("Hologram_1"), 1 }, { TEXT("Hangar_1"), 1 }, { TEXT("Light_1"), 1 }, { TEXT("Hatch_2"), 1 }, { TEXT("Door_2"), 1 } };
+				}
+				NarrativeFixture::SetEngineerLines(W(), Lines);
+				GRun.BriefAtStart.Reset();
+				GRun.BriefAtTyped.Reset();
+				GRun.bBriefBack = false;
+				GRun.LastBriefProgress = 0.f;
+				GRun.BriefFinal = -1.f;
+				GRun.HomeMark = GRun.Lines.Num();
+				return 0.f;
+			}));
+			AddSkipToArrival(S, L, {});
+			S.Add(Do(L + TEXT(": home: the lines and the briefing's share"), [L, bLines]()
+			{
+				const FName E = NarrativeFixture::GetEngineerLineName(TEXT("Hologram_1"), 1);
+				FString HomeOnly;
+				TArray<FString> HomeRows;
+				for (int32 I = GRun.HomeMark; I < GRun.MapsAtMark && I < GRun.Lines.Num(); ++I)
+				{
+					HomeOnly += (HomeOnly.IsEmpty() ? TEXT("") : TEXT(" ")) + GRun.Lines[I].Row.ToString();
+					HomeRows.Add(GRun.Lines[I].Row.ToString());
+				}
+				const int32 HangarAt = HomeRows.IndexOfByKey(FString(TEXT("Hangar_1")));
+				bool bAnyLine = false;
+				for (const FString& Row : HomeRows)
+				{
+					bAnyLine |= Row.StartsWith(TEXT("E_"), ESearchCase::CaseSensitive);
+				}
+				if (bLines)
+				{
+					const float WE = static_cast<float>(NarrativeFixture::GetEngineerLineText(TEXT("Hologram_1"), 1).Len());
+					const float WH = static_cast<float>(NarrativeFixture::GetPrologueLineText(PrologueGroups::Hologram, 1).Len());
+					const float Want = WE / (WE + WH);
+					const float* AtStartE = GRun.BriefAtStart.Find(E);
+					const float* AtTypedE = GRun.BriefAtTyped.Find(E);
+					const float* AtStartH = GRun.BriefAtStart.Find(TEXT("Hologram_1"));
+					const float* AtTypedH = GRun.BriefAtTyped.Find(TEXT("Hologram_1"));
+					Check(HomeOnly.Contains(E.ToString() + TEXT(" Hologram_1")), FString::Printf(TEXT("%s: home: the engineer line before Hologram_1, then Hologram_1 (%s)"), *L, *HomeOnly));
+					Check(HangarAt == INDEX_NONE || (HangarAt > 0 && HomeRows[HangarAt - 1] == TEXT("E_Hangar_1_1")),
+						FString::Printf(TEXT("%s: home: the engineer line before Hangar_1, when Hangar_1 was said before the flight (%s)"), *L, *HomeOnly));
+					Check(AtStartE && *AtStartE <= 0.02f && AtTypedE && FMath::Abs(*AtTypedE - Want) <= 0.04f && AtStartH && *AtStartH >= *AtTypedE - 0.01f && AtTypedH && *AtTypedH >= 0.95f && GRun.BriefFinal == 1.f,
+						FString::Printf(TEXT("%s: the briefing's share counts the engineer line by its length: %.3f when it starts, %.3f when typed out (its share %.3f = %.0f / (%.0f + %.0f)), %.3f when Hologram_1 starts, %.3f when it is typed out (a frame behind), %.3f once said"),
+							*L, AtStartE ? *AtStartE : -1.f, AtTypedE ? *AtTypedE : -1.f, Want, WE, WE, WH, AtStartH ? *AtStartH : -1.f, AtTypedH ? *AtTypedH : -1.f, GRun.BriefFinal));
+				}
+				else
+				{
+					const float* AtTypedH = GRun.BriefAtTyped.Find(TEXT("Hologram_1"));
+					Check(!bAnyLine && AtTypedH && *AtTypedH >= 0.95f && GRun.BriefFinal == 1.f,
+						FString::Printf(TEXT("%s: home: no engineer line; the share when Hologram_1 is typed out %.3f (a frame behind), whole once said (%.3f; %s)"), *L, AtTypedH ? *AtTypedH : -1.f,
+							GRun.BriefFinal, *HomeOnly));
+				}
+				Check(!GRun.bBriefBack, FString::Printf(TEXT("%s: the briefing's share never went back (last sampled %.3f)"), *L, GRun.LastBriefProgress));
+				return 0.f;
+			}));
+			S.Add(WaitFor(L + TEXT(": the exit door opens"), []() { return First<APrologueHatch>()->GetHatchState() == EPrologueHatchState::DoorOpened; }, 90.f, [L, bLines]()
+			{
+				const APrologueHatch* Hatch = First<APrologueHatch>();
+				CheckDoorDelay(L, GRun.MapsAtMark, TEXT("Door_2"), true);
+				const FString Want = bLines ? TEXT("E_Light_1_1 Light_1 Light_2 Hatch_1 E_Hatch_2_1 Hatch_2 Door_1 E_Door_2_1 Door_2") : TEXT("Light_1 Light_2 Hatch_1 Hatch_2 Door_1 Door_2");
+				Check(RowsFrom(GRun.MapsAtMark) == Want, FString::Printf(TEXT("%s: the arrival's lines: %s (expected %s)"), *L, *RowsFrom(GRun.MapsAtMark), *Want));
+				const FLine* Light2 = nullptr;
+				for (int32 I = GRun.MapsAtMark; I < GRun.Lines.Num(); ++I)
+				{
+					Light2 = GRun.Lines[I].Row == TEXT("Light_2") ? &GRun.Lines[I] : Light2;
+				}
+				const UFlashlightHintWidget* Hint = Char() ? Char()->GetFlashlightHint() : nullptr;
+				Check(Light2 && Light2->TypedRun >= 0.0 && FMath::Abs(Hatch->GetLightDoneRunSeconds() - Light2->TypedRun) <= 0.05 && Hint && Hint->GetHintState() == EFlashlightHintState::Active,
+					FString::Printf(TEXT("%s: the flashlight hint comes when Light_2, the group's last row, is typed out (%.3f s, Light lines done %.3f s), %s"), *L,
+						Light2 ? Light2->TypedRun : -1.0, Hatch->GetLightDoneRunSeconds(), Hint && Hint->GetHintState() == EFlashlightHintState::Active ? TEXT("asked for") : TEXT("not asked for")));
+				const double StepOutToDoor = GRun.DoorOpenedRun - Hatch->GetSteppedOutRunSeconds();
+				if (!bLines)
+				{
+					GRun.StepOutToDoorNoLines = StepOutToDoor;
+					Note(FString::Printf(TEXT("%s: %.2f s of the run's clock from stepping out of the ship to the exit door, without engineer lines"), *L, StepOutToDoor));
+				}
+				else
+				{
+					const UTextChannelComponent* C = Channel();
+					double LinesSeconds = 0.0;
+					for (const FName Before : { FName(TEXT("Light_1")), FName(TEXT("Hatch_2")), FName(TEXT("Door_2")) })
+					{
+						const int32 Len = NarrativeFixture::GetEngineerLineText(Before, 1).Len();
+						LinesSeconds += Len / C->GetCharsPerSecond(1.0) + C->GetHoldSecondsFor(Len) + C->GapSeconds;
+					}
+					const double Extra = StepOutToDoor - GRun.StepOutToDoorNoLines;
+					Check(GRun.StepOutToDoorNoLines > 0.0 && Extra >= LinesSeconds * 0.85 && Extra <= LinesSeconds + 1.0,
+						FString::Printf(TEXT("%s: %.2f s from stepping out to the exit door with the three engineer lines, %.2f s without: %.2f s more, the lines' own %.2f s (typing, hold, gap)"),
+							*L, StepOutToDoor, GRun.StepOutToDoorNoLines, Extra, LinesSeconds));
+				}
+				return 0.5f;
+			}));
+			AddBackToMenu(S, L);
+		}
 		return S;
 	}
 

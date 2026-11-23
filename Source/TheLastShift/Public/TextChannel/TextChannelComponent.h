@@ -29,8 +29,9 @@ enum class ETextVoice : uint8
 	/** The twin AI: barcode characters typed first and translated a few characters behind; never degraded or discarded. */
 	Twin,
 	/**
-	 * The engineer: rows of the message table whose trigger is the engineer's (EntitySeen). Never degraded or discarded at
-	 * any battery level: its full text, typed at the full battery's speed.
+	 * The engineer: rows of the message table whose trigger is the engineer's (EntitySeen), and the engineer's lines before
+	 * a row (the engineer table, FEngineerLineRow). Never degraded or discarded at any battery level: its full text, typed
+	 * at the full battery's speed.
 	 */
 	Engineer
 };
@@ -58,6 +59,13 @@ enum class ETextVoice : uint8
  *
  * Messages come from the table given with SetMessageTable (FAIMessageRow rows). Everything runs on unscaled real
  * time: the owner's tick gives real seconds, and AdvanceSeconds can be called directly (tests).
+ *
+ * The engineer answers before any row: the engineer table (SetEngineerTable, FEngineerLineRow rows) names, for a row of
+ * the message table or a prologue line (a PushText with the line's row name), the engineer's lines said before it. When
+ * such a row is pushed, its engineer lines are queued first, in ascending Order, then the row; the first time only that
+ * the row is pushed on this channel (the channel lives with the pawn of one map: once in the act, or in the prologue
+ * map). Nothing of it is saved. The lines are the engineer's voice, so at Silent the row after them is dropped and they
+ * are still said.
  */
 UCLASS(ClassGroup = (TheLastShift), meta = (BlueprintSpawnableComponent))
 class THELASTSHIFT_API UTextChannelComponent : public UActorComponent
@@ -96,7 +104,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	UDataTable* GetMessageTable() const { return MessageTable; }
 
-	/** Queues the row RowName. False (with a warning) when it does not exist or the queue is full. */
+	/**
+	 * Queues the row RowName, after the engineer's lines before it the first time it is pushed here. False (with a warning)
+	 * when it does not exist or the queue is full.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "TextChannel")
 	bool PushRow(FName RowName, const FTextChannelContext& Context);
 
@@ -124,10 +135,29 @@ public:
 
 	/**
 	 * Queues a text that is no row of the message table (a prologue line, debug: tls.Text.Say), degraded automatically
-	 * and with the context's tokens. Name is what GetCurrentRowName reports for it (None: nothing).
+	 * and with the context's tokens. Name is what GetCurrentRowName reports for it (None: nothing); a prologue line passes
+	 * its row name, and the engineer's lines before that row come first, as for PushRow.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "TextChannel")
 	bool PushText(const FString& Text, const FTextChannelContext& Context, FName Name = NAME_None);
+
+	/** The engineer's lines (FEngineerLineRow rows). Given by the owner; null = the engineer says nothing before a row. */
+	UFUNCTION(BlueprintCallable, Category = "TextChannel")
+	void SetEngineerTable(UDataTable* InTable);
+
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	UDataTable* GetEngineerTable() const { return EngineerTable; }
+
+	/** True once the row Before has been pushed here with its engineer lines (whether or not it has any). */
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	bool HasSaidEngineerLinesBefore(FName Before) const { return EngineerSaidBefore.Contains(Before); }
+
+	/** Forgets which rows' engineer lines were said, as at the start of a map (tests: several cases in one map). */
+	UFUNCTION(BlueprintCallable, Category = "TextChannel")
+	void ResetSaidEngineerLines() { EngineerSaidBefore.Reset(); }
+
+	/** The engineer's lines before the row Before in Table, in ascending Order (ties by row name). */
+	static TArray<FName> FindEngineerLines(const UDataTable* Table, FName Before);
 
 	UFUNCTION(BlueprintCallable, Category = "TextChannel")
 	void SetSuspended(bool bInSuspended);
@@ -164,6 +194,10 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
 	int32 GetQueuedCount() const { return Queue.Num(); }
+
+	/** A message named RowName waits in the queue (not the current one). */
+	UFUNCTION(BlueprintPure, Category = "TextChannel")
+	bool IsQueued(FName RowName) const;
 
 	/** Row of the current message (None for a pushed text or when there is none). */
 	UFUNCTION(BlueprintPure, Category = "TextChannel")
@@ -251,6 +285,8 @@ private:
 	};
 
 	bool Enqueue(FQueued&& Item, const TCHAR* What);
+	/** The first time Before is pushed: queues its engineer lines in order. Returns how many were queued. */
+	int32 PushEngineerLinesBefore(FName Before, const FTextChannelContext& Context);
 	/** Starts queued messages until one is shown or the queue is empty. */
 	void StartNext();
 	void SetVisible(bool bInVisible);
@@ -262,6 +298,12 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UDataTable> TwinTable;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UDataTable> EngineerTable;
+
+	/** Rows already pushed with their engineer lines on this channel (this map). */
+	TSet<FName> EngineerSaidBefore;
 
 	/** Twin voice: seconds typed since the message (re)started, and the lag fixed when it started. */
 	double TwinElapsed = 0.0;

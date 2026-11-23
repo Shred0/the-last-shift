@@ -35,6 +35,7 @@ public:
 
 	virtual bool AcceptsPayment() const override;
 	virtual bool OffersPayment() const override { return AcceptsPayment(); }
+	virtual EPaymentKind GetPaymentKind() const override { return EPaymentKind::Twin; }
 
 protected:
 	virtual void HandlePaid(APawn* InstigatorPawn) override;

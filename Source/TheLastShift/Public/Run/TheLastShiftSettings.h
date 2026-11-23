@@ -159,6 +159,13 @@ struct THELASTSHIFT_API FSuitTextColors
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
 	FLinearColor ParadiseBackground = FLinearColor(1.f, 1.f, 1.f, 1.f);
 
+	/**
+	 * The engineer speaking inside the paradise in a text scene (the EngineerParadise voice): a dark tone of home's tint on
+	 * ParadiseBackground, so that it reads as another speaker than the paradise.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
+	FLinearColor EngineerParadise = FLinearColor(0.05f, 0.22f, 0.38f, 1.f);
+
 	/** Background of the home AI's and the engineer's lines in a text scene. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Text Colors")
 	FLinearColor SceneBackground = FLinearColor(0.f, 0.f, 0.f, 1.f);
@@ -586,6 +593,13 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
 	TSoftObjectPtr<UDataTable> TwinAITable;
 
+	/**
+	 * The engineer's lines on the text channel (FEngineerLineRow), each before a row of AIMessagesTable or PrologueTable,
+	 * imported from Narrative/DT_EngineerLines.csv.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> EngineerLinesTable;
+
 	/** Where log terminals show their entries: on their surface, or in a suit panel on screen. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Twin Writing")
 	ELogDisplay LogDisplay = ELogDisplay::Surface;
@@ -758,6 +772,9 @@ public:
 
 	/** TwinAITable, loaded (null when unset or missing). */
 	UDataTable* LoadTwinAITable() const;
+
+	/** EngineerLinesTable, loaded (null when unset or missing). */
+	UDataTable* LoadEngineerLinesTable() const;
 
 	/** TextColors of the project settings. */
 	static const FSuitTextColors& GetTextColors() { return Get()->TextColors; }

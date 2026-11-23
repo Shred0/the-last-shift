@@ -15,6 +15,38 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTerminalActivated, int32, Cost);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnTerminalInsufficientEnergy, int32, Cost, int32, BankedEnergy, bool, bTimeStopped);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnAnyTerminalActivated, APowerTerminal* /*Terminal*/, int32 /*Cost*/);
 
+/** What a payment at a terminal is for (APowerTerminal::GetPaymentKind). */
+UENUM(BlueprintType)
+enum class EPaymentKind : uint8
+{
+	/** None of the kinds below: a terminal that powers nothing, or devices of different kinds or of another class. */
+	Other,
+	/** Every target is a door (a gate's door). */
+	Door,
+	/** Every target is a group of lights that is no beacon's. */
+	Lights,
+	/** Every target is a beacon's light group (the device of an ABeaconBody). */
+	Beacon,
+	/** A log terminal. */
+	Log,
+	/** The twin AI's terminal. */
+	Twin
+};
+
+inline const TCHAR* LexToString(EPaymentKind Kind)
+{
+	switch (Kind)
+	{
+	case EPaymentKind::Other: return TEXT("Other");
+	case EPaymentKind::Door: return TEXT("Door");
+	case EPaymentKind::Lights: return TEXT("Lights");
+	case EPaymentKind::Beacon: return TEXT("Beacon");
+	case EPaymentKind::Log: return TEXT("Log");
+	case EPaymentKind::Twin: return TEXT("Twin");
+	}
+	return TEXT("Unknown");
+}
+
 /**
  * Where energy is spent: Interact within InteractRadius, in Normal time, spends Cost banked energy and powers every
  * device in Targets (which can be far away). With too little energy, or while time is Stopped (terminals work only in
@@ -65,6 +97,14 @@ public:
 	/** True when the Interact prompt offers to read here, for free. Default: false. */
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	virtual bool OffersRead() const { return false; }
+
+	/**
+	 * What a payment here is for, by what it powers: Door, Lights or Beacon when every target is of that kind, Other when
+	 * there is none or they differ. The log terminal and the twin AI's terminal give their own kind. The home AI's spending
+	 * comment follows it.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	virtual EPaymentKind GetPaymentKind() const;
 
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	bool IsInRange(const APawn* InstigatorPawn) const;

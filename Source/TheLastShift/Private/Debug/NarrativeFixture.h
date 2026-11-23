@@ -6,6 +6,7 @@
 // the wording, the number or the length of the rows in Narrative/. Development builds only.
 
 #include "CoreMinimal.h"
+#include "Narrative/NarrativeRows.h"
 
 #if !UE_BUILD_SHIPPING
 
@@ -61,9 +62,35 @@ namespace NarrativeFixture
 	/** Replaces the installed logs fixture with one of LogCount rows (the settings point at it). No-op when not installed. */
 	void SetLogCount(int32 LogCount);
 
+	/** One engineer line of a fixture: said before the row Before, at Order among the lines before it. */
+	struct FEngineerLine
+	{
+		FName Before;
+		int32 Order = 1;
+	};
+
+	/** The text of the fixture's engineer line before Before at Order: it names its row and order, about 70 characters or more. */
+	FString GetEngineerLineText(FName Before, int32 Order);
+
+	/** The row name of that line: E_<Before>_<Order>. */
+	FName GetEngineerLineName(FName Before, int32 Order);
+
 	/**
-	 * Points the project settings' AIMessagesTable, EndingsTable, LogsTable, TwinAITable and ScenesTable at fixture tables (kept alive
-	 * until Restore) and gives every text channel already in World the fixture messages and twin rows. Everything that
+	 * Replaces the installed engineer fixture (empty at Install) with one holding Lines, points the settings at it and gives
+	 * it to every text channel of World. No-op when not installed.
+	 */
+	void SetEngineerLines(UWorld* World, const TArray<FEngineerLine>& Lines);
+
+	/** Adds a row A<act>_<Trigger>_<order> to the installed messages fixture (a neutral text that names it). No-op when not installed. */
+	void AddMessageRow(ETextTrigger Trigger, int32 Act, int32 Order);
+
+	/** The text of a row added by AddMessageRow. */
+	FString GetAddedMessageText(ETextTrigger Trigger, int32 Act, int32 Order);
+
+	/**
+	 * Points the project settings' AIMessagesTable, EndingsTable, LogsTable, TwinAITable, ScenesTable, PrologueTable and
+	 * EngineerLinesTable (empty: no engineer line unless a test sets some) at fixture tables (kept alive
+	 * until Restore) and gives every text channel already in World the fixture messages, twin rows and engineer lines. Everything that
 	 * loads a narrative table after this (the home AI of a new map, the travel label, the loss text, the terminals, the
 	 * archive) reads the fixtures. No-op when installed.
 	 */

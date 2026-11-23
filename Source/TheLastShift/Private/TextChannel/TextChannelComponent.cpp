@@ -71,6 +71,78 @@ void UTextChannelComponent::SetTwinTable(UDataTable* InTable)
 	TwinTable = InTable;
 }
 
+void UTextChannelComponent::SetEngineerTable(UDataTable* InTable)
+{
+	if (InTable && (!InTable->GetRowStruct() || !InTable->GetRowStruct()->IsChildOf(FEngineerLineRow::StaticStruct())))
+	{
+		UE_LOG(LogTextChannel, Warning, TEXT("%s: table %s does not hold FEngineerLineRow rows; ignored."), *GetNameSafe(GetOwner()), *GetNameSafe(InTable));
+		InTable = nullptr;
+	}
+	EngineerTable = InTable;
+}
+
+TArray<FName> UTextChannelComponent::FindEngineerLines(const UDataTable* Table, FName Before)
+{
+	TArray<TPair<int32, FName>> Found;
+	if (Table && !Before.IsNone() && Table->GetRowStruct() && Table->GetRowStruct()->IsChildOf(FEngineerLineRow::StaticStruct()))
+	{
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FEngineerLineRow* Row = reinterpret_cast<const FEngineerLineRow*>(Pair.Value);
+			if (Row && Row->Before == Before)
+			{
+				Found.Emplace(Row->Order, Pair.Key);
+			}
+		}
+	}
+	Found.Sort([](const TPair<int32, FName>& A, const TPair<int32, FName>& B)
+	{
+		return A.Key != B.Key ? A.Key < B.Key : A.Value.LexicalLess(B.Value);
+	});
+	TArray<FName> Names;
+	for (const TPair<int32, FName>& Pair : Found)
+	{
+		Names.Add(Pair.Value);
+	}
+	return Names;
+}
+
+bool UTextChannelComponent::IsQueued(FName RowName) const
+{
+	return Queue.ContainsByPredicate([RowName](const FQueued& Item) { return Item.RowName == RowName; });
+}
+
+int32 UTextChannelComponent::PushEngineerLinesBefore(FName Before, const FTextChannelContext& Context)
+{
+	if (Before.IsNone() || EngineerSaidBefore.Contains(Before))
+	{
+		return 0;
+	}
+	// Once in the map, whether the row has lines or not: a row that repeats (a return, a spending comment) repeats alone.
+	EngineerSaidBefore.Add(Before);
+	int32 Queued = 0;
+	for (const FName& LineName : FindEngineerLines(EngineerTable, Before))
+	{
+		const FEngineerLineRow* Line = EngineerTable->FindRow<FEngineerLineRow>(LineName, TEXT("TextChannel"), false);
+		if (!Line)
+		{
+			continue;
+		}
+		FQueued Item;
+		Item.RowName = LineName;
+		Item.RawText = Line->Text.ToString();
+		Item.bRaw = true;
+		Item.Voice = ETextVoice::Engineer;
+		Item.Context = Context;
+		Queued += Enqueue(MoveTemp(Item), *FString::Printf(TEXT("engineer line '%s'"), *LineName.ToString())) ? 1 : 0;
+	}
+	if (Queued > 0)
+	{
+		UE_LOG(LogTextChannel, Log, TEXT("%s: %d engineer line(s) queued before '%s'."), *GetNameSafe(GetOwner()), Queued, *Before.ToString());
+	}
+	return Queued;
+}
+
 int32 UTextChannelComponent::GetTranslatedCells() const
 {
 	const int32 Shown = GetShownCells();
@@ -175,6 +247,8 @@ bool UTextChannelComponent::PushRow(FName RowName, const FTextChannelContext& Co
 		UE_LOG(LogTextChannel, Warning, TEXT("%s: no row '%s' in %s."), *GetNameSafe(GetOwner()), *RowName.ToString(), *GetNameSafe(MessageTable));
 		return false;
 	}
+	// The engineer answers first, the first time this row is said in the map.
+	PushEngineerLinesBefore(RowName, Context);
 	FQueued Item;
 	Item.RowName = RowName;
 	Item.Context = Context;
@@ -239,6 +313,8 @@ int32 UTextChannelComponent::PushTwinPart(int32 Part)
 
 bool UTextChannelComponent::PushText(const FString& Text, const FTextChannelContext& Context, FName Name)
 {
+	// A prologue line passes its row name: the engineer's lines before it come first.
+	PushEngineerLinesBefore(Name, Context);
 	FQueued Item;
 	Item.RowName = Name;
 	Item.RawText = Text;
@@ -285,9 +361,19 @@ void UTextChannelComponent::StartNext()
 
 		if (Item.Voice == ETextVoice::Engineer)
 		{
-			// The engineer: the full text at every battery level, typed at the full battery's speed.
-			const FAIMessageRow* Row = MessageTable ? MessageTable->FindRow<FAIMessageRow>(Item.RowName, TEXT("TextChannel"), false) : nullptr;
-			const FString EngineerText = Row ? ComposeMessage(*Row, ETextDegradation::Full, Item.Context) : FString();
+			// The engineer: the full text at every battery level, typed at the full battery's speed. A row of the message
+			// table (EntitySeen) or a line before a row (its text taken when it was queued).
+			FString EngineerText;
+			if (Item.bRaw)
+			{
+				FAIMessageRow Line;
+				Line.Text = FText::FromString(Item.RawText);
+				EngineerText = ComposeMessage(Line, ETextDegradation::Full, Item.Context);
+			}
+			else if (const FAIMessageRow* Row = MessageTable ? MessageTable->FindRow<FAIMessageRow>(Item.RowName, TEXT("TextChannel"), false) : nullptr)
+			{
+				EngineerText = ComposeMessage(*Row, ETextDegradation::Full, Item.Context);
+			}
 			if (EngineerText.IsEmpty())
 			{
 				UE_LOG(LogTextChannel, Log, TEXT("%s: engineer '%s' discarded: no text."), *GetNameSafe(GetOwner()), *Item.RowName.ToString());
