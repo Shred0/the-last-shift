@@ -61,11 +61,6 @@ APrologueHatch::APrologueHatch()
 	{
 		Panel->SetStaticMesh(CubeMesh.Object);
 	}
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Greybox(TEXT("/Game/TheLastShift/Art/M_Greybox.M_Greybox"));
-	if (Greybox.Succeeded())
-	{
-		Panel->SetMaterial(0, Greybox.Object);
-	}
 
 	Blocker = CreateDefaultSubobject<UBoxComponent>(TEXT("Blocker"));
 	Blocker->SetupAttachment(GetRootComponent());

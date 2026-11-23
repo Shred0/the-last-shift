@@ -26,11 +26,6 @@ APrologueBriefingTerminal::APrologueBriefingTerminal()
 	Cost = 0;
 	// A terminal built on the power terminal with no body of its own: it shows the project's modelled body.
 	bModelledBody = true;
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Greybox(TEXT("/Game/TheLastShift/Art/M_Greybox.M_Greybox"));
-	if (Greybox.Succeeded())
-	{
-		Mesh->SetMaterial(0, Greybox.Object);
-	}
 }
 
 void APrologueBriefingTerminal::BeginPlay()

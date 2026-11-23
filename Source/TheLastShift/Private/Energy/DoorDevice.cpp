@@ -6,6 +6,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Energy/EnergySubsystem.h"
 #include "Engine/StaticMesh.h"
+#include "Materials/MaterialInterface.h"
 #include "GameFramework/Pawn.h"
 #include "Run/TheLastShiftSettings.h"
 #include "UObject/ConstructorHelpers.h"
@@ -73,14 +74,25 @@ void ADoorDevice::FitPanelToBlocker()
 
 bool ADoorDevice::ApplyPanelMesh(UStaticMeshComponent* InPanel, UStaticMesh* Modelled)
 {
-	if (!InPanel || !Modelled)
+	if (!InPanel)
 	{
+		return false;
+	}
+	if (!Modelled)
+	{
+		// The engine's cube: a moving object's material (Brief 21), from the one owner of the reference.
+		if (UMaterialInterface* Fallback = UTheLastShiftSettings::Get()->SurfaceLook.PanelFallbackMaterial.LoadSynchronous())
+		{
+			InPanel->SetMaterial(0, Fallback);
+		}
 		return false;
 	}
 	if (InPanel->GetStaticMesh() != Modelled)
 	{
 		InPanel->SetStaticMesh(Modelled);
 	}
+	// The modelled panel shows its own material: its surface family (Brief 21).
+	InPanel->EmptyOverrideMaterials();
 	return true;
 }
 

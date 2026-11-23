@@ -618,6 +618,8 @@ namespace TextDebug
 		TArray<FColor> Pixels;
 		bool bReady = false;
 		FBox2D Rect = FBox2D(ForceInit);
+		/** The engineer's bar, in the shot's pixels (invalid when it is not shown): left out of the glyphs' sample (Brief 21). */
+		FBox2D BarRect = FBox2D(ForceInit);
 	};
 	static FUIShot GUIShot;
 	static FDelegateHandle GUIShotHandle;
@@ -646,14 +648,22 @@ namespace TextDebug
 		GUIShot.Label = Label;
 		const UTextChannelWidget* Widget = FindWidget<UTextChannelWidget>(W());
 		FBox2D Rect = Widget ? Widget->GetShownRect() : FBox2D(ForceInit);
+		FBox2D Bar(ForceInit);
+		if (const UBorder* VoiceBar = Widget ? Widget->GetVoiceBar() : nullptr; VoiceBar && VoiceBar->IsVisible())
+		{
+			const FGeometry& G = VoiceBar->GetCachedGeometry();
+			Bar = FBox2D(G.GetAbsolutePosition(), G.GetAbsolutePosition() + G.GetAbsoluteSize());
+		}
 		if (GEngine && GEngine->GameViewport)
 		{
 			if (const TSharedPtr<SWindow> Window = GEngine->GameViewport->GetWindow())
 			{
 				Rect = Rect.ShiftBy(-Window->GetPositionInScreen());
+				Bar = Bar.bIsValid ? Bar.ShiftBy(-Window->GetPositionInScreen()) : Bar;
 			}
 		}
 		GUIShot.Rect = Rect;
+		GUIShot.BarRect = Bar;
 		if (!GUIShotHandle.IsValid())
 		{
 			GUIShotHandle = UGameViewportClient::OnScreenshotCaptured().AddStatic(&HandleUIShot);
@@ -661,7 +671,40 @@ namespace TextDebug
 		FScreenshotRequest::RequestScreenshot(FString(), true, false);
 	}
 
-	/** Mean colour of the brightest pixels of the text box (the glyphs' cores, and the engineer's bar); false when the box is empty. */
+	/** Inside the engineer's bar, grown by 2 pixels (its edge is blended with the box). */
+	static bool InBar(int32 X, int32 Y)
+	{
+		const FBox2D& B = GUIShot.BarRect;
+		return B.bIsValid && X >= B.Min.X - 2 && X <= B.Max.X + 2 && Y >= B.Min.Y - 2 && Y <= B.Max.Y + 2;
+	}
+
+	/** Mean colour of the bar's inner pixels (1 pixel in from each edge); false when no bar is shown. */
+	static bool MeasureBar(FColor& OutMean, int32& OutCount)
+	{
+		const FUIShot& Shot = GUIShot;
+		OutCount = 0;
+		if (!Shot.BarRect.bIsValid || Shot.Pixels.Num() < Shot.Width * Shot.Height)
+		{
+			return false;
+		}
+		int64 R = 0, G = 0, B = 0;
+		for (int32 Y = FMath::Max(0, FMath::CeilToInt32(Shot.BarRect.Min.Y) + 1); Y < FMath::Min(Shot.Height, FMath::FloorToInt32(Shot.BarRect.Max.Y) - 1); ++Y)
+		{
+			for (int32 X = FMath::Max(0, FMath::CeilToInt32(Shot.BarRect.Min.X)); X < FMath::Min(Shot.Width, FMath::FloorToInt32(Shot.BarRect.Max.X)); ++X)
+			{
+				const FColor& C = Shot.Pixels[Y * Shot.Width + X];
+				R += C.R; G += C.G; B += C.B; ++OutCount;
+			}
+		}
+		if (OutCount == 0)
+		{
+			return false;
+		}
+		OutMean = FColor(static_cast<uint8>(R / OutCount), static_cast<uint8>(G / OutCount), static_cast<uint8>(B / OutCount));
+		return true;
+	}
+
+	/** Mean colour of the brightest pixels of the text box: the glyphs' cores, the engineer's bar left out (Brief 21); false when the box is empty. */
 	static bool MeasureBox(FColor& OutMean, int32& OutCount)
 	{
 		const FUIShot& Shot = GUIShot;
@@ -680,7 +723,10 @@ namespace TextDebug
 		{
 			for (int32 X = X0; X < X1; ++X)
 			{
-				MaxLum = FMath::Max(MaxLum, Lum(Shot.Pixels[Y * Shot.Width + X]));
+				if (!InBar(X, Y))
+				{
+					MaxLum = FMath::Max(MaxLum, Lum(Shot.Pixels[Y * Shot.Width + X]));
+				}
 			}
 		}
 		int64 R = 0, G = 0, B = 0;
@@ -689,7 +735,7 @@ namespace TextDebug
 			for (int32 X = X0; X < X1; ++X)
 			{
 				const FColor& C = Shot.Pixels[Y * Shot.Width + X];
-				if (MaxLum > 0 && Lum(C) * 100 >= MaxLum * 92)
+				if (MaxLum > 0 && !InBar(X, Y) && Lum(C) * 100 >= MaxLum * 92)
 				{
 					R += C.R;
 					G += C.G;
@@ -730,10 +776,17 @@ namespace TextDebug
 			FColor Mean;
 			int32 Count = 0;
 			const bool bMeasured = MeasureBox(Mean, Count);
-			Check(bMeasured && Count >= 10 && Near(Mean, Expected, 14) && !Near(Mean, Other, 14),
-				FString::Printf(TEXT("%s: the brightest %d pixels of the box are (%d, %d, %d) on the shot: the %s colour of TextColors (%s, on screen (%d, %d, %d)), not the %s one ((%d, %d, %d)); box %s"),
+			// Brief 21: the glyphs' cores are measured without the engineer's bar; the bar, measured on its own, is in the
+			// engineer's colour too (and there is no bar on a home AI row).
+			FColor BarMean(0, 0, 0);
+			int32 BarCount = 0;
+			const bool bBar = MeasureBar(BarMean, BarCount);
+			const bool bBarOk = bEngineer ? (bBar && BarCount >= 10 && Near(BarMean, Expected, 14)) : !bBar;
+			Check(bMeasured && Count >= 10 && Near(Mean, Expected, 14) && !Near(Mean, Other, 14) && bBarOk,
+				FString::Printf(TEXT("%s: the brightest %d pixels of the glyphs (the bar left out) are (%d, %d, %d) on the shot: the %s colour of TextColors (%s, on screen (%d, %d, %d)), not the %s one ((%d, %d, %d)); bar %s; box %s"),
 					*Label, Count, Mean.R, Mean.G, Mean.B, bEngineer ? TEXT("Engineer") : TEXT("HomeAI"), *Want.ToString(), Expected.R, Expected.G, Expected.B,
-					bEngineer ? TEXT("HomeAI") : TEXT("Engineer"), Other.R, Other.G, Other.B, *GUIShot.Rect.ToString()));
+					bEngineer ? TEXT("HomeAI") : TEXT("Engineer"), Other.R, Other.G, Other.B,
+					bBar ? *FString::Printf(TEXT("(%d, %d, %d) over %d pixels"), BarMean.R, BarMean.G, BarMean.B, BarCount) : TEXT("not shown"), *GUIShot.Rect.ToString()));
 			return 0.f;
 		}));
 	}

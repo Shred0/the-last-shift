@@ -27,11 +27,6 @@ APrologueEntryDoor::APrologueEntryDoor()
 	Doorway->SetBoxExtent(FVector(80.f, 100.f, 150.f));
 	PoweredSeconds = 0.f;
 	bResetOnJump = false;
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Greybox(TEXT("/Game/TheLastShift/Art/M_Greybox.M_Greybox"));
-	if (Greybox.Succeeded())
-	{
-		Panel->SetMaterial(0, Greybox.Object);
-	}
 }
 
 void APrologueEntryDoor::OnConstruction(const FTransform& Transform)
