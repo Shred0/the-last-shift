@@ -31,6 +31,95 @@ namespace LidarScanLinks
 		return FMath::Clamp(FMath::CeilToInt32(Base * NearThinningDistance / FMath::Max(SampleDepth, 1.f)), Base, MaxNeighbours);
 	}
 
+	/** Counts a link found between A < B and keeps it unless the cap is reached (then it is dropped and counted). */
+	static void AddLink(const TArray<FSample>& Samples, int32 A, int32 B, int32 Cap, FLidarLinkSearchOutput& Out)
+	{
+		++Out.Found;
+		if (Out.Starts.Num() >= Cap)
+		{
+			if (Out.Dropped++ == 0)
+			{
+				Out.FirstDroppedTexel = A;
+			}
+			return;
+		}
+		const FSample& SA = Samples[A];
+		const FSample& SB = Samples[B];
+		Out.Starts.Add(SA.Surface);
+		Out.Ends.Add(SB.Surface);
+		Out.StartNormals.Add(FLinearColor(SA.Normal.X, SA.Normal.Y, SA.Normal.Z, SA.Channel));
+		Out.EndNormals.Add(FLinearColor(SB.Normal.X, SB.Normal.Y, SB.Normal.Z, SB.Channel));
+		Out.StartTexels.Add(A);
+		Out.EndTexels.Add(B);
+		Out.Longest = FMath::Max(Out.Longest, static_cast<float>(FVector::Dist(SA.Surface, SB.Surface)));
+		Out.MaxDegree = FMath::Max(Out.MaxDegree, static_cast<int32>(++Out.Degrees[A]));
+		Out.MaxDegree = FMath::Max(Out.MaxDegree, static_cast<int32>(++Out.Degrees[B]));
+	}
+
+	/**
+	 * The search on the capture's grid: each live sample to the next live sample to its right in its row and to the next
+	 * one below it in its column, within GridReach texels; the link is kept if that sample is of the same channel, within
+	 * MaxDistance and within the normal limit (a nearer sample of another channel, or one too far, ends the look: the
+	 * link never skips a live sample). In texel order, the right link before the one below; the cap cuts the rest.
+	 */
+	static void FindOnGrid(const FLidarLinkSearchInput& In, const TArray<FSample>& Samples, FLidarLinkSearchOutput& Out)
+	{
+		const int32 W = In.Width;
+		const int32 H = In.Height;
+		const int32 Cap = FMath::Max(In.MaxLinks, 0);
+		const double MaxDistSq = FMath::Square(static_cast<double>(In.MaxDistance));
+		auto Accepts = [&In, &Samples, MaxDistSq](int32 A, int32 B)
+		{
+			const FSample& SA = Samples[A];
+			const FSample& SB = Samples[B];
+			return SB.Channel == SA.Channel && FVector::DistSquared(SA.Surface, SB.Surface) <= MaxDistSq
+				&& FVector::DotProduct(SA.Normal, SB.Normal) >= In.MinNormalDot;
+		};
+		for (int32 A = 0; A < W * H; ++A)
+		{
+			if (!Samples[A].bAlive)
+			{
+				continue;
+			}
+			const int32 X = A % W;
+			const int32 Y = A / W;
+			const int32 Reach = LidarScanLinks::GridReach(Samples[A].Depth, In.NearThinningDistance);
+			for (int32 Step = 1; Step <= Reach && X + Step < W; ++Step)
+			{
+				const int32 B = A + Step;
+				if (Samples[B].bAlive)
+				{
+					if (Accepts(A, B))
+					{
+						AddLink(Samples, A, B, Cap, Out);
+					}
+					break;
+				}
+			}
+			for (int32 Step = 1; Step <= Reach && Y + Step < H; ++Step)
+			{
+				const int32 B = A + Step * W;
+				if (Samples[B].bAlive)
+				{
+					if (Accepts(A, B))
+					{
+						AddLink(Samples, A, B, Cap, Out);
+					}
+					break;
+				}
+			}
+		}
+	}
+}
+
+int32 LidarScanLinks::GridReach(float SampleDepth, float NearThinningDistance)
+{
+	if (NearThinningDistance <= 0.f || SampleDepth >= NearThinningDistance)
+	{
+		return 1;
+	}
+	const double Thin = NearThinningDistance / FMath::Max(SampleDepth, 1.f);
+	return FMath::Clamp(1 + FMath::CeilToInt32(3.0 * (Thin * Thin - 1.0)), 1, MaxGridReach);
 }
 
 void LidarScanLinks::Find(const FLidarLinkSearchInput& In, FLidarLinkSearchOutput& Out)
@@ -67,6 +156,24 @@ void LidarScanLinks::Find(const FLidarLinkSearchInput& In, FLidarLinkSearchOutpu
 		S.Normal = FVector(In.Normals[Index]);
 		S.Channel = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt32(Sample.W), 0, 255));
 		S.Depth = static_cast<float>(FVector::DotProduct(S.Surface - In.Origin, In.Forward));
+	}
+
+	Out.PointDepths.Init(-1.f, Count);
+	Out.Degrees.Init(0, Count);
+	for (int32 A = 0; A < Count; ++A)
+	{
+		if (Samples[A].bAlive)
+		{
+			++Out.Points;
+			Out.PointDepths[A] = Samples[A].Depth;
+		}
+	}
+
+	if (In.bGrid)
+	{
+		FindOnGrid(In, Samples, Out);
+		Out.Milliseconds = (FPlatformTime::Seconds() - Start) * 1000.0;
+		return;
 	}
 
 	// The K nearest samples of each sample (same channel, within MaxDistance and the normal limit), nearest first.
@@ -128,17 +235,6 @@ void LidarScanLinks::Find(const FLidarLinkSearchInput& In, FLidarLinkSearchOutpu
 		}
 	});
 
-	Out.PointDepths.Init(-1.f, Count);
-	Out.Degrees.Init(0, Count);
-	for (int32 A = 0; A < Count; ++A)
-	{
-		if (Samples[A].bAlive)
-		{
-			++Out.Points;
-			Out.PointDepths[A] = Samples[A].Depth;
-		}
-	}
-
 	// Mutual nearest neighbours, each link once (from its lower texel), in texel order; the cap cuts the rest.
 	const int32 Cap = FMath::Max(In.MaxLinks, 0);
 	for (int32 A = 0; A < Count; ++A)
@@ -163,23 +259,7 @@ void LidarScanLinks::Find(const FLidarLinkSearchInput& In, FLidarLinkSearchOutpu
 			{
 				continue;
 			}
-			++Out.Found;
-			if (Out.Starts.Num() >= Cap)
-			{
-				++Out.Dropped;
-				continue;
-			}
-			const FSample& SA = Samples[A];
-			const FSample& SB = Samples[B];
-			Out.Starts.Add(SA.Surface);
-			Out.Ends.Add(SB.Surface);
-			Out.StartNormals.Add(FLinearColor(SA.Normal.X, SA.Normal.Y, SA.Normal.Z, SA.Channel));
-			Out.EndNormals.Add(FLinearColor(SB.Normal.X, SB.Normal.Y, SB.Normal.Z, SB.Channel));
-			Out.StartTexels.Add(A);
-			Out.EndTexels.Add(B);
-			Out.Longest = FMath::Max(Out.Longest, static_cast<float>(FVector::Dist(SA.Surface, SB.Surface)));
-			Out.MaxDegree = FMath::Max(Out.MaxDegree, static_cast<int32>(++Out.Degrees[A]));
-			Out.MaxDegree = FMath::Max(Out.MaxDegree, static_cast<int32>(++Out.Degrees[B]));
+			AddLink(Samples, A, B, Cap, Out);
 		}
 	}
 	Out.Milliseconds = (FPlatformTime::Seconds() - Start) * 1000.0;

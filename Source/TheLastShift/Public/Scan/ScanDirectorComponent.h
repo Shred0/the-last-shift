@@ -160,8 +160,8 @@ public:
 	void ApplyScanOcclusion();
 
 	/**
-	 * Pushes ScanLinks of the project settings (its one owner) to the lidar: neighbours, distance and angle from the next
-	 * scan, width and intensity at once. Also done at BeginPlay and before every scan.
+	 * Pushes ScanLinks of the project settings (its one owner) to the lidar: mode, neighbours, the longest link of that mode
+	 * and angle from the next scan, width and intensity at once. Also done at BeginPlay and before every scan.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Scan")
 	void ApplyScanLinks();

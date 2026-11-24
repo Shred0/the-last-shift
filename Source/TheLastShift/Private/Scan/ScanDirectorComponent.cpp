@@ -439,7 +439,9 @@ void UScanDirectorComponent::ApplyScanLinks()
 	{
 		const FScanLinks& Links = UTheLastShiftSettings::GetScanLinks();
 		Lidar->MaxLinksPerScan = FMath::Clamp(Links.MaxLinksPerScan, 0, 262144);
-		Lidar->SetLinks(Links.Neighbours, Links.MaxDistanceCm, Links.PixelWidth, Links.Intensity, Links.MaxNormalAngle);
+		// The mode and the longest link of that mode (each mode owns its own maximum distance).
+		Lidar->SetLinkMode(Links.Mode);
+		Lidar->SetLinks(Links.Neighbours, Links.ActiveMaxDistanceCm(), Links.PixelWidth, Links.Intensity, Links.MaxNormalAngle);
 		Lidar->SetLineLift(Links.LiftTexels, Links.LiftMaxCm);
 	}
 }

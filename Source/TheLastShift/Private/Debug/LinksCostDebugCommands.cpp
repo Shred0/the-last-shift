@@ -151,9 +151,11 @@ namespace LinksCostDebug
 	static FString LinkSummary(const ULidarScanComponent* L)
 	{
 #if !TLS_COST_BASELINE
-		TArray<double> Links, Points, Search;
+		TArray<double> Links, Points, Search, DroppedRows;
 		int64 Dropped = 0;
 		int32 MaxDegree = 0;
+		int32 Grid = 0;
+		const int32 Width = L ? FMath::Max(L->CaptureResolution, 1) : 1;
 		for (const FLidarLinkStats& S : G.ScanStats)
 		{
 			Links.Add(S.Links);
@@ -161,6 +163,12 @@ namespace LinksCostDebug
 			Search.Add(S.SearchMilliseconds);
 			Dropped += S.Dropped;
 			MaxDegree = FMath::Max(MaxDegree, S.MaxDegree);
+			Grid += S.Mode == ELidarLinkMode::Grid ? 1 : 0;
+			if (S.FirstDroppedTexel >= 0)
+			{
+				// Brief 23: the cap drops the links of the capture's rows from this one down (the bottom of the view).
+				DroppedRows.Add(S.FirstDroppedTexel / Width);
+			}
 		}
 		int64 LineParticles = 0;
 		int32 Slots = 0;
@@ -176,9 +184,11 @@ namespace LinksCostDebug
 			}
 		}
 		Links.Sort();
-		return FString::Printf(TEXT("%d neighbours, cap %d: %d searches; links per scan median %.0f (min %.0f, max %.0f) for median %.0f points; %lld links dropped by the cap in all; max degree %d; search %.1f ms median; line particles of the %d alive scans %lld"),
-			G.Neighbours, L ? L->MaxLinksPerScan : -1, G.ScanStats.Num(), Median(Links), Links.IsEmpty() ? 0.0 : Links[0], Links.IsEmpty() ? 0.0 : Links.Last(),
-			Median(Points), Dropped, MaxDegree, Median(Search), Slots, LineParticles);
+		return FString::Printf(TEXT("%s mode (%d of %d searches on the grid), %d neighbours, %.1f cm, cap %d: %d searches; links per scan median %.0f (min %.0f, max %.0f) for median %.0f points; %lld links dropped by the cap in all, in %d scans, from row %.0f of %d down (median; the bottom %.0f%% of the view); max degree %d; search %.1f ms median; line particles of the %d alive scans %lld"),
+			L && L->LinkMode == ELidarLinkMode::Grid ? TEXT("grid") : TEXT("nearest"), Grid, G.ScanStats.Num(), G.Neighbours, L ? L->LinkMaxDistance : -1.f, L ? L->MaxLinksPerScan : -1, G.ScanStats.Num(),
+			Median(Links), Links.IsEmpty() ? 0.0 : Links[0], Links.IsEmpty() ? 0.0 : Links.Last(),
+			Median(Points), Dropped, DroppedRows.Num(), DroppedRows.IsEmpty() ? -1.0 : Median(DroppedRows), Width,
+			DroppedRows.IsEmpty() ? 0.0 : 100.0 * (Width - Median(DroppedRows)) / Width, MaxDegree, Median(Search), Slots, LineParticles);
 #else
 		return FString();
 #endif

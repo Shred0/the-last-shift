@@ -9,6 +9,8 @@
 // Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Area/AreaGenerator.h"
+#include "Area/AreaInfo.h"
 #include "Camera/CameraComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Containers/Ticker.h"
@@ -632,7 +634,7 @@ namespace LinksDebug
 		{
 			return;
 		}
-		struct FBand { const TCHAR* Name; float Min; float Max; int32 Count[4] = { 0, 0, 0, 0 }; };
+		struct FBand { const TCHAR* Name; float Min; float Max; int32 Count[6] = { 0, 0, 0, 0, 0, 0 }; };
 		FBand Bands[] = { { TEXT("2.5-3.5 m"), 250.f, 350.f }, { TEXT("9-11 m"), 900.f, 1100.f }, { TEXT("45-55 m"), 4500.f, 5500.f }, { TEXT("beyond 200 m"), 20000.f, 1.e9f } };
 		for (int32 Texel = 0; Texel < Depths.Num(); ++Texel)
 		{
@@ -644,17 +646,57 @@ namespace LinksDebug
 			{
 				if (Depths[Texel] >= Band.Min && Depths[Texel] < Band.Max)
 				{
-					++Band.Count[FMath::Min(Degrees[Texel], 3)];
+					++Band.Count[FMath::Min(Degrees[Texel], 5)];
 				}
 			}
 		}
 		for (const FBand& Band : Bands)
 		{
-			const int32 Total = Band.Count[0] + Band.Count[1] + Band.Count[2] + Band.Count[3];
+			const int32 Total = Band.Count[0] + Band.Count[1] + Band.Count[2] + Band.Count[3] + Band.Count[4] + Band.Count[5];
 			auto Share = [Total](int32 N) { return Total > 0 ? 100.0 * N / Total : 0.0; };
-			UE_LOG(LogTheLastShift, Log, TEXT("%s %s: %d points, %.1f%% with 0 links, %.1f%% with 1, %.1f%% with 2, %.1f%% with more"),
-				Prefix, Band.Name, Total, Share(Band.Count[0]), Share(Band.Count[1]), Share(Band.Count[2]), Share(Band.Count[3]));
+			UE_LOG(LogTheLastShift, Log, TEXT("%s %s: %d points, %.1f%% with 0 links, %.1f%% with 1, %.1f%% with 2, %.1f%% with 3, %.1f%% with 4, %.1f%% with more"),
+				Prefix, Band.Name, Total, Share(Band.Count[0]), Share(Band.Count[1]), Share(Band.Count[2]), Share(Band.Count[3]), Share(Band.Count[4]), Share(Band.Count[5]));
 		}
+	}
+
+	/**
+	 * Brief 23: where the cap's dropped links are. Links are kept in texel order, so the cap drops those from the first
+	 * dropped texel's row to the bottom of the capture: logs that row, the points from it down, how many lie on the floor
+	 * (within 10 cm of the pawn's floor) and their depths along the capture axis.
+	 */
+	static void LogDroppedRows(const TCHAR* Prefix)
+	{
+		const ULidarScanComponent* L = Lidar();
+		const FLidarLinkStats Stats = L ? L->GetLastLinkStats() : FLidarLinkStats();
+		TArray<FVector> Positions;
+		TArray<int32> Channels;
+		int32 Width = 0;
+		FLidarScanContext Context;
+		if (!L || Stats.FirstDroppedTexel < 0 || !L->GetLastScanSamples(Positions, Channels, Width, Context) || Width <= 0)
+		{
+			UE_LOG(LogTheLastShift, Log, TEXT("%s scan %d: the cap dropped no link."), Prefix, Stats.ScanIndex);
+			return;
+		}
+		const int32 Height = Positions.Num() / Width;
+		const int32 Row = Stats.FirstDroppedTexel / Width;
+		const ACharacter* Character = Cast<ACharacter>(Pawn());
+		const double FloorZ = Character && Character->GetCapsuleComponent()
+			? Character->GetActorLocation().Z - Character->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : -1.e30;
+		int32 Points = 0, OnFloor = 0;
+		TArray<double> Depth;
+		for (int32 Texel = Stats.FirstDroppedTexel; Texel < Positions.Num(); ++Texel)
+		{
+			if (Channels[Texel] < 0)
+			{
+				continue;
+			}
+			++Points;
+			OnFloor += FMath::Abs(Positions[Texel].Z - FloorZ) < 10.0 ? 1 : 0;
+			Depth.Add(FVector::DotProduct(Positions[Texel] - Context.CaptureOrigin, Context.CaptureForward) / 100.0);
+		}
+		UE_LOG(LogTheLastShift, Log, TEXT("%s scan %d (%s): the cap dropped %d links, those of the points from row %d of the capture's %d down (the bottom %.0f%% of the view): %d points there, %.0f%% on the floor, depth %.1f to %.1f m, median %.1f m."),
+			Prefix, Stats.ScanIndex, Stats.Mode == ELidarLinkMode::Grid ? TEXT("grid") : TEXT("nearest"), Stats.Dropped, Row, Height, Height > 0 ? 100.0 * (Height - Row) / Height : 0.0,
+			Points, Points > 0 ? 100.0 * OnFloor / Points : 0.0, Percentile(Depth, 0.0), Percentile(Depth, 1.0), Percentile(Depth, 0.5));
 	}
 
 	// =====================================================================================================
@@ -823,6 +865,70 @@ namespace LinksDebug
 
 	static float WaitGrowthDone() { const ULidarScanComponent* L = Lidar(); return (L ? FMath::Clamp(L->LinkSeconds, 0.f, 10.f) : 1.5f) + 0.2f; }
 
+	static const TCHAR* ModeName(ELidarLinkMode Mode) { return Mode == ELidarLinkMode::Grid ? TEXT("grid") : TEXT("nearest"); }
+
+	/** Most texels the plugin's grid search looks along a row or a column (LidarScanLinks::MaxGridReach). */
+	static constexpr int32 GridReachLimit = 64;
+
+	/**
+	 * Brief 23: the grid mesh of the last searched scan. Every link joins a point to a point after it in its row or in its
+	 * column, at most GridReachLimit texels away, with no live sample between them (the read-back samples, channel -1 where
+	 * a texel has no live point); none passes the angle between normals. Returns the checks' failures.
+	 */
+	static void CheckGridMesh(const FString& Prefix)
+	{
+		const ULidarScanComponent* L = Lidar();
+		TArray<FLidarLink> Links;
+		TArray<float> Depths;
+		TArray<int32> Degrees;
+		TArray<FVector> Positions;
+		TArray<int32> Channels;
+		int32 Width = 0;
+		FLidarScanContext Context;
+		if (!L || !L->GetLastScanLinks(Links, Depths, Degrees, Width) || !L->GetLastScanSamples(Positions, Channels, Width, Context) || Width <= 0)
+		{
+			Check(false, Prefix + TEXT(": the grid scan's links and samples are readable"));
+			return;
+		}
+		const FLidarLinkStats Stats = L->GetLastLinkStats();
+		Check(Stats.Mode == ELidarLinkMode::Grid, FString::Printf(TEXT("%s: the scan's links were found on the grid (mode %s)"), *Prefix, ModeName(Stats.Mode)));
+		const float MaxAngle = GSavedLinks.MaxNormalAngle;
+		const double MinDot = MaxAngle >= 180.f ? -2.0 : FMath::Cos(FMath::DegreesToRadians(MaxAngle));
+		int32 OverAngle = 0, NotNext = 0, Right = 0, Down = 0, Sampled = 0;
+		double WorstAngle = 0.0;
+		for (const FLidarLink& Link : Links)
+		{
+			const double Dot = FVector::DotProduct(Link.StartNormal, Link.EndNormal);
+			if (Dot < MinDot - 1.e-4)
+			{
+				++OverAngle;
+			}
+			WorstAngle = FMath::Max(WorstAngle, FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Dot, -1.0, 1.0))));
+			const int32 A = Link.StartTexel;
+			const int32 B = Link.EndTexel;
+			const int32 AX = A % Width, AY = A / Width, BX = B % Width, BY = B / Width;
+			const bool bRow = AY == BY && BX > AX && BX - AX <= GridReachLimit;
+			const bool bColumn = AX == BX && BY > AY && BY - AY <= GridReachLimit;
+			bool bNext = (bRow || bColumn) && Channels.IsValidIndex(A) && Channels.IsValidIndex(B) && Channels[A] >= 0 && Channels[B] >= 0;
+			Right += bRow ? 1 : 0;
+			Down += bColumn ? 1 : 0;
+			// Every link is checked (the sample of the brief is all of them): no live sample between the two ends.
+			const int32 Step = bRow ? 1 : Width;
+			for (int32 T = A + Step; bNext && T < B; T += Step)
+			{
+				bNext = Channels[T] < 0;
+			}
+			NotNext += bNext ? 0 : 1;
+			++Sampled;
+		}
+		Note(FString::Printf(TEXT("%s: grid mesh: %d links (%d along a row, %d along a column), widest angle between normals %.1f deg (limit %.1f)"),
+			*Prefix, Links.Num(), Right, Down, WorstAngle, MaxAngle));
+		Check(Stats.MaxDegree <= 4, FString::Printf(TEXT("%s: at most 4 links on one point on the grid (%d)"), *Prefix, Stats.MaxDegree));
+		Check(OverAngle == 0, FString::Printf(TEXT("%s: no link passes the angle between normals (%d of %d)"), *Prefix, OverAngle, Links.Num()));
+		Check(Sampled > 1000 && NotNext == 0,
+			FString::Printf(TEXT("%s: the two ends of every link are neighbours on the capture's grid, in a row or a column, with no live sample between them (%d of %d are not)"), *Prefix, NotNext, Sampled));
+	}
+
 	// =====================================================================================================
 	// tls.LinksTest (TestLidar)
 	// =====================================================================================================
@@ -964,9 +1070,9 @@ namespace LinksDebug
 		{
 			const ULidarScanComponent* L = Lidar();
 			const FScanLinks& V = GSavedLinks;
-			Note(FString::Printf(TEXT("A: settings: %d neighbours, %.1f cm, %.2f px, intensity %.2f, angle %.1f deg, cap %d"),
-				V.Neighbours, V.MaxDistanceCm, V.PixelWidth, V.Intensity, V.MaxNormalAngle, V.MaxLinksPerScan));
-			Check(L && L->LinkNeighbours == V.Neighbours && FMath::IsNearlyEqual(L->LinkMaxDistance, V.MaxDistanceCm)
+			Note(FString::Printf(TEXT("A: settings: %d neighbours, %.1f cm, %.2f px, intensity %.2f, angle %.1f deg, cap %d, mode %s (grid's distance %.1f cm)"),
+				V.Neighbours, V.MaxDistanceCm, V.PixelWidth, V.Intensity, V.MaxNormalAngle, V.MaxLinksPerScan, ModeName(V.Mode), V.GridMaxDistanceCm));
+			Check(L && L->LinkNeighbours == V.Neighbours && FMath::IsNearlyEqual(L->LinkMaxDistance, V.ActiveMaxDistanceCm()) && L->LinkMode == V.Mode
 				&& FMath::IsNearlyEqual(L->LinePixelWidth, V.PixelWidth) && FMath::IsNearlyEqual(L->LineIntensity, V.Intensity)
 				&& FMath::IsNearlyEqual(L->LinkMaxNormalAngle, V.MaxNormalAngle) && L->MaxLinksPerScan == V.MaxLinksPerScan,
 				TEXT("A: the lidar holds the settings' line values (pushed by the director)"));
@@ -1017,12 +1123,17 @@ namespace LinksDebug
 			LogDegreeBands(*FString::Printf(TEXT("%s   ..  B: links per point"), *GRun.Name));
 			Check(Stats.Links > 1000, FString::Printf(TEXT("B: the scan has links (%d)"), Stats.Links));
 			Check(Stats.Points == Slot.CapturedParticles, FString::Printf(TEXT("B: the search rebuilt exactly the scan's points (%d found, %d particles)"), Stats.Points, Slot.CapturedParticles));
-			Check(MaxDegree <= GSavedLinks.Neighbours && Stats.MaxDegree == MaxDegree, FString::Printf(TEXT("B: at most %d links on one point (%d)"), GSavedLinks.Neighbours, MaxDegree));
-			Check(Longest <= GSavedLinks.MaxDistanceCm + 0.01f, FString::Printf(TEXT("B: the longest link is within %.1f cm (%.2f cm)"), GSavedLinks.MaxDistanceCm, Longest));
+			const int32 MostLinks = GSavedLinks.Mode == ELidarLinkMode::Grid ? 4 : GSavedLinks.Neighbours;
+			Check(MaxDegree <= MostLinks && Stats.MaxDegree == MaxDegree, FString::Printf(TEXT("B: at most %d links on one point (%d)"), MostLinks, MaxDegree));
+			Check(Longest <= GSavedLinks.ActiveMaxDistanceCm() + 0.01f, FString::Printf(TEXT("B: the longest link is within %.1f cm (%.2f cm)"), GSavedLinks.ActiveMaxDistanceCm(), Longest));
 			Check(CrossChannel == 0, FString::Printf(TEXT("B: no link joins two channels (%d)"), CrossChannel));
 			Check(NotThisScan == 0, FString::Printf(TEXT("B: every link joins two captured points of its own scan: none joins two scans or an injected point (%d ends elsewhere)"), NotThisScan));
 
 			G.UncappedLinks = Stats.Links + Stats.Dropped;
+			if (GSavedLinks.Mode == ELidarLinkMode::Grid)
+			{
+				CheckGridMesh(TEXT("B (grid)"));
+			}
 			return 0.f;
 		}));
 		S.Add(Do(TEXT("B: the samples read back lie on their texels' rays"), []() { CheckSamplesOfLastScan(TEXT("B")); return 0.3f; }));
@@ -1469,8 +1580,11 @@ namespace LinksDebug
 		{
 			FScanLinks Values = GSavedLinks;
 			Values.Neighbours = FMath::Min(GSavedLinks.Neighbours, 2);
+			// Brief 23: on the grid every point has lines in two directions, so a cross-section runs into the line across it;
+			// the lines are the same in both modes (only the search differs), so the width scan is taken in the nearest mode.
+			Values.Mode = ELidarLinkMode::Nearest;
 			PushLinks(Values);
-			Note(FString::Printf(TEXT("H: width scan with %d neighbours (settings %d)"), Values.Neighbours, GSavedLinks.Neighbours));
+			Note(FString::Printf(TEXT("H: width scan with %d neighbours (settings %d), nearest mode (settings %s)"), Values.Neighbours, GSavedLinks.Neighbours, ModeName(GSavedLinks.Mode)));
 			return 0.f;
 		}));
 		AddStopAndScanAt(S, TEXT("H_3m"), Poses::CorridorFacing, Poses::CorridorWallFace);
@@ -1897,9 +2011,10 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLinksSetCommand(
 			D->ApplyScanLinks();
 		}
 		const ULidarScanComponent* L = LinksDebug::Lidar();
-		UE_LOG(LogTheLastShift, Display, TEXT("tls.Links.Set: %d neighbours, %.1f cm, %.2f px, intensity %.2f, angle %.1f deg, cap %d; lidar %d / %.1f / %.2f / %.2f / %.1f / %d."),
-			V.Neighbours, V.MaxDistanceCm, V.PixelWidth, V.Intensity, V.MaxNormalAngle, V.MaxLinksPerScan,
-			L ? L->LinkNeighbours : -1, L ? L->LinkMaxDistance : -1.f, L ? L->LinePixelWidth : -1.f, L ? L->LineIntensity : -1.f, L ? L->LinkMaxNormalAngle : -1.f, L ? L->MaxLinksPerScan : -1);
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.Links.Set: %d neighbours, %.1f cm, %.2f px, intensity %.2f, angle %.1f deg, cap %d, mode %s (grid's distance %.1f cm); lidar %d / %.1f / %.2f / %.2f / %.1f / %d / %s."),
+			V.Neighbours, V.MaxDistanceCm, V.PixelWidth, V.Intensity, V.MaxNormalAngle, V.MaxLinksPerScan, LinksDebug::ModeName(V.Mode), V.GridMaxDistanceCm,
+			L ? L->LinkNeighbours : -1, L ? L->LinkMaxDistance : -1.f, L ? L->LinePixelWidth : -1.f, L ? L->LineIntensity : -1.f, L ? L->LinkMaxNormalAngle : -1.f, L ? L->MaxLinksPerScan : -1,
+			L ? LinksDebug::ModeName(L->LinkMode) : TEXT("-"));
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLinksReportCommand(
@@ -1914,9 +2029,10 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLinksReportCommand(
 			return;
 		}
 		const FLidarLinkStats S = L->GetLastLinkStats();
-		UE_LOG(LogTheLastShift, Display, TEXT("tls.Links.Report: scan %d: %d points, %d links, %d dropped, at most %d per point, longest %.1f cm, search %.2f ms, ready %.3f s after the scan; %d searches pending."),
-			S.ScanIndex, S.Points, S.Links, S.Dropped, S.MaxDegree, S.LongestLink, S.SearchMilliseconds, S.ReadySeconds, L->GetPendingLinkSearches());
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.Links.Report: scan %d (%s): %d points, %d links, %d dropped, at most %d per point, longest %.1f cm, search %.2f ms, ready %.3f s after the scan; %d searches pending."),
+			S.ScanIndex, LinksDebug::ModeName(S.Mode), S.Points, S.Links, S.Dropped, S.MaxDegree, S.LongestLink, S.SearchMilliseconds, S.ReadySeconds, L->GetPendingLinkSearches());
 		LinksDebug::LogDegreeBands(TEXT("tls.Links.Report:"));
+		LinksDebug::LogDroppedRows(TEXT("tls.Links.Report:"));
 		FString Slots;
 		for (const FLidarScanSlotStats& Slot : L->GetScanSlotStats())
 		{
@@ -2779,6 +2895,456 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLinksLiftCommand(
 		}
 		const ULidarScanComponent* L = LinksDebug::Lidar();
 		UE_LOG(LogTheLastShift, Display, TEXT("tls.Links.Lift: %.2f texel, at most %.1f cm; lidar %.2f / %.1f."), V.LiftTexels, V.LiftMaxCm, L ? L->LineLiftTexels : -1.f, L ? L->LineLiftMaxCm : -1.f);
+	}));
+
+// =====================================================================================================
+// Brief 23: the two modes of the links. tls.Links.Mode (the session's mode and the grid's distance), tls.Links.ModeCheck
+// (TestLidar: the switch, alive scans keep their lines, lines off in both modes), tls.Links.GridSpan (the length of the
+// grid's steps on the floor by distance) and tls.Links.ModeShots (the same pose in both modes, shots to
+// Saved/Screenshots/Brief23).
+// =====================================================================================================
+
+namespace LinksDebug
+{
+	static bool ParseMode(const FString& Text, ELidarLinkMode& Out)
+	{
+		if (Text.Equals(TEXT("grid"), ESearchCase::IgnoreCase))
+		{
+			Out = ELidarLinkMode::Grid;
+			return true;
+		}
+		if (Text.Equals(TEXT("nearest"), ESearchCase::IgnoreCase))
+		{
+			Out = ELidarLinkMode::Nearest;
+			return true;
+		}
+		return false;
+	}
+
+	/** The saved line values with another mode and number of neighbours (0 = lines off), pushed through the director. */
+	static void PushMode(ELidarLinkMode Mode, int32 Neighbours, float GridCm = -1.f)
+	{
+		FScanLinks Values = GSavedLinks;
+		Values.Mode = Mode;
+		Values.Neighbours = Neighbours;
+		if (GridCm > 0.f)
+		{
+			Values.GridMaxDistanceCm = GridCm;
+		}
+		PushLinks(Values);
+	}
+
+	static void ExecConsole(const TCHAR* Command)
+	{
+		if (GEngine)
+		{
+			GEngine->Exec(W(), Command);
+		}
+	}
+
+	// --- tls.Links.ModeCheck ---
+
+	struct FModeState
+	{
+		int32 First = INDEX_NONE, Second = INDEX_NONE;
+		int32 FirstLinks = 0, SecondLinks = 0;
+		int32 StatsBefore = INDEX_NONE;
+		int32 ScanBefore = INDEX_NONE;
+	};
+	static FModeState GMode;
+
+	static int32 LinesOf(int32 Scan) { return SlotOf(Scan).LineParticles; }
+
+	static void AddOffInMode(TArray<FStep>& S, ELidarLinkMode Mode)
+	{
+		const FString Name = ModeName(Mode);
+		S.Add(Do(FString::Printf(TEXT("off (%s): scan"), *Name), [Mode]()
+		{
+			PushMode(Mode, 0);
+			ULidarScanComponent* L = Lidar();
+			GMode.StatsBefore = L->GetLastLinkStats().ScanIndex;
+			GMode.ScanBefore = NewestScan();
+			KeepEntityDormant();
+			L->Scan();
+			return 1.0f;
+		}));
+		S.Add(Do(FString::Printf(TEXT("off (%s): nothing searched or drawn"), *Name), [Name, Mode]()
+		{
+			const ULidarScanComponent* L = Lidar();
+			const int32 Scan = NewestScan();
+			const FLidarScanSlotStats Slot = SlotOf(Scan);
+			Check(L->LinkNeighbours == 0 && L->LinkMode == Mode && Scan == GMode.ScanBefore + 1 && Slot.CapturedParticles > 1000,
+				FString::Printf(TEXT("off (%s): lines off, the scan is taken (%d points)"), *Name, Slot.CapturedParticles));
+			Check(L->GetLastLinkStats().ScanIndex == GMode.StatsBefore && L->GetPendingLinkSearches() == 0 && Slot.LineParticles == 0,
+				FString::Printf(TEXT("off (%s): no search ran and no line is drawn (last searched scan %d, was %d; %d pending; %d line particles)"),
+					*Name, L->GetLastLinkStats().ScanIndex, GMode.StatsBefore, L->GetPendingLinkSearches(), Slot.LineParticles));
+			return 0.f;
+		}));
+	}
+
+	static void StartModeCheck(bool bQuit)
+	{
+		StartRun(TEXT("LinksModeCheck"), bQuit);
+		GMode = FModeState();
+		GRun.Cleanup = []()
+		{
+			CommonCleanup();
+			ResumeTime();
+		};
+		TArray<FStep>& S = GRun.Steps;
+		S.Add(WaitFor(TEXT("a game world with the player's lidar"), []() { return Lidar() && Pawn() && TS(); }, 15.f, []()
+		{
+			Note(FString::Printf(TEXT("settings: %d neighbours, mode %s, %.1f cm nearest, %.1f cm grid"), GSavedLinks.Neighbours, ModeName(GSavedLinks.Mode),
+				GSavedLinks.MaxDistanceCm, GSavedLinks.GridMaxDistanceCm));
+			PushMode(ELidarLinkMode::Nearest, FMath::Max(GSavedLinks.Neighbours, 2));
+			return 0.f;
+		}));
+		AddStopAndScanAt(S, TEXT("1 (nearest)"), Poses::MainRoom, Poses::WestWall);
+		S.Add(Do(TEXT("1: the scan in the nearest mode"), []()
+		{
+			const ULidarScanComponent* L = Lidar();
+			const FLidarLinkStats St = L->GetLastLinkStats();
+			GMode.First = NewestScan();
+			GMode.FirstLinks = St.Links;
+			Check(St.ScanIndex == GMode.First && St.Mode == ELidarLinkMode::Nearest && St.Links > 1000 && St.MaxDegree <= L->LinkNeighbours,
+				FString::Printf(TEXT("1: scan %d found its links in the nearest mode (%s, %d links, at most %d a point)"), St.ScanIndex, ModeName(St.Mode), St.Links, St.MaxDegree));
+			return 0.3f;
+		}));
+		S.Add(Do(TEXT("the command switches to the grid"), []()
+		{
+			Check(LinesOf(GMode.First) == GMode.FirstLinks, FString::Printf(TEXT("1: one line per link (%d lines, %d links)"), LinesOf(GMode.First), GMode.FirstLinks));
+			ExecConsole(TEXT("tls.Links.Mode grid 150"));
+			const ULidarScanComponent* L = Lidar();
+			const FScanLinks& V = UTheLastShiftSettings::GetScanLinks();
+			Check(V.Mode == ELidarLinkMode::Grid && FMath::IsNearlyEqual(V.GridMaxDistanceCm, 150.f) && FMath::IsNearlyEqual(V.MaxDistanceCm, GSavedLinks.MaxDistanceCm)
+				&& L->LinkMode == ELidarLinkMode::Grid && FMath::IsNearlyEqual(L->LinkMaxDistance, 150.f),
+				FString::Printf(TEXT("tls.Links.Mode grid 150: the settings hold grid and 150 cm (%s, %.1f; nearest's %.1f unchanged), the lidar got them (%s, %.1f cm)"),
+					ModeName(V.Mode), V.GridMaxDistanceCm, V.MaxDistanceCm, ModeName(L->LinkMode), L->LinkMaxDistance));
+			ExecConsole(*FString::Printf(TEXT("tls.Links.Mode grid %.1f"), GSavedLinks.GridMaxDistanceCm));
+			Check(FMath::IsNearlyEqual(L->LinkMaxDistance, GSavedLinks.GridMaxDistanceCm),
+				FString::Printf(TEXT("tls.Links.Mode grid %.1f: the grid's distance back to the settings' (%.1f cm)"), GSavedLinks.GridMaxDistanceCm, L->LinkMaxDistance));
+			return 0.2f;
+		}));
+		S.Add(Do(TEXT("after the switch the alive scan keeps its lines"), []()
+		{
+			Check(LinesOf(GMode.First) == GMode.FirstLinks, FString::Printf(TEXT("switch: scan %d still draws its %d nearest lines (%d)"), GMode.First, GMode.FirstLinks, LinesOf(GMode.First)));
+			return 0.f;
+		}));
+		AddScanHere(S, TEXT("2 (grid)"));
+		S.Add(Do(TEXT("2: the scan in the grid mode"), []()
+		{
+			const FLidarLinkStats St = Lidar()->GetLastLinkStats();
+			GMode.Second = NewestScan();
+			GMode.SecondLinks = St.Links;
+			Check(St.ScanIndex == GMode.Second && St.Mode == ELidarLinkMode::Grid && St.Links > 1000,
+				FString::Printf(TEXT("2: scan %d, taken after the switch, found its links on the grid (%s, %d links)"), St.ScanIndex, ModeName(St.Mode), St.Links));
+			Check(St.LongestLink <= GSavedLinks.GridMaxDistanceCm + 0.01f, FString::Printf(TEXT("2: the longest link is within the grid's %.1f cm (%.2f)"), GSavedLinks.GridMaxDistanceCm, St.LongestLink));
+			CheckGridMesh(TEXT("2"));
+			return 0.3f;
+		}));
+		S.Add(Do(TEXT("2: the lines of both scans"), []()
+		{
+			Check(LinesOf(GMode.Second) == GMode.SecondLinks && LinesOf(GMode.First) == GMode.FirstLinks,
+				FString::Printf(TEXT("2: the grid scan draws its %d lines (%d), the nearest scan keeps its %d (%d)"), GMode.SecondLinks, LinesOf(GMode.Second), GMode.FirstLinks, LinesOf(GMode.First)));
+			ExecConsole(TEXT("tls.Links.Mode nearest"));
+			return 0.f;
+		}));
+		AddScanHere(S, TEXT("3 (nearest again)"));
+		S.Add(Do(TEXT("3: the scan in the nearest mode again"), []()
+		{
+			const ULidarScanComponent* L = Lidar();
+			const FLidarLinkStats St = L->GetLastLinkStats();
+			Check(St.Mode == ELidarLinkMode::Nearest && St.Links > 1000 && St.MaxDegree <= L->LinkNeighbours && FMath::IsNearlyEqual(L->LinkMaxDistance, GSavedLinks.MaxDistanceCm),
+				FString::Printf(TEXT("3: back in the nearest mode (%s, %d links, at most %d a point, %.1f cm)"), ModeName(St.Mode), St.Links, St.MaxDegree, L->LinkMaxDistance));
+			return 0.3f;
+		}));
+		S.Add(Do(TEXT("3: the older scans keep their lines"), []()
+		{
+			Check(LinesOf(GMode.Second) == GMode.SecondLinks && LinesOf(GMode.First) == GMode.FirstLinks,
+				FString::Printf(TEXT("3: the grid scan keeps %d lines (%d), the first nearest scan %d (%d)"), GMode.SecondLinks, LinesOf(GMode.Second), GMode.FirstLinks, LinesOf(GMode.First)));
+			return 0.f;
+		}));
+		AddOffInMode(S, ELidarLinkMode::Nearest);
+		AddOffInMode(S, ELidarLinkMode::Grid);
+		Launch();
+	}
+
+	// --- tls.Links.ModeShots ---
+
+	struct FModeShot
+	{
+		ELidarLinkMode Mode = ELidarLinkMode::Nearest;
+		float GridCm = -1.f;
+		FString Name;
+	};
+
+	static FVector GShotsLocation = FVector::ZeroVector;
+	static FRotator GShotsRotation = FRotator::ZeroRotator;
+
+	/**
+	 * The shots' fixed poses, from the area's plan (the same in every build) or the arrival hangar: corridor, 1.5 m into the
+	 * area's first corridor looking 15 m along it at eye height (its floor at a grazing angle); corridorwall, 6 m into it,
+	 * 45 cm from one of its walls, looking across at the other (about 3 m away); floorhall, 1.5 m into the area's first hall
+	 * with a floor (not a web), looking 15 m along the route; ship (Prologue_Arrival), 4 m from the ship's closed long side,
+	 * square on; shipoblique, the same side from its corner, at a grazing angle, its chamfer above. False when the map has
+	 * none.
+	 */
+	static bool ModeShotPose(const FString& Pose, FVector& Floor, FVector& LookAt)
+	{
+		const APawn* P = Pawn();
+		const double EyeZ = EyeOf(P).Z;
+		if (Pose == TEXT("ship"))
+		{
+			Floor = FVector(200.f, 0.f, 0.f);
+			LookAt = FVector(600.f, 0.f, 250.f);
+			return true;
+		}
+		if (Pose == TEXT("shipoblique"))
+		{
+			Floor = FVector(150.f, -650.f, 0.f);
+			LookAt = FVector(600.f, 150.f, 250.f);
+			return true;
+		}
+		UWorld* World = W();
+		const AAreaInfo* Info = AAreaInfo::Find(World);
+		const AAreaGenerator* Gen = AAreaGenerator::Find(World);
+		const FAreaRecipe* Recipe = Gen ? Gen->GetRecipe() : nullptr;
+		for (int32 I = 0; Info && I < Info->Segments.Num(); ++I)
+		{
+			const FAreaSegmentRecord& Seg = Info->Segments[I];
+			const bool bFloorHall = Seg.Type == EAreaSegmentType::Hall && !(Recipe && Recipe->Segments.IsValidIndex(I) && Recipe->Segments[I].bWeb);
+			const bool bWanted = (Pose == TEXT("floorhall")) ? bFloorHall : Seg.Type == EAreaSegmentType::Corridor;
+			if (!bWanted)
+			{
+				continue;
+			}
+			int32 Unused = 0;
+			const float S0 = Seg.RouteStart;
+			const float S1 = FMath::Max(Seg.RouteEnd, S0 + 1.f);
+			if (Pose == TEXT("corridorwall"))
+			{
+				const FVector In = Info->GetRoutePointAtDistance(S0 + 600.f, Unused);
+				const FVector Ahead = Info->GetRoutePointAtDistance(S0 + 900.f, Unused);
+				const FVector Dir = (Ahead - In).GetSafeNormal2D();
+				const FVector Side(-Dir.Y, Dir.X, 0.f);
+				FCollisionQueryParams Params(TEXT("ModeShotWall"), false, P);
+				FHitResult Left, Right;
+				const FVector From(In.X, In.Y, EyeZ);
+				if (!World->LineTraceSingleByChannel(Left, From, From + Side * 2000.f, ECC_Pawn, Params)
+					|| !World->LineTraceSingleByChannel(Right, From, From - Side * 2000.f, ECC_Pawn, Params))
+				{
+					return false;
+				}
+				Floor = Left.ImpactPoint - Side * 45.f;
+				LookAt = FVector(Right.ImpactPoint.X, Right.ImpactPoint.Y, EyeZ);
+				Note(FString::Printf(TEXT("corridorwall: the corridor is %.0f cm wide there; the far wall %.0f cm from the eye"), Left.Distance + Right.Distance,
+					FVector::Dist2D(Floor, LookAt)));
+				return true;
+			}
+			const FVector In = Info->GetRoutePointAtDistance(S0 + 150.f, Unused);
+			const FVector Ahead = Info->GetRoutePointAtDistance(FMath::Min(S0 + 1500.f, S1), Unused);
+			Floor = In;
+			LookAt = FVector(Ahead.X, Ahead.Y, EyeZ);
+			return true;
+		}
+		return false;
+	}
+
+	static void StartModeShots(const FString& Label, float SecondGridCm, bool bQuit, const FString& Pose)
+	{
+		StartRun(TEXT("LinksModeShots"), bQuit);
+		GShotFolder = TEXT("Brief23");
+		GRun.Cleanup = []()
+		{
+			CommonCleanup();
+			ResumeTime();
+		};
+		const APawn* P = Pawn();
+		const APlayerController* C = PC();
+		if (!P || !C)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Links.ModeShots: no player."));
+			return;
+		}
+		if (!Pose.IsEmpty() && Pose != TEXT("here"))
+		{
+			FVector Floor, LookAt;
+			if (!ModeShotPose(Pose, Floor, LookAt))
+			{
+				UE_LOG(LogTheLastShift, Warning, TEXT("tls.Links.ModeShots: no pose '%s' in this map (here, corridor, corridorwall, floorhall, ship, shipoblique)."), *Pose);
+				return;
+			}
+			ResumeTime();
+			StandAt(Floor, LookAt);
+		}
+		Note(FString::Printf(TEXT("pose %s: at (%.0f, %.0f, %.0f), looking (%.1f, %.1f)"), Pose.IsEmpty() ? TEXT("here") : *Pose, P->GetActorLocation().X, P->GetActorLocation().Y,
+			P->GetActorLocation().Z, C->GetControlRotation().Pitch, C->GetControlRotation().Yaw));
+		GShotsLocation = P->GetActorLocation();
+		GShotsRotation = C->GetControlRotation();
+		TArray<FModeShot> Shots;
+		Shots.Add({ ELidarLinkMode::Nearest, -1.f, TEXT("Nearest") });
+		Shots.Add({ ELidarLinkMode::Grid, -1.f, FString::Printf(TEXT("Grid%.0f"), GSavedLinks.GridMaxDistanceCm) });
+		if (SecondGridCm > 0.f)
+		{
+			Shots.Add({ ELidarLinkMode::Grid, SecondGridCm, FString::Printf(TEXT("Grid%.0f"), SecondGridCm) });
+		}
+		TArray<FStep>& S = GRun.Steps;
+		for (const FModeShot& Shot : Shots)
+		{
+			const FString Name = Label + TEXT("_") + Shot.Name;
+			S.Add(Do(Name + TEXT(": Resume, pose, mode"), [Shot]()
+			{
+				ResumeTime();
+				KeepEntityDormant();
+				PushMode(Shot.Mode, FMath::Max(GSavedLinks.Neighbours, 2), Shot.GridCm);
+				APawn* Pw = Pawn();
+				Pw->SetActorLocation(GShotsLocation, false, nullptr, ETeleportType::TeleportPhysics);
+				if (const ACharacter* Character = Cast<ACharacter>(Pw))
+				{
+					Character->GetCharacterMovement()->StopMovementImmediately();
+				}
+				PC()->SetControlRotation(GShotsRotation);
+				return 0.7f;
+			}));
+			S.Add(Do(Name + TEXT(": Stop"), []() { KeepEntityDormant(); StopTime(); FullResolution(true); return 0.f; }));
+			S.Add(WaitFor(Name + TEXT(": the automatic scan is taken"), []() { return AliveScans() >= 1; }, 4.f));
+			S.Add(WaitFor(Name + TEXT(": its links reach the point system"), []() { return LinksReadyFor(NewestScan()); }, 3.f, []() { return WaitGrowthDone(); }));
+			AddShot(S, Name, [Name](const FShot&)
+			{
+				const FLidarLinkStats St = Lidar()->GetLastLinkStats();
+				Note(FString::Printf(TEXT("%s: scan %d, %s, %.1f cm: %d points, %d links, %d dropped, at most %d a point, longest %.1f cm; shot Saved/Screenshots/Brief23/%s.png"),
+					*Name, St.ScanIndex, ModeName(St.Mode), Lidar()->LinkMaxDistance, St.Points, St.Links, St.Dropped, St.MaxDegree, St.LongestLink, *Name));
+				LogDegreeBands(*FString::Printf(TEXT("%s   ..  %s: links per point"), *GRun.Name, *Name));
+				LogDroppedRows(*FString::Printf(TEXT("%s   ..  %s:"), *GRun.Name, *Name));
+				Check(St.ScanIndex == NewestScan() && St.Links > 0, FString::Printf(TEXT("%s: the shot shows the newest scan's lines"), *Name));
+			});
+		}
+		Launch();
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsLinksModeCommand(
+	TEXT("tls.Links.Mode"),
+	TEXT("tls.Links.Mode [nearest|grid] [GridMaxDistanceCm]: sets ScanLinks.Mode (and the grid mode's longest link) in the settings for this session (not saved to the ini) and has the director push the mode and the longest link of that mode; a scan taken after it uses them, alive scans keep their lines. No argument: logs them."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		FScanLinks& V = GetMutableDefault<UTheLastShiftSettings>()->ScanLinks;
+		if (Args.Num() > 0)
+		{
+			ELidarLinkMode Mode;
+			if (!LinksDebug::ParseMode(Args[0], Mode))
+			{
+				UE_LOG(LogTheLastShift, Warning, TEXT("tls.Links.Mode: unknown mode '%s' (nearest, grid)."), *Args[0]);
+				return;
+			}
+			V.Mode = Mode;
+		}
+		if (Args.Num() > 1)
+		{
+			V.GridMaxDistanceCm = FMath::Clamp(FCString::Atof(*Args[1]), 1.f, 1000.f);
+		}
+		if (Args.Num() > 0)
+		{
+			if (UScanDirectorComponent* D = LinksDebug::Director())
+			{
+				D->ApplyScanLinks();
+			}
+		}
+		const ULidarScanComponent* L = LinksDebug::Lidar();
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.Links.Mode: %s, nearest %.1f cm, grid %.1f cm, %d neighbours; lidar %s, %.1f cm, %d neighbours. Ini line: ScanLinks=(Neighbours=%d,MaxDistanceCm=%.1f,PixelWidth=%.1f,Intensity=%.1f,MaxNormalAngle=%.1f,MaxLinksPerScan=%d,LiftTexels=%.1f,LiftMaxCm=%.1f,Mode=%s,GridMaxDistanceCm=%.1f)"),
+			LinksDebug::ModeName(V.Mode), V.MaxDistanceCm, V.GridMaxDistanceCm, V.Neighbours, L ? LinksDebug::ModeName(L->LinkMode) : TEXT("-"), L ? L->LinkMaxDistance : -1.f, L ? L->LinkNeighbours : -1,
+			V.Neighbours, V.MaxDistanceCm, V.PixelWidth, V.Intensity, V.MaxNormalAngle, V.MaxLinksPerScan, V.LiftTexels, V.LiftMaxCm, V.Mode == ELidarLinkMode::Grid ? TEXT("Grid") : TEXT("Nearest"), V.GridMaxDistanceCm);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsLinksModeCheckCommand(
+	TEXT("tls.Links.ModeCheck"),
+	TEXT("tls.Links.ModeCheck [Quit=0]: (fresh PIE, in TestLidar) the switch between the two modes: a scan in the nearest mode, tls.Links.Mode grid (the values reach the lidar), a scan on the grid (the grid mesh) while the first keeps its lines, back to nearest, then lines off in each mode: nothing searched or drawn."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		LinksDebug::StartModeCheck(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsLinksModeShotsCommand(
+	TEXT("tls.Links.ModeShots"),
+	TEXT("tls.Links.ModeShots <Label> [SecondGridCm=0] [Quit=0] [Pose=here]: (PIE or a package, any map) from the current pose or a fixed one (corridor, corridorwall, floorhall: from the area's plan; ship, shipoblique: Prologue_Arrival): a scan in the nearest mode, one in the grid mode at the settings' distance and, with SecondGridCm, one at that distance, each shot at full resolution once its lines have grown, with its link counts and links per point by depth. Shots to Saved/Screenshots/Brief23."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		LinksDebug::StartModeShots(Args.Num() > 0 ? Args[0] : FString(TEXT("Here")), Args.Num() > 1 ? FCString::Atof(*Args[1]) : 0.f, Args.Num() > 2 && FCString::Atoi(*Args[2]) != 0,
+			Args.Num() > 3 ? Args[3].ToLower() : FString());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsLinksGridSpanCommand(
+	TEXT("tls.Links.GridSpan"),
+	TEXT("tls.Links.GridSpan [MaxDistanceCm=80] [KeepToM=20] [BinM=2]: for the last searched scan's samples (either mode), on the floor (within 10 cm of the pawn's floor) by horizontal distance from the capture: the length between a sample and the next texel's sample along its row and along its column (adjacent texels: past the near thinning every texel has its sample), the distance from which the median step between two rows passes MaxDistanceCm, and the 90th percentile of those steps at KeepToM (the longest link that keeps nine in ten of them there and nearer)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		using namespace LinksDebug;
+		const ULidarScanComponent* L = Lidar();
+		const ACharacter* Character = Cast<ACharacter>(Pawn());
+		TArray<FVector> Positions;
+		TArray<int32> Channels;
+		int32 Width = 0;
+		FLidarScanContext Context;
+		if (!L || !Character || !L->GetLastScanSamples(Positions, Channels, Width, Context) || Width <= 0)
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Links.GridSpan: no searched scan or no pawn."));
+			return;
+		}
+		const double MaxCm = Args.Num() > 0 ? FMath::Clamp(FCString::Atod(*Args[0]), 1.0, 1000.0) : 80.0;
+		const double KeepTo = (Args.Num() > 1 ? FMath::Clamp(FCString::Atod(*Args[1]), 1.0, 500.0) : 20.0) * 100.0;
+		const double Bin = (Args.Num() > 2 ? FMath::Clamp(FCString::Atod(*Args[2]), 0.5, 50.0) : 2.0) * 100.0;
+		const double FloorZ = Character->GetActorLocation().Z - Character->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+		const int32 Height = Positions.Num() / Width;
+		auto OnFloor = [&](int32 T) { return Channels[T] >= 0 && FMath::Abs(Positions[T].Z - FloorZ) < 10.0; };
+		auto Horizontal = [&](int32 T) { return FVector::Dist2D(Positions[T], Context.CaptureOrigin); };
+		TMap<int32, TArray<double>> Rows, Columns;
+		TArray<double> AtKeep;
+		for (int32 Y = 0; Y < Height; ++Y)
+		{
+			for (int32 X = 0; X < Width; ++X)
+			{
+				const int32 T = Y * Width + X;
+				if (!OnFloor(T))
+				{
+					continue;
+				}
+				const double D = Horizontal(T);
+				const int32 Key = FMath::FloorToInt32(D / Bin);
+				if (X + 1 < Width && OnFloor(T + 1))
+				{
+					Rows.FindOrAdd(Key).Add(FVector::Dist(Positions[T], Positions[T + 1]));
+				}
+				if (Y + 1 < Height && OnFloor(T + Width))
+				{
+					const double Step = FVector::Dist(Positions[T], Positions[T + Width]);
+					Columns.FindOrAdd(Key).Add(Step);
+					if (FMath::Abs(D - KeepTo) <= 100.0)
+					{
+						AtKeep.Add(Step);
+					}
+				}
+			}
+		}
+		TArray<int32> Keys;
+		Columns.GetKeys(Keys);
+		Keys.Sort();
+		FString Table;
+		double PassFrom = -1.0;
+		for (const int32 Key : Keys)
+		{
+			const TArray<double>& Col = Columns[Key];
+			const TArray<double>* Row = Rows.Find(Key);
+			const double Med = Percentile(Col, 0.5);
+			Table += FString::Printf(TEXT(" [%.0f-%.0f m: %d, between rows median %.1f cm p90 %.1f, along a row median %.1f]"), Key * Bin / 100.0, (Key + 1) * Bin / 100.0, Col.Num(),
+				Med, Percentile(Col, 0.9), Row ? Percentile(*Row, 0.5) : 0.0);
+			if (PassFrom < 0.0 && Col.Num() >= 20 && Med > MaxCm)
+			{
+				PassFrom = Key * Bin / 100.0;
+			}
+		}
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.Links.GridSpan: scan %d, capture %.0f cm above the floor: the median step between two rows of the floor passes %.0f cm from %s; at %.0f m (+-1 m, %d steps) the steps between rows are median %.1f cm, p90 %.1f cm.%s"),
+			Context.ScanIndex, Context.CaptureOrigin.Z - FloorZ, MaxCm, PassFrom >= 0.0 ? *FString::Printf(TEXT("%.0f m"), PassFrom) : TEXT("nowhere in range"),
+			KeepTo / 100.0, AtKeep.Num(), Percentile(AtKeep, 0.5), Percentile(AtKeep, 0.9), *Table);
 	}));
 
 #endif

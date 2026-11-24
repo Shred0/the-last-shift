@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Area/AreaTypes.h"
 #include "Engine/DeveloperSettings.h"
+#include "LidarScanComponent.h"
 #include "Narrative/NarrativeRows.h"
 #include "TextChannel/TextDegradation.h"
 #include "TheLastShiftSettings.generated.h"
@@ -95,13 +96,33 @@ struct THELASTSHIFT_API FScanLinks
 {
 	GENERATED_BODY()
 
-	/** Each point is linked to at most this many of its nearest points of the same scan and channel; 0 = no lines. */
+	/**
+	 * Each point is linked to at most this many of its nearest points of the same scan and channel (Mode Nearest); 0 = no
+	 * lines, in either mode (in the Grid mode any value above 0 only says that lines are on).
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0", ClampMax = "8"))
 	int32 Neighbours = 0;
 
-	/** Longest link between two points. */
+	/** Longest link between two points, in the Nearest mode. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "1.0", ClampMax = "1000.0", Units = "cm"))
 	float MaxDistanceCm = 50.f;
+
+	/**
+	 * How the links are found (Brief 23): Nearest, mutual nearest neighbours (Brief 13); Grid, each point to the next point
+	 * to its right and below it on the capture's grid. The director pushes the mode and the maximum distance of that mode.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links")
+	ELidarLinkMode Mode = ELidarLinkMode::Nearest;
+
+	/**
+	 * Longest link between two points, in the Grid mode. A floor seen at a grazing angle has links between two rows of the
+	 * grid much longer than those along a row, so the grid mode may need more than MaxDistanceCm to keep them.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "1.0", ClampMax = "1000.0", Units = "cm"))
+	float GridMaxDistanceCm = 80.f;
+
+	/** The longest link of the active mode: the one the director pushes. */
+	float ActiveMaxDistanceCm() const { return Mode == ELidarLinkMode::Grid ? GridMaxDistanceCm : MaxDistanceCm; }
 
 	/** Width of a line on screen, in pixels, at any depth. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Links", meta = (ClampMin = "0.5", ClampMax = "8.0"))

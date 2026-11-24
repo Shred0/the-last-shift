@@ -1288,7 +1288,9 @@ namespace LookDebug
 	}
 }
 
-using namespace LookDebug;
+// The commands sit inside the namespace: a file-scope using directive would reach the next file of a unity build.
+namespace LookDebug
+{
 
 static FAutoConsoleCommandWithWorld GTlsLookReportCommand(
 	TEXT("tls.Look.Report"),
@@ -1400,5 +1402,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLookTextShotsCommand(
 	{
 		StartRun(TEXT("tls.Look.TextShots"), Args.Num() > 0 ? Args[0] : TEXT("Text"), Args.Num() > 1 && FCString::Atoi(*Args[1]) != 0, BuildTextShots());
 	}));
+
+} // namespace LookDebug
 
 #endif // !UE_BUILD_SHIPPING

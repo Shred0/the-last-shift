@@ -15,6 +15,16 @@ class UNiagaraSystem;
 class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 
+/** How the neighbour search finds the links of a scan (see ULidarScanComponent::LinkMode). */
+UENUM(BlueprintType)
+enum class ELidarLinkMode : uint8
+{
+	/** Each point to at most LinkNeighbours of its nearest points, mutual nearest neighbours. */
+	Nearest,
+	/** Each point to the next live point to its right and below it on the capture's grid (at most 4 links a point). */
+	Grid
+};
+
 /**
  * One scan slot: a Niagara instance holding the points of one scan plus the depth target it was spawned from.
  * Once MaxAliveScans is reached the oldest scan is evicted (its particles removed) and its slot holds the new scan.
@@ -129,7 +139,7 @@ struct FLidarLinkStats
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
 	int32 Dropped = 0;
 
-	/** Most links on one point (never above LinkNeighbours). */
+	/** Most links on one point (never above LinkNeighbours in the Nearest mode, 4 in the Grid mode). */
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
 	int32 MaxDegree = 0;
 
@@ -155,6 +165,17 @@ struct FLidarLinkStats
 	/** Texels of the sample target the spawn did not write (0 when every texel of the capture was written). */
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
 	int32 UnwrittenTexels = 0;
+
+	/** The mode the scan's links were found with. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	ELidarLinkMode Mode = ELidarLinkMode::Nearest;
+
+	/**
+	 * Texel of the capture (y * width + x) of the first point whose link the cap dropped, -1 when none was. Links are kept
+	 * in texel order, so every link from a texel after it is dropped too: the rows of the capture from its row down.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 FirstDroppedTexel = INDEX_NONE;
 };
 
 /** One link of a scan (diagnostics): the two points' surface positions, their texels in the capture and their channels. */
@@ -180,6 +201,13 @@ struct FLidarLink
 
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
 	int32 EndChannel = 0;
+
+	/** The two points' surface normals. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	FVector StartNormal = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	FVector EndNormal = FVector::ZeroVector;
 };
 
 struct FLidarLinkJob;
@@ -454,12 +482,13 @@ public:
 	// --- Occlusion (live) ---
 
 	/**
-	 * Points behind the real geometry: 0 hides them (the engine's depth test, exactly as a component without this
-	 * setting: same material, same points, same cost); above 0 they are drawn at this factor of their own intensity,
+	 * Points behind the real geometry: 0 hides them (the point material's own depth test, exactly as a component without
+	 * this setting: same material, same points, same cost); above 0 they are drawn at this factor of their own intensity,
 	 * channel colour kept. At 1 every alive point is drawn as if it had no depth test: the scan looks as if the geometry
 	 * were not there. Between 0 and 1 a point behind geometry by less than max(5 cm, 1% of its depth), or within 8 pixels
 	 * of an occluder's edge, stays hidden. A point on a surface in view is never treated as hidden. Injected points behind
-	 * geometry stay hidden unless their source sets FLidarSourceSettings::bShowBehindGeometry.
+	 * geometry stay hidden unless their source sets FLidarSourceSettings::bShowBehindGeometry. The two point materials test
+	 * depth on the same values, so every pixel of a sprite is drawn by exactly one of them, a depth tie included.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Occlusion", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
 	float OccludedIntensity = 0.f;
@@ -494,19 +523,35 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Lidar|Diagnostics")
 	int32 GetOccludedMaterialSlotCount() const;
 
-	// --- Links (neighbours, distance, angle and cap applied on the next scan; width and intensity live) ---
+	// --- Links (mode, neighbours, distance, angle and cap applied on the next scan; width and intensity live) ---
 
 	/**
-	 * Neighbour lines. 0 = off: no search, no line, and the capture, the points and the cost are those of a component
-	 * without lines. Above 0, each captured point of a scan is linked to at most this many of its nearest points of the
-	 * same scan and channel within LinkMaxDistance: a link joins two points when each is among the other's nearest
-	 * (mutual nearest neighbours), so no point has more links than this. Links are found once per scan, on a worker
-	 * thread, from the scan's depth capture read back from the GPU a few frames after the scan; they never join two scans
-	 * and never touch injected points. A scan's lines grow from both of their points toward each other over LinkSeconds,
-	 * fade, clear and are removed with the scan, and are depth-tested against the real geometry whatever OccludedIntensity.
+	 * Neighbour lines. 0 = off, in either LinkMode: no search, no line, and the capture, the points and the cost are those
+	 * of a component without lines. Above 0, in the Nearest mode each captured point of a scan is linked to at most this
+	 * many of its nearest points of the same scan and channel within LinkMaxDistance: a link joins two points when each is
+	 * among the other's nearest (mutual nearest neighbours), so no point has more links than this. In the Grid mode the
+	 * value only says that lines are on. Links are found once per scan, on a worker thread, from the scan's samples read
+	 * back from the GPU a few frames after the scan; they never join two scans and never touch injected points. A scan's
+	 * lines grow from both of their points toward each other over LinkSeconds, fade, clear and are removed with the scan,
+	 * and are depth-tested against the real geometry whatever OccludedIntensity.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0", ClampMax = "8", UIMin = "0", UIMax = "8"))
 	int32 LinkNeighbours = 0;
+
+	/**
+	 * How the links are found when lines are on (LinkNeighbours > 0). Nearest: mutual nearest neighbours, as above.
+	 * Grid: each captured point is linked to the next live sample to its right in its row of the capture and to the next
+	 * live sample below it in its column (looked for over a few texels, more near the capture where the near thinning
+	 * keeps few samples), when that sample is of the same channel, within LinkMaxDistance and within LinkMaxNormalAngle;
+	 * a regular mesh with at most 4 links a point. Only the search differs: the lines are the same in both modes. Applies
+	 * from the next scan; alive scans keep their lines.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links")
+	ELidarLinkMode LinkMode = ELidarLinkMode::Nearest;
+
+	/** Sets LinkMode, from the next scan. */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Links")
+	void SetLinkMode(ELidarLinkMode InMode) { LinkMode = InMode; }
 
 	/** Longest link, between the two points' surface positions. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "1.0", ClampMax = "1000.0", UIMin = "1.0", UIMax = "1000.0", Units = "cm"))

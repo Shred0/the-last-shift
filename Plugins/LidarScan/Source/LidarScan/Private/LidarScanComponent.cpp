@@ -120,7 +120,13 @@
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
  *
  * Occlusion display. Each emitter has two sprite renderers with the same bindings. The first is the one described
- * above: material M_LidarPoint, depth tested, so a point behind real geometry is hidden; it never changes. The second
+ * above: material M_LidarPoint, so a point behind real geometry is hidden; it never changes with OccludedIntensity.
+ * M_LidarPoint has no hardware depth test: it makes the test itself, on the same two values the second material reads,
+ * and draws Base only where the fragment's device Z (Parameters.SvPosition.z) >= the scene's device Z at the same pixel
+ * (LookupDeviceZ of the pixel; reversed Z: the test a depth-tested translucent material makes, equal depth included),
+ * else nothing. A hardware test and a comparison in the shader could disagree by a rounding step where the two depths
+ * tie (a sprite cut by its own surface), and a pixel was then drawn by neither renderer; with both tests in the
+ * shaders on the same values, every pixel of a sprite falls to exactly one side. The second
  * draws with User.PointMaterial (MaterialUserParamBinding; M_LidarPointOccluded when unset) and is enabled by the user
  * bool User.OcclusionDisplay (RendererEnabledBinding), false by default: disabled, it generates and draws nothing, so
  * with OccludedIntensity = 0 (the component never sets either parameter) the points, the materials and the cost are
@@ -134,9 +140,10 @@
  * at F = 1 (OccludedIntensity 1, or any pulse during its link time):
  *   Base * BehindWeight                    if the fragment's device Z < the scene's device Z at the same pixel,
  *   0                                      otherwise,
- * the exact complement of the first renderer's depth test (reversed Z: it keeps device Z >= scene device Z), so the
- * two renderers together draw every sprite pixel of a BehindWeight-1 point once, whatever covers it: as if the points
- * had no depth test, with no margin and no edge band; and between 0 and 1 (F < 1):
+ * the exact complement of the first renderer's test (it keeps device Z >= scene device Z, on the same two values), so
+ * the two renderers together draw every sprite pixel of a BehindWeight-1 point exactly once, never by neither and never
+ * by both, whatever covers it: as if the points had no depth test, with no margin and no edge band; and between 0 and 1
+ * (F < 1):
  *   0                                      if Zp <= Zs(pixel) * 1.001 + 2 cm   (in front, or sunk into its own surface:
  *                                                                               left to the first renderer),
  *   Base * W                               if Zp >  Zmax + max(5 cm, 0.01 * Zp)          (behind geometry),
@@ -156,7 +163,8 @@
  * hidden behind geometry at every moment of the pulse. A channel only changes Base, so a hidden point keeps its
  * channel's colour.
  *
- * Neighbour lines (LinkNeighbours > 0). At 0 nothing below runs: no write, no readback, no search, no line particle. What
+ * Neighbour lines (LinkNeighbours > 0, in either LinkMode). At 0 nothing below runs, whatever LinkMode: no write, no
+ * readback, no search, no line particle. What
  * remains is the Lines emitter of each instance, with no particle, and the shared 1 x 1 placeholder target
  * (PlaceholderSampleTarget) bound to User.SampleTarget with User.ExportSamples false, because the system's render target
  * interface needs a bound target; with 16 scans alive these cost about 0.05 ms of GPU time.
@@ -180,13 +188,27 @@
  * search waits LinkResultDelaySeconds (diagnostics, 0 in normal use) before it is handed to its scan, so that tests can make a
  * result arrive after its scan is gone.
  *
- * The search (worker thread): for each live sample, its LinkNeighbours nearest live samples of the same channel among the
- * samples within 3 texels in the capture (wider near the capture, where the thinning keeps few), within LinkMaxDistance
- * and with normals at most LinkMaxNormalAngle apart; a link joins two samples when each is among the other's nearest
- * (mutual nearest neighbours), so no point has more than LinkNeighbours links; each link once, at most MaxLinksPerScan.
+ * The search (worker thread), in the LinkMode the scan was taken with (FLidarLinkStats::Mode); only the search differs
+ * between the two modes, the lines below are the same.
+ * Nearest: for each live sample, its LinkNeighbours nearest live samples of the same channel among the samples within 3
+ * texels in the capture (wider near the capture, where the thinning keeps few), within LinkMaxDistance and with normals at
+ * most LinkMaxNormalAngle apart; a link joins two samples when each is among the other's nearest (mutual nearest
+ * neighbours), so no point has more than LinkNeighbours links.
+ * Grid: for each live sample at texel (x, y), the first live sample at (x + s, y), s = 1..R, and the first at (x, y + s),
+ * s = 1..R, with R = 1 where the sample's depth is at least NearThinningDistance (a missing neighbour is a hole: an edge,
+ * a sample out of range) and R = min(64, 1 + ceil(3 (Thin^2 - 1))) nearer, Thin = NearThinningDistance / depth (the
+ * thinning keeps one sample in Thin^2 there); the link is kept when that sample is of the same channel, within
+ * LinkMaxDistance and with normals at most LinkMaxNormalAngle apart; a live sample that fails ends the look (a link never
+ * passes over a live sample), and the per-sample jitter stays inside its texel, so it never changes who is next. At most 4
+ * links a point. Where the near thinning leaves gaps, a right link and a link below can cross on screen over a texel that
+ * has no sample.
+ * In both modes each link once, from its lower texel, in texel order (the grid's right link before the one below), and
+ * MaxLinksPerScan keeps the first ones: the links dropped are those of the last rows of the capture (the bottom of the
+ * view, FLidarLinkStats::FirstDroppedTexel).
  *
  * Lines emitter (third emitter of the same instance: ghost cap, ClearScans and eviction reach it as the others). Spawn:
  * one burst (loop count 1) of User.LinkSpawnCount = min(MaxLinksPerScan, ceil(LinkNeighbours * W * H / 2)) particles
+ * (Grid: min(MaxLinksPerScan, 2 * W * H))
  * with the points; particle i stores Particles.LidarLinkIndex = i. Update: while User.LinkCount is -1 (the search runs)
  * every particle has size 0; once the links arrive, particles with LidarLinkIndex >= LinkCount die. Each reads A, B, NA, NB
  * (LinkStarts, LinkEnds, LinkStartNormals with the channel in a, LinkEndNormals) at its index:
@@ -782,13 +804,15 @@ void ULidarScanComponent::Scan()
 	Slot.StartWorldTime = World ? World->GetTimeSeconds() : 0.0;
 	Slot.SupersededRealTime = -1.0;
 
-	// Lines: the emitter spawns, with the points, as many line particles as the scan can have links (each point has at
-	// most LinkNeighbours, each link two points); they stay invisible until the search hands the links over (LinkCount
-	// -1), then those above LinkCount die. Off: nothing spawns, nothing is read back or searched.
+	// Lines: the emitter spawns, with the points, as many line particles as the scan can have links (Nearest: each point
+	// has at most LinkNeighbours, each link two points; Grid: each point starts at most two, right and below); they stay
+	// invisible until the search hands the links over (LinkCount -1), then those above LinkCount die. Off: nothing
+	// spawns, nothing is read back or searched, in either mode.
 	const int32 Neighbours = FMath::Clamp(LinkNeighbours, 0, 8);
 	if (Neighbours > 0)
 	{
-		const int64 Bound = (static_cast<int64>(Neighbours) * Target->SizeX * Target->SizeY + 1) / 2;
+		const int64 Bound = LinkMode == ELidarLinkMode::Grid ? 2 * static_cast<int64>(Target->SizeX) * Target->SizeY
+			: (static_cast<int64>(Neighbours) * Target->SizeX * Target->SizeY + 1) / 2;
 		Points->SetVariableInt(LidarScanParams::LinkSpawnCount, static_cast<int32>(FMath::Min<int64>(Bound, FMath::Clamp(MaxLinksPerScan, 0, 262144))));
 		Points->SetVariableInt(LidarScanParams::LinkCount, -1);
 		// A sample target created now is bound like a new depth target: the spawn waits one frame for it.
@@ -1842,6 +1866,7 @@ bool ULidarScanComponent::StartLinkSearch(FLidarScanSlot& Slot)
 	In.Forward = Slot.Context.CaptureForward;
 	In.NearThinningDistance = FMath::Clamp(NearThinningDistance, 0.f, 1000.f);
 	In.Neighbours = FMath::Clamp(LinkNeighbours, 0, 8);
+	In.bGrid = LinkMode == ELidarLinkMode::Grid;
 	In.MaxDistance = FMath::Clamp(LinkMaxDistance, 1.f, 1000.f);
 	In.MinNormalDot = LinkMaxNormalAngle >= 180.f ? -2.f : FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(LinkMaxNormalAngle, 0.f, 180.f)));
 	In.MaxLinks = FMath::Clamp(MaxLinksPerScan, 0, 262144);
@@ -1891,6 +1916,7 @@ void ULidarScanComponent::RejectLinks(FLidarScanSlot* Slot, const FLidarLinkJob&
 	LastLinkStats.ScanIndex = Job.ScanIndex;
 	LastLinkStats.Points = Points;
 	LastLinkStats.bRejected = true;
+	LastLinkStats.Mode = Job.Input.bGrid ? ELidarLinkMode::Grid : ELidarLinkMode::Nearest;
 	LastLinks.Reset();
 	LastLinkPointDepths.Reset();
 	LastLinkDegrees.Reset();
@@ -2036,6 +2062,8 @@ bool ULidarScanComponent::TickLinkSearches()
 				LastLinkStats.SearchMilliseconds = static_cast<float>(Out.Milliseconds);
 				LastLinkStats.ReadySeconds = static_cast<float>(Now - Job->StartRealTime);
 				LastLinkStats.UnwrittenTexels = Out.Unwritten;
+				LastLinkStats.Mode = Job->Input.bGrid ? ELidarLinkMode::Grid : ELidarLinkMode::Nearest;
+				LastLinkStats.FirstDroppedTexel = Out.FirstDroppedTexel;
 				LastLinks.SetNum(Out.Starts.Num());
 				for (int32 Link = 0; Link < Out.Starts.Num(); ++Link)
 				{
@@ -2046,6 +2074,8 @@ bool ULidarScanComponent::TickLinkSearches()
 					L.EndTexel = Out.EndTexels[Link];
 					L.StartChannel = FMath::RoundToInt32(Out.StartNormals[Link].A);
 					L.EndChannel = FMath::RoundToInt32(Out.EndNormals[Link].A);
+					L.StartNormal = FVector(Out.StartNormals[Link].R, Out.StartNormals[Link].G, Out.StartNormals[Link].B);
+					L.EndNormal = FVector(Out.EndNormals[Link].R, Out.EndNormals[Link].G, Out.EndNormals[Link].B);
 				}
 				LastLinkPointDepths = Out.PointDepths;
 				LastLinkDegrees.SetNum(Out.Degrees.Num());

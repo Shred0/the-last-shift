@@ -1221,7 +1221,9 @@ namespace EngineerLinesDebug
 	}
 }
 
-using namespace EngineerLinesDebug;
+// The commands sit inside the namespace: a file-scope using directive would reach the next file of a unity build.
+namespace EngineerLinesDebug
+{
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsEngineerLinesTestCommand(
 	TEXT("tls.EngineerLinesTest"),
@@ -1248,5 +1250,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsSpendKindTestCommand(
 		}
 		Start(TEXT("tls.SpendKindTest"), Args.Num() > 0 && (Args[0] == TEXT("1") || Args[0].Equals(TEXT("Quit"), ESearchCase::IgnoreCase)), BuildSpendKindTest());
 	}));
+
+} // namespace EngineerLinesDebug
 
 #endif // !UE_BUILD_SHIPPING
