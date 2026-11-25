@@ -170,6 +170,7 @@ bool ALogTerminal::TryActivate(APawn* InstigatorPawn)
 		return false;
 	}
 	ShowNextEntry();
+	OnRead.Broadcast(this);
 	return true;
 }
 

@@ -71,6 +71,8 @@ bool APrologueEntryDoor::BeginCloseBehind()
 	ApplyPanelFraction();
 	Panel->SetVisibility(true);
 	UE_LOG(LogTheLastShift, Log, TEXT("%s: closing behind the player: the way shut, the panel coming down."), *GetName());
+	// The close starts here; FinishCloseBehind only ends it.
+	AnnounceCloseStarted();
 	return true;
 }
 
@@ -90,6 +92,8 @@ void APrologueEntryDoor::FinishCloseBehind()
 	{
 		return;
 	}
+	// The panel is down: the close that began at BeginCloseBehind ends here.
+	AnnounceMotionEnded();
 	ClosedFraction = 1.f;
 	ApplyPanelFraction();
 	bClosingBehind = false;

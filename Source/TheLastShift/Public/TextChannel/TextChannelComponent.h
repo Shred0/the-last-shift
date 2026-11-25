@@ -36,6 +36,9 @@ enum class ETextVoice : uint8
 	Engineer
 };
 
+/** A message starts to be typed from its first character: its first start (bRestart false) or a restart after a suspension. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnTextTypingStarted, FName, RowName, ETextVoice, Voice, bool, bRestart);
+
 /**
  * The suit's text channel: one queue for three voices. The home AI's messages are degraded by the battery, filled with
  * their numbers and typed out. The engineer's messages (rows of the message table whose trigger GetVoiceForTrigger gives
@@ -250,6 +253,13 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "TextChannel")
 	FOnTextMessageStarted OnMessageStarted;
+
+	/**
+	 * A message starts to be typed from its first character, for every voice: with OnMessageStarted, and again each time
+	 * it restarts when the channel is no longer suspended (after a Stop, the pause menu or a travel screen).
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "TextChannel")
+	FOnTextTypingStarted OnTypingStarted;
 
 	/** The visible text changed (also to empty when a message restarts or the channel hides). */
 	UPROPERTY(BlueprintAssignable, Category = "TextChannel")

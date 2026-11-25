@@ -76,8 +76,22 @@ void APrologueSlidingPanel::SetOpenFraction(float InFraction)
 		return;
 	}
 	const bool bWasOpen = IsFullyOpen();
+	const float Old = OpenFraction;
 	OpenFraction = New;
 	ApplyPanel();
+	// A motion starts when the fraction starts to rise (opening) or to fall (closing), a reversal included; it ends at the
+	// end it moves to.
+	const int32 Direction = New > Old ? 1 : -1;
+	if (Direction != MotionDirection)
+	{
+		MotionDirection = Direction;
+		OnMotionStarted.Broadcast(this, Direction > 0, true);
+	}
+	if ((Direction > 0 && New >= 1.f) || (Direction < 0 && New <= 0.f))
+	{
+		MotionDirection = 0;
+		OnMotionEnded.Broadcast(this);
+	}
 	if (IsFullyOpen() != bWasOpen)
 	{
 		UE_LOG(LogTheLastShift, Log, TEXT("%s: %s%s."), *GetName(), IsFullyOpen() ? TEXT("fully open") : TEXT("no longer fully open"),

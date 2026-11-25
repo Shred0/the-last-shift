@@ -354,6 +354,7 @@ void UTextChannelComponent::StartNext()
 			UE_LOG(LogTextChannel, Log, TEXT("%s: twin message '%s' started (%.1f chars/s, translation %d behind): \"%s\""), *GetNameSafe(GetOwner()),
 				*Current.RowName.ToString(), Typewriter.GetCharsPerSecond(), TwinLag, *TwinText);
 			OnMessageStarted.Broadcast(Current.RowName, CurrentLevel);
+			OnTypingStarted.Broadcast(Current.RowName, Current.Voice, false);
 			SetVisible(true);
 			BroadcastText();
 			return;
@@ -388,6 +389,7 @@ void UTextChannelComponent::StartNext()
 			UE_LOG(LogTextChannel, Log, TEXT("%s: engineer message '%s' started in full (battery %.3f, %.1f chars/s): \"%s\""), *GetNameSafe(GetOwner()),
 				*Current.RowName.ToString(), Current.Context.BatteryFraction, Typewriter.GetCharsPerSecond(), *EngineerText);
 			OnMessageStarted.Broadcast(Current.RowName, CurrentLevel);
+			OnTypingStarted.Broadcast(Current.RowName, Current.Voice, false);
 			SetVisible(true);
 			BroadcastText();
 			return;
@@ -426,6 +428,7 @@ void UTextChannelComponent::StartNext()
 		UE_LOG(LogTextChannel, Log, TEXT("%s: message %s started at %s (battery %.3f, %.1f chars/s): \"%s\""), *GetNameSafe(GetOwner()), *What,
 			LexToString(Level), Current.Context.BatteryFraction, Typewriter.GetCharsPerSecond(), *Text);
 		OnMessageStarted.Broadcast(Current.RowName, Level);
+		OnTypingStarted.Broadcast(Current.RowName, Current.Voice, false);
 		SetVisible(true);
 		BroadcastText();
 		return;
@@ -511,6 +514,7 @@ void UTextChannelComponent::SetSuspended(bool bInSuspended)
 		PhaseLeft = 0.f;
 		SetVisible(true);
 		BroadcastText();
+		OnTypingStarted.Broadcast(Current.RowName, Current.Voice, true);
 	}
 	else if (Phase == EPhase::Idle)
 	{

@@ -13,6 +13,7 @@
 class UDataTable;
 class UMaterialInterface;
 class UMaterialParameterCollection;
+class USoundBase;
 class UStaticMesh;
 class UWorld;
 
@@ -513,6 +514,158 @@ struct THELASTSHIFT_API FSurfaceLook
 	TSoftObjectPtr<UMaterialParameterCollection> Parameters;
 };
 
+/** The sounds of the game (Brief 24): one slot each in UTheLastShiftSettings::Audio for the effects, and the menu's music. */
+UENUM(BlueprintType)
+enum class EGameSound : uint8
+{
+	/** Every scan, when it starts (the automatic first one of a Stop included). */
+	Scan,
+	/** Once when a scan's cooldown ends while Stopped. */
+	ScanReady,
+	/** Every Stop. */
+	TimeStop,
+	/** An exit from stopped time with no jump: a voluntary Resume, a contact that rewinds without a jump. */
+	TimeResume,
+	/** An exit from stopped time with a jump: a contact that jumps, a Resume that is a graze. */
+	Slip,
+	/** A message starts to be typed from its first character, on the text channel or in a text scene. */
+	Line,
+	/** A terminal accepts what the player does at it (a payment, a free activation, reading a log again). From the terminal. */
+	Terminal,
+	/** A door starts to open or to close; the hatches play it at the hatches' pitch. From the door. */
+	Door,
+	/** A residue's hold completes and it is collected. */
+	Energy,
+	/** A text scene goes from a line on the paradise's white to a line on black, once in a scene. */
+	Interruption,
+	/** The main menu's looping track. */
+	MenuMusic,
+	Count UMETA(Hidden)
+};
+
+inline const TCHAR* LexToString(EGameSound Sound)
+{
+	switch (Sound)
+	{
+	case EGameSound::Scan: return TEXT("Scan");
+	case EGameSound::ScanReady: return TEXT("ScanReady");
+	case EGameSound::TimeStop: return TEXT("TimeStop");
+	case EGameSound::TimeResume: return TEXT("TimeResume");
+	case EGameSound::Slip: return TEXT("Slip");
+	case EGameSound::Line: return TEXT("Line");
+	case EGameSound::Terminal: return TEXT("Terminal");
+	case EGameSound::Door: return TEXT("Door");
+	case EGameSound::Energy: return TEXT("Energy");
+	case EGameSound::Interruption: return TEXT("Interruption");
+	case EGameSound::MenuMusic: return TEXT("MenuMusic");
+	default: return TEXT("Unknown");
+	}
+}
+
+/** One sound of the game: its asset and its volume. An empty Sound plays nothing, and that is not an error. */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FGameSoundSlot
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (AllowedClasses = "/Script/Engine.SoundBase"))
+	TSoftObjectPtr<USoundBase> Sound;
+
+	/** Volume multiplier of this sound, under StdCore's volume settings. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float Volume = 1.f;
+
+	float GetVolume() const { return FMath::Clamp(Volume, 0.f, 4.f); }
+};
+
+/**
+ * The game's sounds and music (Brief 24): the one owner of every sound reference, every volume, the hatches' pitch, the
+ * distance over which the world's sounds fade and the music's fades. UGameAudioSubsystem is the one place that plays
+ * them. The values live in Config/DefaultGame.ini; tls.Audio.Set changes them for a session.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FGameAudio
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot Scan;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot ScanReady;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot TimeStop;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot TimeResume;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot Slip;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot Line;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot Terminal;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot Door;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot Energy;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot Interruption;
+
+	/**
+	 * The main menu's track; its sound wave loops. It has no volume here: its level is the file's own, and the Music volume
+	 * of StdCore's settings acts on it (StdCore's music subsystem plays it).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (AllowedClasses = "/Script/Engine.SoundBase"))
+	TSoftObjectPtr<USoundBase> MenuMusic;
+
+	/** Pitch factor of the door sound for the hatches (the two hangars' hatches and the ship's hatch). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+	float HatchPitch = 0.6f;
+
+	/**
+	 * A door or hatch that moves over time sounds for as long as it moves: its sound (looped while the motion lasts) fades
+	 * out over this when the motion ends.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "2.0", Units = "s"))
+	float MotionFadeOutSeconds = 0.15f;
+
+	/** The world's sounds (doors, hatches, terminals) fade linearly from their source to nothing at this distance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "100.0", ClampMax = "20000.0", Units = "cm"))
+	float WorldFalloffCm = 3000.f;
+
+	/** The menu's music fades in over this when the menu shows. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "10.0", Units = "s"))
+	float MusicFadeInSeconds = 1.f;
+
+	/** The menu's music fades out over this when the player leaves the menu. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "10.0", Units = "s"))
+	float MusicFadeOutSeconds = 2.f;
+
+	/** The slot of an effect; null for MenuMusic (and Count), which has no volume. */
+	const FGameSoundSlot* FindEffect(EGameSound Sound) const;
+	FGameSoundSlot* FindEffect(EGameSound Sound);
+
+	/** The sound reference of Sound: its effect slot's, or MenuMusic. */
+	const TSoftObjectPtr<USoundBase>& GetSound(EGameSound Sound) const;
+	TSoftObjectPtr<USoundBase>& GetSound(EGameSound Sound);
+
+	/** The volume an effect plays at (its slot's, clamped); 1 for the music, whose level is the file's own. */
+	float GetVolume(EGameSound Sound) const;
+
+	float GetHatchPitch() const { return FMath::Clamp(HatchPitch, 0.1f, 2.f); }
+	float GetMotionFadeOutSeconds() const { return FMath::Clamp(MotionFadeOutSeconds, 0.f, 2.f); }
+	float GetWorldFalloffCm() const { return FMath::Clamp(WorldFalloffCm, 100.f, 20000.f); }
+	float GetMusicFadeInSeconds() const { return FMath::Clamp(MusicFadeInSeconds, 0.f, 10.f); }
+	float GetMusicFadeOutSeconds() const { return FMath::Clamp(MusicFadeOutSeconds, 0.f, 10.f); }
+};
+
 /**
  * Project settings of the game (Project Settings > Game > The Last Shift), stored as text in Config/DefaultGame.ini.
  * Sole owner of the run's map order, of every area's recipe and seed, of the per-act jump tuning, of the scan colours, of
@@ -735,6 +888,10 @@ public:
 
 	/** Flashlight, every value clamped (the outer cone at least the inner one). */
 	FFlashlightTuning GetFlashlightTuning() const;
+
+	/** The game's sounds and music (Brief 24): the one owner of every sound reference and its volume. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Audio")
+	FGameAudio Audio;
 
 	/** bPrologueMaps, with both prologue maps set. */
 	bool ArePrologueMapsOn() const { return bPrologueMaps && !PrologueHomeMap.IsNull() && !PrologueArrivalMap.IsNull(); }

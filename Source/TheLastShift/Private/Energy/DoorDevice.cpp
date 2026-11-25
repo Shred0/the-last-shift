@@ -103,6 +103,7 @@ void ADoorDevice::BeginPlay()
 	Panel->SetRenderCustomDepth(true);
 	Panel->SetCustomDepthStencilValue(UTheLastShiftSettings::GetInteractableScanChannel());
 	bOpen = true; // so SetOpen(false) below applies the closed state
+	bCloseAnnounced = true; // the closed state it starts in is no movement: nothing announced
 	SetOpen(false);
 	Super::BeginPlay();
 }
@@ -181,4 +182,27 @@ void ADoorDevice::SetOpen(bool bNewOpen)
 	Panel->SetVisibility(!bNewOpen);
 	UE_LOG(LogEnergy, Log, TEXT("%s: %s."), *GetName(), bNewOpen ? TEXT("open") : TEXT("closed"));
 	OnOpenChanged.Broadcast(bNewOpen);
+	// A close announced when it began (AnnounceCloseStarted) is not announced again now that it is closed.
+	const bool bAnnounced = !bNewOpen && bCloseAnnounced;
+	bCloseAnnounced = false;
+	if (!bAnnounced)
+	{
+		// At once: no end follows.
+		OnMotionStarted.Broadcast(this, bNewOpen, false);
+	}
+}
+
+void ADoorDevice::AnnounceCloseStarted()
+{
+	if (!bOpen || bCloseAnnounced)
+	{
+		return;
+	}
+	bCloseAnnounced = true;
+	OnMotionStarted.Broadcast(this, false, true);
+}
+
+void ADoorDevice::AnnounceMotionEnded()
+{
+	OnMotionEnded.Broadcast(this);
 }

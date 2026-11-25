@@ -6,9 +6,12 @@
 #include "Energy/PowerTerminal.h"
 #include "LogTerminal.generated.h"
 
+class ALogTerminal;
 class ULogDisplayWidget;
 class UStaticMesh;
 class UWidgetComponent;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLogTerminalRead, ALogTerminal*, Terminal);
 
 /**
  * A terminal of the twin structure that holds the other humanity's logs. Paid once (Cost, Normal time, like any
@@ -38,6 +41,10 @@ public:
 	virtual bool OffersPayment() const override { return !bUnlocked; }
 	virtual bool OffersRead() const override { return bUnlocked && Entries.Num() > 0; }
 	virtual EPaymentKind GetPaymentKind() const override { return EPaymentKind::Log; }
+
+	/** An Interact at the unlocked terminal showed its next entry, for free (a payment fires OnActivated instead). */
+	UPROPERTY(BlueprintAssignable, Category = "Terminal|Events")
+	FOnLogTerminalRead OnRead;
 
 	UFUNCTION(BlueprintPure, Category = "Terminal|Logs")
 	bool IsUnlocked() const { return bUnlocked; }

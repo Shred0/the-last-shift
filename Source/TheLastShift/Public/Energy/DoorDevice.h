@@ -13,6 +13,15 @@ class UStaticMeshComponent;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDoorOpenChanged, bool, bOpen);
 
 /**
+ * Something that closes an opening (a door, a hatch) starts to open (bOpening) or to close. bTimed: the motion takes time
+ * and its end is announced by OnMotionEnded; false: it opens or closes at once, and nothing follows.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnMotionStarted, AActor*, Mover, bool, bOpening, bool, bTimed);
+
+/** A timed motion (OnMotionStarted with bTimed) has ended: the opening is fully open or closed. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMotionEnded, AActor*, Mover);
+
+/**
  * A door of the twin structure: a blocking volume and a panel mesh, open while powered. When the power goes (time ran
  * out, or a time jump) it closes, but never on someone: while a pawn overlaps the Doorway volume it stays open and
  * closes as soon as the doorway is clear.
@@ -51,6 +60,18 @@ public:
 	FOnDoorOpenChanged OnOpenChanged;
 
 	/**
+	 * The door starts to open or to close: when it opens or closes (at once, bTimed false), except that a close announced
+	 * earlier by AnnounceCloseStarted (the home's entry door, which lowers its panel over time: bTimed true) is not
+	 * announced again.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Door|Events")
+	FOnMotionStarted OnMotionStarted;
+
+	/** A timed close announced by AnnounceCloseStarted has ended (AnnounceMotionEnded). Doors that move at once never fire it. */
+	UPROPERTY(BlueprintAssignable, Category = "Door|Events")
+	FOnMotionEnded OnMotionEnded;
+
+	/**
 	 * Optional modelled panel, made at the panel's size with its pivot at its bottom centre: when set, Panel shows it at
 	 * scale 1 instead of the engine's cube scaled to the door. Only the look changes: Panel keeps its visibility, its scan
 	 * channel and its place, and Blocker blocks as before. Empty (the default): nothing changes.
@@ -70,6 +91,15 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void OnPowerStateChanged(bool bNowPowered) override;
+
+	/**
+	 * A close that takes time starts now, before the door is closed: OnMotionStarted(false, timed) now, and not again when
+	 * it closes; AnnounceMotionEnded ends it.
+	 */
+	void AnnounceCloseStarted();
+
+	/** The timed close announced by AnnounceCloseStarted has ended: OnMotionEnded. */
+	void AnnounceMotionEnded();
 
 	/** Blocks pawns while the door is closed; its extent is the door's size. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door")
@@ -93,4 +123,7 @@ private:
 
 	bool bOpen = false;
 	bool bClosePending = false;
+
+	/** OnMotionStarted(false) already fired for the coming close. */
+	bool bCloseAnnounced = false;
 };

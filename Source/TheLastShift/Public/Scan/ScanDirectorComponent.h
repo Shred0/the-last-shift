@@ -12,6 +12,7 @@
 class ULidarScanComponent;
 class UTimeStateSubsystem;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDirectedScanStarted, int32, ScanIndex, float, Timestamp);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDirectedScanCompleted, int32, ScanIndex, float, Timestamp);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDirectedScanReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDirectedBeat, int32, BeatIndex);
@@ -184,6 +185,10 @@ public:
 
 	// --- Events ---
 
+	/** Re-broadcast of the lidar component's OnScanStarted (every scan, automatic or requested), the frame it is issued. */
+	UPROPERTY(BlueprintAssignable, Category = "Scan|Events")
+	FOnDirectedScanStarted OnScanStarted;
+
 	/** Re-broadcast of the lidar component's OnScanCompleted (every scan, automatic or requested). */
 	UPROPERTY(BlueprintAssignable, Category = "Scan|Events")
 	FOnDirectedScanCompleted OnScanCompleted;
@@ -215,6 +220,9 @@ protected:
 private:
 	UFUNCTION()
 	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
+
+	UFUNCTION()
+	void HandleLidarScanStarted(int32 ScanIndex, float Timestamp);
 
 	UFUNCTION()
 	void HandleLidarScanCompleted(int32 ScanIndex, float Timestamp);

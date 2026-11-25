@@ -43,6 +43,9 @@ struct THELASTSHIFT_API FRunSceneLine
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnSceneLineStarted, FName, Scene, int32, Index, ESceneVoice, Voice, FName, Cue);
 
+/** The prologue's or the ending's screen opened over the main menu (bOpen) or closed. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSceneScreenChanged, FName, Scene, bool, bOpen);
+
 /**
  * The run's full-screen text scenes: the prologue before area 1 and the ending after area 4, both on StdCore's text scene
  * screen, both without a pawn.
@@ -123,6 +126,23 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Scenes")
 	FOnSceneLineStarted OnSceneLineStarted;
 
+	/** OpenPrologue or OpenEnding opened its screen (bOpen), or that screen closed (back to the main menu). */
+	UPROPERTY(BlueprintAssignable, Category = "Scenes")
+	FOnSceneScreenChanged OnSceneScreenChanged;
+
+	/** A screen opened by OpenPrologue or OpenEnding is still shown (it has neither closed nor gone with its world). */
+	UFUNCTION(BlueprintPure, Category = "Scenes")
+	bool IsSceneScreenOpen() const;
+
 private:
+	/** Tracks Screen until it closes, and says it opened. */
+	void TrackScreen(UStdScreenWidget* Screen, FName Scene);
+
+	UFUNCTION()
+	void HandleSceneScreenClosed(UStdScreenWidget* Screen);
+
 	bool bEndingPending = false;
+
+	/** The screens OpenPrologue and OpenEnding opened, and their scene, until they close. */
+	TMap<TWeakObjectPtr<UStdScreenWidget>, FName> OpenScreens;
 };
