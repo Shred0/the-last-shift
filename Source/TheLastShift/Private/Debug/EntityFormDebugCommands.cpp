@@ -14,6 +14,7 @@
 // It puts back the run's state, the residues, the entity's tuning, the settings and the session's form. Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
 #include "Area/AreaGenerator.h"
 #include "Area/AreaInfo.h"
 #include "Area/AreaTypes.h"
@@ -635,6 +636,7 @@ namespace EntityFormDebug
 
 	static void Cleanup()
 	{
+		EntityWallsTest::Restore(TEXT("tls.EntityFormCheck"));
 		RestoreResidues();
 		GetMutableDefault<UTheLastShiftSettings>()->EntityForms = G.SavedForms;
 		if (UTimeStateSubsystem* T = TS(); T && T->IsStopped())
@@ -751,6 +753,8 @@ namespace EntityFormDebug
 			G.SavedSessionForm = AEntity::GetSessionForm();
 			G.SavedForms = Settings->EntityForms;
 			GRun.Cleanup = &Cleanup;
+			// Brief 30: no entity wall for the run: it counts the injected points of the figure, the trail and the residues.
+			EntityWallsTest::SwitchOff(TEXT("tls.EntityFormCheck"));
 			Run()->SetEntityFound(false, TEXT("tls.EntityFormCheck: start"));
 			Run()->SetFirstContact(false, TEXT("tls.EntityFormCheck: start"));
 			E->Speed = 0.f;

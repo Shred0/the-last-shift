@@ -41,6 +41,20 @@ struct THELASTSHIFT_API FActTuning
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act")
 	EEntityForm EntityForm = EEntityForm::Procedural;
+
+	/**
+	 * Brief 30: the entity's walls a Stop raises in this act, at most (the limits may leave fewer). 0 switches walls off for
+	 * the act. The first is strategic, the others random (EntityForms' wall values).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 WallCount = 2;
+
+	/**
+	 * Brief 30: points of each wall in a scan. The figure, the trail, the area's residues and WallCount walls together stay
+	 * under the lidar's cap on injected points in a scan (4096); lower this, never the figure's points, where they do not.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act", meta = (ClampMin = "10", ClampMax = "1000"))
+	int32 WallPoints = 250;
 };
 
 /** Brief 29: one modelled form of the entity's figure: the mesh its points are sampled from and how many points it has. */
@@ -73,6 +87,18 @@ struct THELASTSHIFT_API FEntityFormTuning
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity", meta = (ClampMin = "-180.0", ClampMax = "180.0", Units = "deg"))
 	float YawOffsetDeg = 0.f;
+
+	/** Brief 30: strands of extension that cross a wall's opening (edge to edge, floor to ceiling, side to side). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "1", ClampMax = "32"))
+	int32 WallStrands = 9;
+
+	/** How far a strand bows from its straight line, in the opening's plane, as a share of its length (0 straight, 0.5 a half circle). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float WallBow = 0.f;
+
+	/** A strand's thickness: its points are jittered this far round its line, anew for every scan. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "50.0", Units = "cm"))
+	float WallThickness = 4.f;
 };
 
 /** Brief 29: the modelled forms of the entity's figure. The one owner of the forms' meshes and point counts. */
@@ -84,6 +110,29 @@ struct THELASTSHIFT_API FEntityForms
 	/** Off: every act shows the procedural figure (FEntityFigureShape), with its own point count. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")
 	bool bModelledFigure = true;
+
+	/**
+	 * Brief 30: the entity's walls. Off, the entity is as it was before them: no candidate chosen, no point, no collision. On,
+	 * a Stop with the entity awake raises up to its act's WallCount walls, chosen at the start of the Stop, gone when it ends.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls")
+	bool bEntityWalls = true;
+
+	/** The random walls are drawn among the candidate passages within this path distance of the player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "1.0", ClampMax = "500.0", Units = "m"))
+	float WallRangeM = 60.f;
+
+	/** No wall closer than this path distance to the player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "100.0", Units = "m"))
+	float WallMinDistanceM = 8.f;
+
+	/** A passage closer than this to a terminal or a gate's door is never a candidate, so that no device is inside a wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "2000.0", Units = "cm"))
+	float WallClearOfDevices = 200.f;
+
+	/** Thickness of the volume that blocks the player across a wall's opening while Stopped. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "5.0", ClampMax = "200.0", Units = "cm"))
+	float WallBlockDepth = 30.f;
 
 	/** One entry for each modelled form (Procedural has no entry). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")

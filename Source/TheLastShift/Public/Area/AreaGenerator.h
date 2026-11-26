@@ -569,6 +569,14 @@ public:
 	/** The exit corridor's end edge: the collision-only box that keeps the player from walking off it (no dressing, never rendered). */
 	const TArray<FBox>& GetOpenEndBoxes() const { return OpenEndBoxes; }
 
+	/**
+	 * Brief 30: the passages of the current plan (route joints with closed segments, dead-end mouths, the middles of walkways
+	 * between platforms), read from the finished plan with no random draw. They are a query: nothing is placed or moved for
+	 * them and they are not part of the layout hash. Every joint is listed, the exit corridor's included: what may hold an
+	 * entity's wall is the entity's to decide.
+	 */
+	const TArray<FAreaPassage>& GetPassages() const { return Passages; }
+
 	/** Seed of the current (or last) attempt. */
 	UFUNCTION(BlueprintPure, Category = "Area")
 	int32 GetSeed() const { return Seed; }
@@ -973,6 +981,8 @@ private:
 	float RouteLength = 0.f;
 	float RouteLengthBeforeWayOut = 0.f;
 	TArray<FBox> OpenEndBoxes;
+	/** Brief 30: the plan's passages (GetPassages). */
+	TArray<FAreaPassage> Passages;
 	float TimeToReadySeconds = 0.f;
 	double GenerationStartTime = 0.0;
 	double PhaseStartTime = 0.0;

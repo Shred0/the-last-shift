@@ -6,6 +6,7 @@
 
 #include "Debug/HomeTestListener.h"
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
 #include "Area/AreaGenerator.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Button.h"
@@ -89,8 +90,17 @@ namespace HomeDebug
 		UE_LOG(LogTheLastShift, Log, TEXT("%s   ..  %s"), *GRun.Name, *What);
 	}
 
+	/** Brief 30: this run switched the entity's walls off (EntityWallsTest), to put back at its end. */
+	static bool GWallsOff = false;
+
 	static void Finish(const TCHAR* Why)
 	{
+		// Brief 30: the walls go back to the session's switch.
+		if (GWallsOff)
+		{
+			EntityWallsTest::Restore(TEXT("tls.HomeTest"));
+			GWallsOff = false;
+		}
 		if (GRun.Listener)
 		{
 			GRun.Listener->Unbind();
@@ -808,6 +818,12 @@ namespace HomeDebug
 			return false;
 		}
 		GRun = FRun();
+		// Brief 30: no entity wall for the run (it awakens the entity and measures contacts and grazes).
+		if (!GWallsOff)
+		{
+			EntityWallsTest::SwitchOff(TEXT("tls.HomeTest"));
+			GWallsOff = true;
+		}
 		GRun.Name = Name;
 		GRun.Steps = MoveTemp(Steps);
 		GRun.bRunning = true;

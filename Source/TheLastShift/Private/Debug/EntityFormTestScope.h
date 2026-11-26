@@ -13,6 +13,52 @@
 
 #if !UE_BUILD_SHIPPING
 
+// Brief 30: the tests that measure the entity or walk a route while Stopped switch the entity's walls off for their run and
+// put the session's switch back at the end (ForceAreaOneForm and Restore do it too), so that their poses and counts keep
+// their meaning.
+namespace EntityWallsTest
+{
+	struct FState
+	{
+		int32 Depth = 0;
+		TOptional<bool> Saved;
+	};
+
+	inline FState& State()
+	{
+		static FState Instance;
+		return Instance;
+	}
+
+	/** Every entity raises no wall until Restore; nested calls keep the first saved switch. */
+	inline void SwitchOff(const TCHAR* Test)
+	{
+		FState& S = State();
+		if (S.Depth++ == 0)
+		{
+			S.Saved = AEntity::GetSessionWalls();
+			UE_LOG(LogTheLastShift, Log, TEXT("%s: the entity's walls are off for the run."), Test);
+		}
+		AEntity::SetSessionWalls(false);
+	}
+
+	/** Puts back the session's switch saved by the first SwitchOff. No-op without one. */
+	inline void Restore(const TCHAR* Test)
+	{
+		FState& S = State();
+		if (S.Depth <= 0)
+		{
+			return;
+		}
+		if (--S.Depth == 0)
+		{
+			AEntity::SetSessionWalls(S.Saved);
+			UE_LOG(LogTheLastShift, Log, TEXT("%s: the entity's walls are %s again."), Test, S.Saved.IsSet() ? (S.Saved.GetValue() ? TEXT("on (session)") : TEXT("off (session)")) : TEXT("as the settings say"));
+			S.Saved.Reset();
+		}
+	}
+}
+
 namespace EntityFormTest
 {
 	struct FState
@@ -37,6 +83,7 @@ namespace EntityFormTest
 		}
 		const EEntityForm Form = UTheLastShiftSettings::Get()->GetEntityFormOfAct(1);
 		AEntity::SetSessionForm(Form);
+		EntityWallsTest::SwitchOff(Test);
 		UE_LOG(LogTheLastShift, Log, TEXT("%s: the entity's figure takes area 1's form (%s) for the run."), Test, LexToString(Form));
 	}
 
@@ -48,6 +95,7 @@ namespace EntityFormTest
 		{
 			return;
 		}
+		EntityWallsTest::Restore(Test);
 		if (--S.Depth == 0)
 		{
 			AEntity::SetSessionForm(S.Saved);

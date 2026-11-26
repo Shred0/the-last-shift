@@ -302,6 +302,10 @@ namespace AreaGen
 		bool bTwinRoom = false;
 		FVector2D Mouth = FVector2D::ZeroVector;
 		int32 EnterDir = 0;
+		// Brief 30: the passages inside the segment (walkways between platforms, dead-end mouths, the twin AI's room's inner
+		// doorway), recorded where the planner builds them; a record only, no draw: the plan does not change.
+		struct FPassageRec { EAreaPassageKind Kind = EAreaPassageKind::Walkway; FVector2D Centre = FVector2D::ZeroVector; int32 Dir = 0; float HalfWidth = 0.f; };
+		TArray<FPassageRec> Passages;
 	};
 
 	struct FSpot
@@ -614,6 +618,7 @@ namespace AreaGen
 				RoomLeg.Dir = Dir;
 				RoomLeg.Length = Side;
 				Room.Legs = { PassageLeg, RoomLeg };
+				Room.Passages.Add({ EAreaPassageKind::RoomMouth, Head + F * Passage, Dir, W * 0.5f });
 				TArray<FIntPoint> Cells;
 				CellsIn(PassageLeg.Rect, Cells);
 				CellsIn(RoomLeg.Rect, Cells);
@@ -876,6 +881,11 @@ namespace AreaGen
 
 			if (!Body.Seg.bClosed)
 			{
+				// Brief 30: the middle of each leg of a catwalk is a walkway's passage.
+				for (const FLeg& Leg : Body.Seg.Legs)
+				{
+					Body.Seg.Passages.Add({ EAreaPassageKind::Walkway, Leg.Start + DirV(Leg.Dir) * (Leg.Length * 0.5f), Leg.Dir, W * 0.5f });
+				}
 				// Spur candidates: both sides of every leg, away from its ends.
 				for (const FLeg& Leg : Body.Seg.Legs)
 				{
@@ -1135,7 +1145,11 @@ namespace AreaGen
 				const int32 D = DirOf(PB - PA);
 				const FBox2D Walk = MakeRect(PA, D, 0.0, FVector2D::Distance(PA, PB), -CW * 0.5, CW * 0.5);
 				CellsIn(Walk, Body.FloorCells);
+				// Brief 30: the walkway's middle, between its two platforms.
+				Body.Seg.Passages.Add({ EAreaPassageKind::Walkway, (PA + PB) * 0.5, D, CW * 0.5f });
 			}
+			// Kept is a set: the walkways' passages in a fixed order, as the cells.
+			Body.Seg.Passages.Sort([](const FSeg::FPassageRec& X, const FSeg::FPassageRec& Y) { return X.Centre.Y != Y.Centre.Y ? X.Centre.Y < Y.Centre.Y : X.Centre.X < Y.Centre.X; });
 			// Kept is a set: sort the cells so the plan does not depend on hashing.
 			Body.FloorCells.Sort([](const FIntPoint& X, const FIntPoint& Y) { return X.Y != Y.Y ? X.Y < Y.Y : X.X < Y.X; });
 
@@ -1293,6 +1307,9 @@ namespace AreaGen
 					{
 						Plan.Commit(Cells, Index, EKind::Floor);
 						++S.Spurs;
+						// Brief 30: the side passage's mouth, on the corridor's wall line.
+						S.Passages.Add({ EAreaPassageKind::SideMouth, Leg.Start + DirV(Leg.Dir) * At + DirV(LeftOf(Leg.Dir)) * (Side * W * 0.5f),
+							Side > 0 ? LeftOf(Leg.Dir) : Opposite(LeftOf(Leg.Dir)), DW * 0.5f });
 						FSpot Spot;
 						Spot.Pos = Leg.Start + DirV(Leg.Dir) * At + DirV(LeftOf(Leg.Dir)) * (Side * (W * 0.5f + Len - DW * 0.5f));
 						Spot.Segment = Index;
@@ -1339,6 +1356,8 @@ namespace AreaGen
 				{
 					Plan.Commit(UniqueCells, Index, EKind::Floor);
 					++S.Spurs;
+					// Brief 30: the middle of the spur's catwalk, between its parent and its platform.
+					S.Passages.Add({ EAreaPassageKind::Walkway, C.Attach + DirV(C.Dir) * (Len * 0.5f), C.Dir, SW * 0.5f });
 					FSpot Spot;
 					Spot.Pos = PlatformCenter;
 					Spot.Segment = Index;
@@ -4188,6 +4207,7 @@ int32 AAreaGenerator::ClearArea()
 	{
 		return 0;
 	}
+	Passages.Reset();
 	TArray<AActor*> ToRemove;
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
@@ -4707,6 +4727,94 @@ void AAreaGenerator::FitNavigationBounds()
 
 // --- One attempt ---
 
+namespace AreaGen
+{
+	/** Brief 30: how far the walkable floor reaches on either side of P across Across (to the first cell that is not floor). */
+	static void MeasureAcross(const FPlan& Plan, const FVector2D& P, const FVector2D& Across, double& OutMinus, double& OutPlus)
+	{
+		auto Extent = [&Plan, &P](const FVector2D& Way)
+		{
+			for (double D = Cell * 0.25; D <= 4000.0; D += Cell * 0.5)
+			{
+				const FVector2D Q = P + Way * D;
+				if (!Plan.IsFloor(FIntPoint(FMath::FloorToInt(Q.X / Cell), FMath::FloorToInt(Q.Y / Cell))))
+				{
+					return D - Cell * 0.25;
+				}
+			}
+			return 4000.0;
+		};
+		OutMinus = Extent(-Across);
+		OutPlus = Extent(Across);
+	}
+
+	/**
+	 * Brief 30: the plan's passages, from the finished plan with no random draw. The route's joints with a closed segment, in
+	 * route order (the opening is the narrower side's, measured on the plan's cells), then the passages each segment recorded
+	 * (walkways between platforms, dead-end mouths, the twin AI's room's inner doorway), segment by segment.
+	 */
+	static void BuildPassages(const FPlan& Plan, TArray<FAreaPassage>& Out)
+	{
+		Out.Reset();
+		auto Make = [&Plan, &Out](EAreaPassageKind Kind, const FVector2D& Centre, const FVector2D& Along, double HalfWidth, int32 Segment, int32 Other)
+		{
+			FAreaPassage P;
+			P.Kind = Kind;
+			P.Centre = FVector(Centre.X, Centre.Y, 0.0);
+			P.Along = FVector(Along.X, Along.Y, 0.0);
+			P.Across = FVector(-Along.Y, Along.X, 0.0);
+			P.HalfWidth = static_cast<float>(HalfWidth);
+			P.Segment = Segment;
+			P.OtherSegment = Other;
+			P.RouteDistance = Plan.Project(Centre);
+			Out.Add(P);
+		};
+		for (int32 I = 1; I < Plan.Route.Num() && I < Plan.RouteSeg.Num(); ++I)
+		{
+			const int32 A = Plan.RouteSeg[I - 1];
+			const int32 B = Plan.RouteSeg[I];
+			if (A == B || !Plan.Segs.IsValidIndex(A) || !Plan.Segs.IsValidIndex(B))
+			{
+				continue;
+			}
+			const FSeg& SA = Plan.Segs[A];
+			const FSeg& SB = Plan.Segs[B];
+			if (!SA.bClosed && !SB.bClosed)
+			{
+				continue;
+			}
+			const EAreaPassageKind Kind = (SA.Type == EAreaSegmentType::Gate || SB.Type == EAreaSegmentType::Gate) ? EAreaPassageKind::GateMouth
+				: (SA.Type == EAreaSegmentType::Room || SB.Type == EAreaSegmentType::Room) ? EAreaPassageKind::RoomMouth : EAreaPassageKind::CorridorMouth;
+			const FVector2D Along = DirV(DirOf(Plan.Route[I] - Plan.Route[I - 1]));
+			const FVector2D Across(-Along.Y, Along.X);
+			const FVector2D At = Plan.Route[I];
+			double Minus = 0.0;
+			double Plus = 0.0;
+			double Best = TNumericLimits<double>::Max();
+			for (const double Side : { -1.0, 1.0 })
+			{
+				double M = 0.0;
+				double P = 0.0;
+				MeasureAcross(Plan, At + Along * (Side * Cell * 0.5), Across, M, P);
+				if (M + P < Best)
+				{
+					Best = M + P;
+					Minus = M;
+					Plus = P;
+				}
+			}
+			Make(Kind, At + Across * ((Plus - Minus) * 0.5), Along, (Minus + Plus) * 0.5, A, B);
+		}
+		for (int32 S = 0; S < Plan.Segs.Num(); ++S)
+		{
+			for (const FSeg::FPassageRec& R : Plan.Segs[S].Passages)
+			{
+				Make(R.Kind, R.Centre, DirV(R.Dir), R.HalfWidth, S, -1);
+			}
+		}
+	}
+}
+
 bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 {
 	using namespace AreaGen;
@@ -4786,6 +4894,17 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	}
 	FBuilder& Builder = *Built;
 	const FPlan& Plan = Builder.Plan;
+	// Brief 30: the passages, read from the finished plan (no draw: the stream below is the same as before).
+	BuildPassages(Plan, Passages);
+	{
+		int32 ByKind[5] = { 0, 0, 0, 0, 0 };
+		for (const FAreaPassage& P : Passages)
+		{
+			++ByKind[FMath::Clamp(static_cast<int32>(P.Kind), 0, 4)];
+		}
+		UE_LOG(LogArea, Log, TEXT("%s: PASSAGES act %d seed %d: %d (corridor mouths %d, room mouths %d, gate mouths %d, side mouths %d, walkways %d)."), *GetName(), Act, InSeed,
+			Passages.Num(), ByKind[0], ByKind[1], ByKind[2], ByKind[3], ByKind[4]);
+	}
 	FGeometryPlan Geometry;
 	BuildGeometry(*this, Plan, Builder.Rng, Geometry);
 

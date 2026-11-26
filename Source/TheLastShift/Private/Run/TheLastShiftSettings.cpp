@@ -187,6 +187,8 @@ bool UTheLastShiftSettings::GetActTuning(int32 Act, FActTuning& OutTuning) const
 	OutTuning.JumpHomeSeconds = FMath::Clamp(Tuning->JumpHomeSeconds, 0.0, 1.0e12);
 	OutTuning.JumpBatteryDrop = FMath::Clamp(Tuning->JumpBatteryDrop, 0.0, 1.0);
 	OutTuning.EntityForm = GetEntityFormOfAct(Act);
+	OutTuning.WallCount = FMath::Clamp(Tuning->WallCount, 0, 4);
+	OutTuning.WallPoints = FMath::Clamp(Tuning->WallPoints, 10, 1000);
 	return true;
 }
 

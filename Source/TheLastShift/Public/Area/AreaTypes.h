@@ -284,6 +284,68 @@ struct THELASTSHIFT_API FAreaFloorRect
 	bool bOpen = false;
 };
 
+/** What kind of place a passage of the plan is (Brief 30: where the entity's walls may stand). */
+UENUM(BlueprintType)
+enum class EAreaPassageKind : uint8
+{
+	/** The route's joint with a closed corridor (neither side a room or a gate). */
+	CorridorMouth,
+	/** The route's joint with a room: a doorway (and the twin AI's room's inner doorway). */
+	RoomMouth,
+	/** The route's joint with a gate: one of the gate's two openings (never the door's own place). */
+	GateMouth,
+	/** The mouth of a closed corridor's dead-end side passage. */
+	SideMouth,
+	/** The middle of a walkway or catwalk between two platforms: a web hall's walkway, a spur's catwalk, a catwalk's leg. */
+	Walkway
+};
+
+THELASTSHIFT_API const TCHAR* LexToString(EAreaPassageKind Kind);
+
+/**
+ * Brief 30: a place of the finished plan where the walkable space narrows to one opening, read from the plan with no random
+ * draw (AAreaGenerator::GetPassages). It changes nothing of the plan, the layout hash or the validation. The opening is a
+ * vertical rectangle at Centre (floor height), HalfWidth either way along Across, from the floor up; Along is the way through.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FAreaPassage
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	EAreaPassageKind Kind = EAreaPassageKind::CorridorMouth;
+
+	/** Middle of the opening, on the floor. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	FVector Centre = FVector::ZeroVector;
+
+	/** The way through (unit, horizontal): from Segment into OtherSegment for a joint, along the walkway for a walkway. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	FVector Along = FVector(1.0, 0.0, 0.0);
+
+	/** Across the opening (unit, horizontal). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	FVector Across = FVector(0.0, 1.0, 0.0);
+
+	/** Half the opening's width: wall to wall, or curb to curb. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area", meta = (Units = "cm"))
+	float HalfWidth = 0.f;
+
+	/** The segment the passage belongs to (a joint: the one before it along the route). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	int32 Segment = -1;
+
+	/** A joint: the segment after it along the route; -1 for a passage inside one segment. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	int32 OtherSegment = -1;
+
+	/** Route distance of the centreline point nearest to Centre. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area", meta = (Units = "cm"))
+	float RouteDistance = 0.f;
+
+	bool IsJoint() const { return OtherSegment >= 0; }
+};
+
 /** What the area rules need to know about the player pawn, read from the world's game mode default pawn (its one owner). */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FAreaPawnMetrics

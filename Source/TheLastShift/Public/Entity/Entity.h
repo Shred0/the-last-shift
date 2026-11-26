@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Entity/EntityForm.h"
+#include "Entity/EntityWall.h"
 #include "GameFramework/Actor.h"
 #include "LidarPointSource.h"
 #include "Time/TimeState.h"
@@ -137,6 +138,18 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityContact);
  * and its front along the direction of travel, upright; the procedural humanoid refracted in RefractionCount copies around
  * the vertical axis through its head stays as the fallback (modelled figures off, or the form's mesh missing). Only the
  * look depends on the form.
+ *
+ * Brief 30, its third thing a scan can show: walls. While awake, at the start of each Stop it raises up to its act's
+ * WallCount walls (ActTuning) across passages of the area (AAreaGenerator::GetPassages, filtered: never in or at the exit
+ * corridor, at a gate's door or within WallClearOfDevices of a terminal): the first strategic, at the passage the player's
+ * path crosses on the way to the nearest residue not collected or terminal still offering a payment (ahead along the route
+ * first, else behind), never the same passage two Stops in a row; the others drawn from its own wall stream among the
+ * candidates within WallRangeM of path. No wall within WallMinDistanceM of path of the player or across where they stand,
+ * none on the player's way to the regenerating residue of a gate still ahead, and one way out of the player's segment stays
+ * open; a wall the limits leave no passage for is not raised. Each is an AEntityWall: strands of the entity's points (the
+ * act's form's look, EntityForms) and a volume that blocks the player's pawn only, for that Stop only. Its points are the
+ * entity's (the same colour, shown by the latest scan only) and never part of the figure: no sighting, contact or graze.
+ * One switch, EntityForms.bEntityWalls; off, the entity is as it was without them.
  *
  * Dormant until UTimeStateSubsystem's cumulative stopped time reaches AwakenThresholdSeconds; the check runs on the
  * director's beats, so it always awakens (and first appears) on a beat. Once awake it appears on every Stop at a
@@ -339,6 +352,60 @@ public:
 	/** The session's form for every entity (tls.Entity.Form, tests); unset = each act's own. */
 	static void SetSessionForm(TOptional<EEntityForm> Form);
 	static TOptional<EEntityForm> GetSessionForm();
+
+	// --- Walls (Brief 30) ---
+
+	/** True when walls are on now: the session's switch (tls.Entity.Walls) or EntityForms.bEntityWalls, and a wall count above 0. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Walls")
+	bool AreWallsOn() const;
+
+	/** Walls a Stop raises at most now: the session's count, or the act's WallCount (ActTuning). */
+	UFUNCTION(BlueprintPure, Category = "Entity|Walls")
+	int32 GetWallCountNow() const;
+
+	/** Points of each wall now: the act's WallPoints (ActTuning). */
+	UFUNCTION(BlueprintPure, Category = "Entity|Walls")
+	int32 GetWallPointsNow() const;
+
+	/** The walls standing now (the current Stop's). */
+	TArray<AEntityWall*> GetWalls() const;
+
+	/** The area's candidate passages, excluded ones included with their reason (computed once a layout). */
+	const TArray<FEntityWallCandidate>& GetWallCandidates();
+
+	/** What the last choice of walls did. */
+	const FEntityWallReport& GetLastWallReport() const { return LastWallReport; }
+
+	/** Wall points returned by the last GatherLidarPoints (before the lidar's occlusion). */
+	UFUNCTION(BlueprintPure, Category = "Entity|Walls")
+	int32 GetLastGatheredWallPoints() const { return LastGatheredWallPoints; }
+
+	/** Stops the entity has seen begin (the wall reports' StopSerial). */
+	int32 GetStopSerial() const { return StopSerial; }
+
+	/** The session's switch and count for every entity (tls.Entity.Walls, tests); unset = EntityForms.bEntityWalls and each act's WallCount. */
+	static void SetSessionWalls(TOptional<bool> bOn);
+	static TOptional<bool> GetSessionWalls();
+	static void SetSessionWallCount(TOptional<int32> Count);
+	static TOptional<int32> GetSessionWallCount();
+
+	/**
+	 * Tests and tools: raises walls at these candidates now (indices into GetWallCandidates), in place of the Stop's choice,
+	 * whatever the limits say. Needs time Stopped; the Stop's end removes them as any wall.
+	 */
+	bool RaiseWallsAtForTest(const TArray<int32>& Candidates);
+
+	/** Removes every wall now (the end of a Stop does it). */
+	void ClearWalls(const TCHAR* Why);
+
+	/** True when Path crosses the opening of Passage (from its floor up to Height). */
+	static bool PathCrossesPassage(const TArray<FVector>& Path, const FAreaPassage& Passage, float Height, float* OutAlong = nullptr);
+
+	/** The entity's own navigation query (the one its movement uses): From to To on the navmesh, false when there is no full path. */
+	bool FindNavPath(const FVector& From, const FVector& To, TArray<FVector>& OutPoints, float& OutLength) const { return FindPath(From, To, OutPoints, OutLength); }
+
+	/** Height of a wall: the area generator's WallHeight (its one owner), 400 cm without one. */
+	float GetWallHeight() const;
 
 	// --- Found ---
 
@@ -573,6 +640,31 @@ private:
 	double GetRunSeconds() const;
 
 	void DrawDebug() const;
+
+	/** Brief 30: chooses the Stop's walls and raises them (once a Stop); returns the walls raised. */
+	int32 RaiseWalls(const TCHAR* Why);
+	void RefreshWallCandidates();
+	AEntityWall* SpawnWall(int32 Candidate, bool bStrategic);
+	void GatherWallPoints(const FLidarScanContext& Context, TArray<FLidarInjectedPoint>& OutPoints);
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<AEntityWall>> Walls;
+
+	TArray<FEntityWallCandidate> WallCandidates;
+	int64 WallCandidatesLayout = 0;
+	int32 WallCandidatesPassages = -1;
+	bool bWallCandidatesBuilt = false;
+	FEntityWallReport LastWallReport;
+	FRandomStream WallRng;
+	bool bWallRngInitialized = false;
+	/** The passage of the last Stop's strategic wall (INDEX_NONE when that Stop had none). */
+	int32 LastStrategicPassage = INDEX_NONE;
+	bool bWallsChosenThisStop = false;
+	int32 StopSerial = 0;
+	int32 LastGatheredWallPoints = 0;
+
+	static TOptional<bool> SessionWalls;
+	static TOptional<int32> SessionWallCount;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTimeStateSubsystem> TimeState;

@@ -78,6 +78,7 @@ void AEntity::BeginPlay()
 
 void AEntity::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	ClearWalls(TEXT("end of play"));
 	Unbind();
 	Super::EndPlay(EndPlayReason);
 }
@@ -172,9 +173,13 @@ void AEntity::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, E
 		bContactThisStop = false;
 		bLastStopContact = false;
 		SightingStreak = 0;
+		++StopSerial;
+		bWallsChosenThisStop = false;
 		if (State == EEntityState::Awake)
 		{
 			Manifest(GetSpawnDistanceForNextStop(), TEXT("stop"));
+			// Brief 30: the Stop's walls, chosen now and standing until it ends.
+			RaiseWalls(TEXT("stop"));
 		}
 		return;
 	}
@@ -184,6 +189,8 @@ void AEntity::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, E
 		RecordStopExit(Reason);
 	}
 	Unmanifest();
+	// However the Stop ended, its walls are gone with it.
+	ClearWalls(TEXT("the Stop ended"));
 }
 
 void AEntity::RecordStopExit(EStopExitReason Reason)
@@ -270,6 +277,11 @@ void AEntity::Awaken()
 	{
 		Manifest(GetSpawnDistanceForNextStop(), TEXT("awakening"));
 	}
+	// Brief 30: awakened inside a Stop, it raises that Stop's walls now.
+	if (TimeState && TimeState->IsStopped() && !bWallsChosenThisStop)
+	{
+		RaiseWalls(TEXT("awakening"));
+	}
 }
 
 void AEntity::SetSpawnDistanceForNextStop(float Distance)
@@ -283,6 +295,9 @@ void AEntity::ResetSpawnHistory()
 	SpawnRng.Initialize(SpawnSeed);
 	SpawnRngSeed = SpawnSeed;
 	bSpawnRngInitialized = true;
+	// Brief 30: the walls' own stream starts again with it, and no strategic wall is remembered.
+	bWallRngInitialized = false;
+	LastStrategicPassage = INDEX_NONE;
 }
 
 bool AEntity::SpawnNow(float Distance)
@@ -302,7 +317,12 @@ bool AEntity::SpawnNow(float Distance)
 		State = EEntityState::Awake;
 		OnAwakened.Broadcast();
 	}
-	return Manifest(GetSpawnDistanceForNextStop(), TEXT("SpawnNow"));
+	const bool bManifestedNow = Manifest(GetSpawnDistanceForNextStop(), TEXT("SpawnNow"));
+	if (!bWallsChosenThisStop)
+	{
+		RaiseWalls(TEXT("SpawnNow"));
+	}
+	return bManifestedNow;
 }
 
 // --- Queries ---
@@ -876,10 +896,13 @@ void AEntity::GatherLidarPoints_Implementation(const FLidarScanContext& Context,
 {
 	LastGatheredFigurePoints = 0;
 	LastGatheredTrailPoints = 0;
+	LastGatheredWallPoints = 0;
 	if (!bManifested || !TimeState || !TimeState->IsStopped())
 	{
 		// A scan without the figure is not a clear sighting: the row starts again.
 		SightingStreak = 0;
+		// Brief 30: the Stop's walls stand even when the figure failed to appear.
+		GatherWallPoints(Context, OutPoints);
 		return;
 	}
 
@@ -926,6 +949,9 @@ void AEntity::GatherLidarPoints_Implementation(const FLidarScanContext& Context,
 		SegmentStart += Length;
 	}
 	LastGatheredTrailPoints = OutPoints.Num() - FirstTrail;
+
+	// Brief 30: the walls' points, after the figure's and the trail's: no part of the figure, so the check below never sees them.
+	GatherWallPoints(Context, OutPoints);
 
 	// Until it is found: did this scan keep more than ClearSightingShare of the figure (never the trail)? ClearSightingScans
 	// such scans in a row make a clear sighting, and the Stop has it.

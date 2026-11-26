@@ -18,6 +18,7 @@
 // hatches' pitch, the falloff and the music's fades for the session. Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
 #include "Area/AreaExit.h"
 #include "Area/AreaGenerator.h"
 #include "Audio/GameAudioSubsystem.h"
@@ -389,8 +390,17 @@ namespace AudioDebug
 
 	// --- Finish ---
 
+	/** Brief 30: this run switched the entity's walls off (EntityWallsTest), to put back at its end. */
+	static bool GWallsOff = false;
+
 	static void Finish(const TCHAR* Why)
 	{
+		// Brief 30: the walls go back to the session's switch.
+		if (GWallsOff)
+		{
+			EntityWallsTest::Restore(TEXT("tls.AudioTest"));
+			GWallsOff = false;
+		}
 		GRun.bRunning = false;
 		StopCountingWarnings();
 		for (const TWeakObjectPtr<AActor>& Actor : GRun.Spawned)
@@ -1667,6 +1677,12 @@ namespace AudioDebug
 			FTSTicker::RemoveTicker(GRun.Ticker);
 		}
 		GRun = FRun();
+		// Brief 30: no entity wall for the run (it awakens the entity and measures contacts and grazes).
+		if (!GWallsOff)
+		{
+			EntityWallsTest::SwitchOff(TEXT("tls.AudioTest"));
+			GWallsOff = true;
+		}
 		GRun.bQuit = bQuit;
 		GRun.Part = Part;
 		if (Part == TEXT("local"))
