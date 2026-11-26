@@ -151,6 +151,31 @@ struct THELASTSHIFT_API FScanLinks
 };
 
 /**
+ * Scan memory by density, in one place (Brief 25). The scan director pushes these values to the lidar; nothing copies them.
+ * When a scan captures a surface that older scans already cover, the older points of that surface are removed where the
+ * new scan is dense enough there, so a surface never holds much more than one scan's points; what the new scan does not
+ * capture stays. The values live in Config/DefaultGame.ini; the C++ defaults are only a fallback for a missing ini entry
+ * (memory off).
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FScanMemory
+{
+	GENERATED_BODY()
+
+	/**
+	 * The new scan replaces the older points of a surface where its sample spacing on that surface is at most Ratio times
+	 * theirs. 0 = off (scans covering the same surface add up); 2 = a scan from about the same distance or nearer replaces
+	 * them, one from much farther leaves them; a very large value (100000) = the newest scan replaces whatever it captures.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Memory", meta = (ClampMin = "0.0", ClampMax = "100000.0"))
+	float Ratio = 0.f;
+
+	/** How far an older point may lie from the surface the new scan captured and still be on it (on top of its own sampling error). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scan Memory", meta = (ClampMin = "0.0", ClampMax = "50.0", Units = "cm"))
+	float ToleranceCm = 4.f;
+};
+
+/**
  * Every colour of the suit's text, in one place: the home AI's messages, the twin AI's messages, the translation of the
  * logs at a terminal, and the voices of the full-screen text scenes (prologue, endings). Barcode bars take the colour of
  * their voice. None of them is a scan colour. The values live in Config/DefaultGame.ini; the C++ defaults are only a
@@ -733,6 +758,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability")
 	FScanLinks ScanLinks;
 
+	/** Scan memory by density: the ratio and the tolerance. The one owner of those values. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability")
+	FScanMemory ScanMemory;
+
 	/**
 	 * The modelled body of the power terminals (SM_TerminalBody: 40 x 60 x 120 cm, pivot at its base centre, front +X, a
 	 * collision box of that size). The one owner of the reference: every terminal with bModelledBody shows it.
@@ -998,6 +1027,9 @@ public:
 
 	/** ScanLinks of the project settings (clamped where it is pushed, by the lidar). */
 	static const FScanLinks& GetScanLinks() { return Get()->ScanLinks; }
+
+	/** ScanMemory of the project settings (clamped where it is pushed, by the lidar). */
+	static const FScanMemory& GetScanMemory() { return Get()->ScanMemory; }
 
 	/** InteractableScanChannel of the project settings, clamped to [1, 4]. */
 	static int32 GetInteractableScanChannel() { return FMath::Clamp(Get()->InteractableScanChannel, 1, 4); }

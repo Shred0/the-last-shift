@@ -433,6 +433,16 @@ void UScanDirectorComponent::ApplyScanColor()
 	}
 	ApplyScanOcclusion();
 	ApplyScanLinks();
+	ApplyScanMemory();
+}
+
+void UScanDirectorComponent::ApplyScanMemory()
+{
+	if (ULidarScanComponent* Lidar = ResolveLidarScan())
+	{
+		const FScanMemory& Memory = UTheLastShiftSettings::GetScanMemory();
+		Lidar->SetMemory(Memory.Ratio, Memory.ToleranceCm);
+	}
 }
 
 void UScanDirectorComponent::ApplyScanLinks()

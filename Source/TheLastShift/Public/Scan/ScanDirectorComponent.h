@@ -167,6 +167,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Scan")
 	void ApplyScanLinks();
 
+	/**
+	 * Pushes ScanMemory of the project settings (its one owner: ratio and tolerance) to the lidar, from the next scan. Also
+	 * done at BeginPlay and before every scan.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Scan")
+	void ApplyScanMemory();
+
 	/** Owner transform recorded at the last Stop (identity before the first Stop). */
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
 	FTransform GetStopAnchor() const { return StopAnchor; }
@@ -239,7 +246,8 @@ private:
 	/**
 	 * Pushes the scan colour (ScanColors.Scan of the project settings, its one owner) to the lidar, turns its colour
 	 * channels on and gives ScanColors.Interactable to channel InteractableScanChannel (the stencil value of terminals
-	 * and doors), then the occlusion values (ApplyScanOcclusion) and the line values (ApplyScanLinks).
+	 * and doors), then the occlusion values (ApplyScanOcclusion), the line values (ApplyScanLinks) and the memory values
+	 * (ApplyScanMemory).
 	 */
 	void ApplyScanColor();
 

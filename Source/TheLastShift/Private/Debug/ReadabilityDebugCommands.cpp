@@ -2044,12 +2044,50 @@ namespace ReadabilityDebug
 		S.Add(Do(TEXT("area: done"), []() { ResumeTime(); GScene = FScene(); return 0.f; }));
 	}
 
+	// Brief 25 follow-up: the scan memory off for the run (the scan phase expects scan A to keep its points while a scan B of
+	// the same place is alive); the settings' values are put back at the end.
+	static FScanMemory GSavedMemory;
+	static bool bMemoryOffForRun = false;
+
+	static void MemoryOffForRun()
+	{
+		FScanMemory& Memory = GetMutableDefault<UTheLastShiftSettings>()->ScanMemory;
+		GSavedMemory = Memory;
+		bMemoryOffForRun = true;
+		Memory.Ratio = 0.f;
+		if (UScanDirectorComponent* D = Director())
+		{
+			D->ApplyScanMemory();
+		}
+		const ULidarScanComponent* L = Lidar();
+		UE_LOG(LogTheLastShift, Log, TEXT("%s   ..  scan memory off for this run (settings ScanMemory=(Ratio=%.1f,ToleranceCm=%.1f); lidar ratio now %.1f), put back at the end"),
+			*GRun.Name, GSavedMemory.Ratio, GSavedMemory.ToleranceCm, L ? L->MemoryRatio : -1.f);
+	}
+
+	static void RestoreMemory()
+	{
+		if (!bMemoryOffForRun)
+		{
+			return;
+		}
+		GetMutableDefault<UTheLastShiftSettings>()->ScanMemory = GSavedMemory;
+		bMemoryOffForRun = false;
+		if (UScanDirectorComponent* D = Director())
+		{
+			D->ApplyScanMemory();
+		}
+		const ULidarScanComponent* L = Lidar();
+		UE_LOG(LogTheLastShift, Log, TEXT("%s   ..  scan memory back to the settings' values: ScanMemory=(Ratio=%.1f,ToleranceCm=%.1f) (lidar ratio %.1f, tolerance %.1f cm)"),
+			*GRun.Name, GSavedMemory.Ratio, GSavedMemory.ToleranceCm, L ? L->MemoryRatio : -1.f, L ? L->MemoryTolerance : -1.f);
+	}
+
 	static void Finish(const TCHAR* Why)
 	{
 		if (AStdPlayerController* Std = Cast<AStdPlayerController>(PC()); Std && Std->IsPausedByMenu())
 		{
 			Std->ResumeGame();
 		}
+		RestoreMemory();
 		if (GBindingsSaved)
 		{
 			TimeStateDebug::RestoreBindings(W(), GSavedBindings);
@@ -2123,6 +2161,10 @@ namespace ReadabilityDebug
 		GRun.Name = Mode == TEXT("controls") ? FString(TEXT("tls.ControlsTest")) : FString::Printf(TEXT("tls.ReadabilityTest %s"), *Mode);
 		GRun.bQuit = bQuit;
 		GRun.bShots = bShots;
+		if (Mode != TEXT("controls"))
+		{
+			MemoryOffForRun();
+		}
 		TArray<FStep> S;
 		const bool bAll = Mode == TEXT("all");
 		if (Mode == TEXT("area"))
