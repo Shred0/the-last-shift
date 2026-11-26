@@ -5,6 +5,7 @@
 #include "Components/BoxComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "Run/RunSubsystem.h"
 #include "TheLastShift.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PrologueLineTrigger)
@@ -53,6 +54,11 @@ void APrologueLineTrigger::HandleBeginOverlap(UPrimitiveComponent* OverlappedCom
 {
 	const APawn* Pawn = Cast<APawn>(OtherActor);
 	if (bFired || !Pawn || !Pawn->IsPlayerControlled())
+	{
+		return;
+	}
+	// Brief 31A: on the way home the departure's rooms say nothing.
+	if (URunSubsystem::IsReturnStateOf(GetWorld()))
 	{
 		return;
 	}

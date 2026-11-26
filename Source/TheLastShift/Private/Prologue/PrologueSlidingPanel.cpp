@@ -99,6 +99,14 @@ void APrologueSlidingPanel::SetOpenFraction(float InFraction)
 	}
 }
 
+void APrologueSlidingPanel::SetOpenAtOnce(float InFraction)
+{
+	OpenFraction = FMath::Clamp(InFraction, 0.f, 1.f);
+	MotionDirection = 0;
+	ApplyPanel();
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: set at once to %.2f open (no motion)%s."), *GetName(), OpenFraction, IsBlocking() ? TEXT(", the opening blocked") : TEXT(", the opening passable"));
+}
+
 bool APrologueSlidingPanel::IsBlocking() const
 {
 	return Blocker && Blocker->GetCollisionEnabled() != ECollisionEnabled::NoCollision;

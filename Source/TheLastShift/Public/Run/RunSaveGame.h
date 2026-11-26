@@ -59,11 +59,13 @@ struct THELASTSHIFT_API FAreaSnapshot
 };
 
 /**
- * The saved run: one snapshot per act reached, in act order. One slot, written by URunSubsystem.
+ * The saved run: one snapshot per act reached, in act order, and the return's when it has been reached. One slot,
+ * written by URunSubsystem.
  * Version 1: battery, home time, banked energy. Version 2 (Brief 8): plus the suit's archive. Version 3 (Brief 17): plus
  * whether the entity had been found. Version 4 (Brief 20): plus whether the first contact with the entity had happened.
+ * Version 5 (Brief 31A): plus the return's entry (bHasReturn, Return), the fifth entry of the run after the four areas'.
  * Properties are tagged, so an older file loads with the newer fields at their defaults (an empty archive, the entity
- * not found, the first contact not happened).
+ * not found, the first contact not happened, no return entry).
  */
 UCLASS()
 class THELASTSHIFT_API URunSaveGame : public USaveGame
@@ -71,7 +73,7 @@ class THELASTSHIFT_API URunSaveGame : public USaveGame
 	GENERATED_BODY()
 
 public:
-	static constexpr int32 CurrentVersion = 4;
+	static constexpr int32 CurrentVersion = 5;
 
 	/**
 	 * The version the file was written with. The default stays 1: a save skips values equal to the class default, so a
@@ -82,4 +84,12 @@ public:
 
 	UPROPERTY(SaveGame)
 	TArray<FAreaSnapshot> Snapshots;
+
+	/** The return has been reached: Return holds its snapshot. A file before version 5 has none: it loads false. */
+	UPROPERTY(SaveGame)
+	bool bHasReturn = false;
+
+	/** The run state on entering home's hangar on the return (its ActIndex is 0: the return is no act). */
+	UPROPERTY(SaveGame)
+	FAreaSnapshot Return;
 };

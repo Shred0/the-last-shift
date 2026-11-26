@@ -221,7 +221,8 @@ struct THELASTSHIFT_API FSceneRow : public FTableRowBase
  * One line of the home AI in the prologue's maps (DT_Prologue, row name <Group>_<order>). A group is the moment the
  * lines belong to: Wake, Hologram, Hangar, Flight, Light, Hatch, Door. The text channel says a group's rows once, in ascending
  * Order, degraded and with tokens like any home AI message; Flight is the travel screen's line between the two maps and
- * uses its first row only. A group with no rows says nothing.
+ * uses its first row only. A group with no rows says nothing. Brief 31A: the same row in DT_Epilogue, the way home
+ * (groups Return, Landing, Passage, Chamber: EpilogueGroups); Return and Passage are labels, never typed on the channel.
  */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FPrologueRow : public FTableRowBase
@@ -242,17 +243,18 @@ struct THELASTSHIFT_API FPrologueRow : public FTableRowBase
 
 /**
  * One line of the engineer on the text channel (DT_EngineerLines, row name E_<Before>_<Order>): said before the row
- * Before of DT_AIMessages or DT_Prologue, the first time that row is said in the act (in a prologue map: in that map),
- * then the row. Several lines before the same row are said in ascending Order. The engineer's voice: never shortened,
- * typed at the full battery's speed, said at Silent too. Never before a row shown as a label (AreaEntry, Flight). Tokens
- * as the home AI's messages, with the context of the row it comes before.
+ * Before of DT_AIMessages, DT_Prologue or DT_Epilogue (a Landing or a Chamber row), the first time that row is said in
+ * the act (in a prologue map, on the way home: in that map), then the row. Several lines before the same row are said in
+ * ascending Order. The engineer's voice: never shortened, typed at the full battery's speed, said at Silent too. Never
+ * before a row shown as a label (AreaEntry, Flight, Return, Passage). Tokens as the home AI's messages, with the context
+ * of the row it comes before.
  */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FEngineerLineRow : public FTableRowBase
 {
 	GENERATED_BODY()
 
-	/** The key of the row of DT_AIMessages or DT_Prologue the line comes before. */
+	/** The key of the row of DT_AIMessages, DT_Prologue or DT_Epilogue the line comes before. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative")
 	FName Before;
 
@@ -275,4 +277,23 @@ namespace PrologueGroups
 	inline const FName Light(TEXT("Light"));
 	inline const FName Hatch(TEXT("Hatch"));
 	inline const FName Door(TEXT("Door"));
+}
+
+/** Brief 31A: the groups of DT_Epilogue, the way home (rows of the prologue's row struct, FPrologueRow). */
+namespace EpilogueGroups
+{
+	/** The travel screen's label of the flight back (its first row): a label, never typed on the channel. */
+	inline const FName Return(TEXT("Return"));
+	/** Said on the channel in home's hangar on the return, when the player steps out of the ship. */
+	inline const FName Landing(TEXT("Landing"));
+	/** A label (Brief 31B). */
+	inline const FName Passage(TEXT("Passage"));
+	/** Said on the channel in the battery's chamber (Brief 31B). */
+	inline const FName Chamber(TEXT("Chamber"));
+
+	/** Group is one of the four. */
+	inline bool IsEpilogueGroup(FName Group) { return Group == Return || Group == Landing || Group == Passage || Group == Chamber; }
+
+	/** Group's rows are labels, never typed on the channel (Return, Passage): no engineer line comes before them. */
+	inline bool IsLabelGroup(FName Group) { return Group == Return || Group == Passage; }
 }

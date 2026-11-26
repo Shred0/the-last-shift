@@ -39,6 +39,13 @@ struct STDCORE_API FStdTravelOptions
 	/** The screen stays fully covered at least this long, counted from the end of the fade out. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|Flow", meta = (ClampMin = "0.0", ClampMax = "60.0", Units = "s"))
 	float MinCoveredSeconds = 0.f;
+
+	/**
+	 * The covered screen's marker crosses it from the right edge to the left instead of from the left to the right. Only
+	 * the direction changes: the marker still stands for the covered time that has passed. Off by default.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|Flow")
+	bool bMarkerRightToLeft = false;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStdFlowStateChanged, EStdFlowState, NewState);
@@ -112,9 +119,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Std Core|Flow")
 	float GetTransitionProgress() const { return IsTransitioning() ? Progress.GetBarFraction() : 0.f; }
 
-	/** Horizontal position of the marker, 0 (left edge) to 1 (right edge): the fraction of MinCoveredSeconds that has passed. */
+	/**
+	 * The fraction of MinCoveredSeconds that has passed (0..1): the marker's way across the screen from the edge it starts
+	 * at, the left edge unless the transition's marker crosses from right to left.
+	 */
 	UFUNCTION(BlueprintPure, Category = "Std Core|Flow")
 	float GetTransitionMarkerFraction() const { return IsTransitioning() ? Progress.GetMarkerFraction() : 0.f; }
+
+	/** Horizontal position of the marker now, 0 (left edge) to 1 (right edge), in either direction. */
+	UFUNCTION(BlueprintPure, Category = "Std Core|Flow")
+	float GetTransitionMarkerPosition() const { return IsTransitioning() ? Progress.GetMarkerPosition() : 0.f; }
+
+	/** The current transition's marker crosses the screen from right to left (FStdTravelOptions::bMarkerRightToLeft). */
+	UFUNCTION(BlueprintPure, Category = "Std Core|Flow")
+	bool IsTransitionMarkerRightToLeft() const { return IsTransitioning() && Progress.IsMarkerRightToLeft(); }
 
 	/** The progress bar is drawn now (switched on and the overlay visible). */
 	UFUNCTION(BlueprintPure, Category = "Std Core|Flow")
@@ -194,9 +212,10 @@ private:
 
 	TSet<FName> CoverHolds;
 
-	/** Label and minimum covered time of the current transition. */
+	/** Label, minimum covered time and marker direction of the current transition. */
 	FText Label;
 	float MinCoveredSeconds = 0.f;
+	bool bMarkerRightToLeft = false;
 
 	/** FPlatformTime when the screen became fully covered; negative when it is not. */
 	double CoveredSince = -1.0;

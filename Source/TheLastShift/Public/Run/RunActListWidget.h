@@ -16,8 +16,8 @@ enum class ERunActListMode : uint8
 };
 
 /**
- * The list of acts reached (one entry per run snapshot, "Area N — B%" with the battery at that act's entry), on StdCore's
- * choice-list screen. In RunLost mode the body above the list is the Loss row of DT_Endings, in full. Choosing an act restarts the run from it (URunSubsystem::RestartFromAct). Reads the snapshots
+ * The list of acts reached (one entry per run snapshot, "Area N — B%" with the battery at that act's entry, then
+ * "Return — B%" when the return has been reached, Brief 31A), on StdCore's choice-list screen. In RunLost mode the body above the list is the Loss row of DT_Endings, in full. Choosing an act restarts the run from it (URunSubsystem::RestartFromAct). Reads the snapshots
  * from the run subsystem every time it is configured; holds no copy of them.
  */
 UCLASS()
@@ -33,7 +33,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Run|UI")
 	ERunActListMode GetMode() const { return Mode; }
 
-	/** Act restarted by entry Index; 0 for the Main menu entry; -1 for none. */
+	/** GetActOfEntry of the return's entry (Brief 31A): no act, restored by URunSubsystem::RestartFromReturn. */
+	static constexpr int32 ReturnEntry = -2;
+
+	/** Act restarted by entry Index; 0 for the Main menu entry; ReturnEntry for the return; -1 for none. */
 	UFUNCTION(BlueprintPure, Category = "Run|UI")
 	int32 GetActOfEntry(int32 Index) const { return EntryActs.IsValidIndex(Index) ? EntryActs[Index] : -1; }
 
@@ -52,7 +55,7 @@ private:
 
 	ERunActListMode Mode = ERunActListMode::SelectAct;
 
-	/** Act of each entry, same order (0 = Main menu). */
+	/** Act of each entry, same order (0 = Main menu, ReturnEntry = the return). */
 	TArray<int32> EntryActs;
 
 	float FadeElapsed = 0.f;

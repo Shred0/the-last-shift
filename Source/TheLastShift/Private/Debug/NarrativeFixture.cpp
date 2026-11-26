@@ -25,7 +25,9 @@ namespace NarrativeFixture
 		TStrongObjectPtr<UDataTable> Twin;
 		TStrongObjectPtr<UDataTable> Scenes;
 		TStrongObjectPtr<UDataTable> Prologue;
+		TStrongObjectPtr<UDataTable> Epilogue;
 		TStrongObjectPtr<UDataTable> Engineer;
+		TSoftObjectPtr<UDataTable> SavedEpilogue;
 		TSoftObjectPtr<UDataTable> SavedEngineer;
 		TSoftObjectPtr<UDataTable> SavedScenes;
 		TSoftObjectPtr<UDataTable> SavedPrologue;
@@ -192,6 +194,51 @@ namespace NarrativeFixture
 		return Table;
 	}
 
+	FString GetEpilogueLineText(FName Group, int32 Order)
+	{
+		// The Landing rows carry the channel's {home} and {battery}, as the real rows do.
+		return Group == EpilogueGroups::Landing
+			? FString::Printf(TEXT("Fixture epilogue %s line %d, home {home}, battery {battery}, a neutral sentence for the tests."), *Group.ToString(), Order)
+			: FString::Printf(TEXT("Fixture epilogue %s line %d, a neutral sentence for the tests."), *Group.ToString(), Order);
+	}
+
+	UDataTable* BuildEpilogue(const TArray<FName>& Without)
+	{
+		UDataTable* Table = NewObject<UDataTable>(GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(), UDataTable::StaticClass(), TEXT("DT_TlsFixtureEpilogue")));
+		Table->RowStruct = FPrologueRow::StaticStruct();
+		auto Add = [Table, &Without](FName Group, int32 Order)
+		{
+			if (Without.Contains(Group))
+			{
+				return;
+			}
+			FPrologueRow Row;
+			Row.Group = Group;
+			Row.Order = Order;
+			Row.Text = FText::FromString(GetEpilogueLineText(Group, Order));
+			Table->AddRow(FName(*FString::Printf(TEXT("%s_%d"), *Group.ToString(), Order)), Row);
+		};
+		// Added out of order on purpose: the rows are said in ascending Order.
+		Add(EpilogueGroups::Landing, 2);
+		Add(EpilogueGroups::Return, 1);
+		Add(EpilogueGroups::Landing, 1);
+		Add(EpilogueGroups::Passage, 1);
+		Add(EpilogueGroups::Chamber, 1);
+		return Table;
+	}
+
+	void SetEpilogueGroups(const TArray<FName>& Without)
+	{
+		if (!G.bInstalled)
+		{
+			return;
+		}
+		G.Epilogue.Reset(BuildEpilogue(Without));
+		GetMutableDefault<UTheLastShiftSettings>()->EpilogueTable = TSoftObjectPtr<UDataTable>(G.Epilogue.Get());
+		UE_LOG(LogTheLastShift, Log, TEXT("Narrative fixture: epilogue lines now %s (%d rows, without %d groups)."), *GetNameSafe(G.Epilogue.Get()), G.Epilogue->GetRowMap().Num(),
+			Without.Num());
+	}
+
 	FString GetPrologueLineText(FName Group, int32 Order)
 	{
 		return FString::Printf(TEXT("Fixture prologue %s line %d, a neutral sentence for the tests."), *Group.ToString(), Order);
@@ -322,6 +369,9 @@ namespace NarrativeFixture
 		G.SavedPrologue = Settings->PrologueTable;
 		G.Prologue.Reset(BuildPrologue());
 		Settings->PrologueTable = TSoftObjectPtr<UDataTable>(G.Prologue.Get());
+		G.SavedEpilogue = Settings->EpilogueTable;
+		G.Epilogue.Reset(BuildEpilogue());
+		Settings->EpilogueTable = TSoftObjectPtr<UDataTable>(G.Epilogue.Get());
 		G.Messages.Reset(BuildAIMessages());
 		G.Endings.Reset(BuildEndings());
 		G.Logs.Reset(BuildLogs(8));
@@ -356,6 +406,8 @@ namespace NarrativeFixture
 		G.Scenes.Reset();
 		Settings->PrologueTable = G.SavedPrologue;
 		G.Prologue.Reset();
+		Settings->EpilogueTable = G.SavedEpilogue;
+		G.Epilogue.Reset();
 		Settings->EngineerLinesTable = G.SavedEngineer;
 		G.bInstalled = false;
 		SetChannels(World, Settings->LoadAIMessagesTable(), Settings->LoadTwinAITable(), Settings->LoadEngineerLinesTable());

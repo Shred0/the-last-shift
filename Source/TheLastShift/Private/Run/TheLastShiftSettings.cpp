@@ -144,6 +144,16 @@ UDataTable* UTheLastShiftSettings::LoadPrologueTable() const
 	return PrologueTable.IsNull() ? nullptr : PrologueTable.LoadSynchronous();
 }
 
+UDataTable* UTheLastShiftSettings::LoadEpilogueTable() const
+{
+	return EpilogueTable.IsNull() ? nullptr : EpilogueTable.LoadSynchronous();
+}
+
+UDataTable* UTheLastShiftSettings::LoadGroupTable(FName Group) const
+{
+	return EpilogueGroups::IsEpilogueGroup(Group) ? LoadEpilogueTable() : LoadPrologueTable();
+}
+
 const FAreaRecipe* UTheLastShiftSettings::FindRecipe(int32 Act) const
 {
 	if (Act <= 0)

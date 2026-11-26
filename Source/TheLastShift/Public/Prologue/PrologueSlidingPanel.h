@@ -65,6 +65,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Panel")
 	void SetOpenFraction(float InFraction);
 
+	/**
+	 * Brief 31A: sets the fraction at once, with no motion (nothing announced): the pose a map begins in (the hangar's hatch
+	 * and the ship's hatch open on the way home).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Panel")
+	void SetOpenAtOnce(float InFraction);
+
 	UFUNCTION(BlueprintPure, Category = "Panel")
 	float GetOpenFraction() const { return OpenFraction; }
 

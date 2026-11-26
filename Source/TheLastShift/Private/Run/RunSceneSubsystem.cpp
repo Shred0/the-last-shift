@@ -209,6 +209,14 @@ void URunSceneSubsystem::HandleSceneScreenClosed(UStdScreenWidget* Screen)
 		return;
 	}
 	UE_LOG(LogScenes, Log, TEXT("Scene %s: its screen closed."), *Scene.ToString());
+	// Brief 31A: once the ending has closed, the run is no longer on its way home.
+	if (Scene == EndingScene())
+	{
+		if (URunSubsystem* Run = GetGameInstance() ? GetGameInstance()->GetSubsystem<URunSubsystem>() : nullptr)
+		{
+			Run->SetReturningHome(false, TEXT("the ending closed"));
+		}
+	}
 	OnSceneScreenChanged.Broadcast(Scene, false);
 }
 

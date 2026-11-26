@@ -39,6 +39,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Area")
 	bool HasTriggered() const { return bTriggered; }
 
+	/**
+	 * Brief 31A: switches the exit on or off (on by default). Off, it never travels (the ship's exit on the way home, the
+	 * corridor's exit in the home map's departure state).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Area")
+	void SetExitEnabled(bool bEnabled);
+
+	UFUNCTION(BlueprintPure, Category = "Area")
+	bool IsExitEnabled() const { return bExitEnabled; }
+
 	/** Checks whether the player is inside (or past it) in Normal time and travels if so (also called on overlap and on Resume). */
 	UFUNCTION(BlueprintCallable, Category = "Area")
 	void TryTravel();
@@ -73,6 +83,7 @@ private:
 	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
 
 	bool bTriggered = false;
+	bool bExitEnabled = true;
 
 	UFUNCTION()
 	void HandleBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex,

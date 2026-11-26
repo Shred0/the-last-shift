@@ -88,7 +88,8 @@ void UHomeAIComponent::BeginPlay()
 		PrologueStage > 0 ? *FString::Printf(TEXT(", prologue map %d, prologue table %s"), PrologueStage, *GetNameSafe(UTheLastShiftSettings::Get()->LoadPrologueTable())) : TEXT(""));
 
 	// Waking in the print room: the home map's first lines (said when the travel screen has gone, the channel's rule).
-	if (PrologueStage == 1)
+	// Brief 31A: not on the way home, where the player arrives in the hangar inside the ship.
+	if (PrologueStage == 1 && !URunSubsystem::IsReturnStateOf(World))
 	{
 		SayPrologueGroup(PrologueGroups::Wake);
 	}
@@ -368,7 +369,8 @@ int32 UHomeAIComponent::SayPrologueGroup(FName Group)
 		return 0;
 	}
 	SaidPrologueGroups.Add(Group);
-	const UDataTable* Table = UTheLastShiftSettings::Get()->LoadPrologueTable();
+	// The prologue's groups from the prologue table, the way home's from the epilogue table (Brief 31A).
+	const UDataTable* Table = UTheLastShiftSettings::Get()->LoadGroupTable(Group);
 	const FTextChannelContext Context = MakeContext();
 	int32 Queued = 0;
 	for (const FName& RowName : FindPrologueRows(Table, Group))
@@ -461,4 +463,22 @@ bool UHomeAIComponent::BuildPrologueTravelLabel(const UObject* WorldContext, FTe
 	FAIMessageRow Message;
 	Message.Text = Row->Text;
 	return HomeAIImpl::ComposeTravelLine(WorldContext, Message, Rows[0], TEXT("the flight"), OutLabel, OutReadingSeconds);
+}
+
+bool UHomeAIComponent::BuildReturnTravelLabel(const UObject* WorldContext, FText& OutLabel, float& OutReadingSeconds)
+{
+	OutLabel = FText::GetEmpty();
+	OutReadingSeconds = 0.f;
+	const UDataTable* Table = UTheLastShiftSettings::Get()->LoadEpilogueTable();
+	const TArray<FName> Rows = FindPrologueRows(Table, EpilogueGroups::Return);
+	const FPrologueRow* Row = Rows.Num() > 0 ? Table->FindRow<FPrologueRow>(Rows[0], TEXT("TravelLabel"), false) : nullptr;
+	if (!Row)
+	{
+		UE_LOG(LogTextChannel, Log, TEXT("Travel label for the flight back: no Return row in %s."), *GetNameSafe(Table));
+		return false;
+	}
+	// Degraded like any home AI message: from its full text, with the channel's tokens.
+	FAIMessageRow Message;
+	Message.Text = Row->Text;
+	return HomeAIImpl::ComposeTravelLine(WorldContext, Message, Rows[0], TEXT("the flight back"), OutLabel, OutReadingSeconds);
 }

@@ -50,6 +50,18 @@ namespace NarrativeFixture
 	/** The text of the fixture's prologue row <Group>_<Order>. */
 	FString GetPrologueLineText(FName Group, int32 Order);
 
+	/**
+	 * Brief 31A: a new transient DT_Epilogue-shaped table (FPrologueRow): Return_1, Landing_1..2 (with {home} and {battery}),
+	 * Passage_1 and Chamber_1, less the rows of the groups in Without (each text names its group and order).
+	 */
+	UDataTable* BuildEpilogue(const TArray<FName>& Without = TArray<FName>());
+
+	/** The text of the fixture's epilogue row <Group>_<Order> (tokens not replaced). */
+	FString GetEpilogueLineText(FName Group, int32 Order);
+
+	/** Replaces the installed epilogue fixture with one without the rows of the groups in Without. No-op when not installed. */
+	void SetEpilogueGroups(const TArray<FName>& Without);
+
 	/** Replaces the installed prologue fixture with one without the rows of the groups in Without. No-op when not installed. */
 	void SetPrologueGroups(const TArray<FName>& Without);
 
@@ -88,8 +100,8 @@ namespace NarrativeFixture
 	FString GetAddedMessageText(ETextTrigger Trigger, int32 Act, int32 Order);
 
 	/**
-	 * Points the project settings' AIMessagesTable, EndingsTable, LogsTable, TwinAITable, ScenesTable, PrologueTable and
-	 * EngineerLinesTable (empty: no engineer line unless a test sets some) at fixture tables (kept alive
+	 * Points the project settings' AIMessagesTable, EndingsTable, LogsTable, TwinAITable, ScenesTable, PrologueTable,
+	 * EpilogueTable and EngineerLinesTable (empty: no engineer line unless a test sets some) at fixture tables (kept alive
 	 * until Restore) and gives every text channel already in World the fixture messages, twin rows and engineer lines. Everything that
 	 * loads a narrative table after this (the home AI of a new map, the travel label, the loss text, the terminals, the
 	 * archive) reads the fixtures. No-op when installed.

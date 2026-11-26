@@ -2,11 +2,12 @@
 
 #include "Settings/StdProjectSettings.h"
 
-void FStdTransitionProgress::Reset(float CoveredTargetSeconds)
+void FStdTransitionProgress::Reset(float CoveredTargetSeconds, bool bInMarkerRightToLeft)
 {
 	Bar = 0.f;
 	Marker = 0.f;
 	CoveredTarget = FMath::Max(CoveredTargetSeconds, 0.f);
+	bMarkerRightToLeft = bInMarkerRightToLeft;
 }
 
 void FStdTransitionProgress::Report(float Fraction)
@@ -62,7 +63,7 @@ FStdTransitionLayout FStdTransitionLayout::Compute(const UStdProjectSettings& Se
 			FMath::Clamp(static_cast<float>(Settings.TransitionMarkerSize.Y), 1.f, 512.f));
 		const float Bottom = ScreenSize.Y - (Layout.bShowBar ? BarHeight : 0.f);
 		Layout.MarkerSize = Size;
-		Layout.MarkerPosition = FVector2f((ScreenSize.X - Size.X) * Progress.GetMarkerFraction(), Bottom - Size.Y);
+		Layout.MarkerPosition = FVector2f((ScreenSize.X - Size.X) * Progress.GetMarkerPosition(), Bottom - Size.Y);
 		Layout.MarkerColor = Settings.TransitionMarkerColor;
 		Layout.MarkerColor.A *= Opacity;
 	}

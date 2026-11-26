@@ -102,6 +102,12 @@ bool URunSubsystem::TravelToNextArea()
 {
 	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
 	const int32 Stage = GetPrologueStage();
+	if (Stage == 1 && IsReturnStateOf(GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr))
+	{
+		// Brief 31A: the corridor of the way home opens the ending, exactly as the last area's exit did before.
+		UE_LOG(LogRun, Log, TEXT("The way home's corridor: the ending."));
+		return TravelToEnding();
+	}
 	if (Stage == 1)
 	{
 		// The flight: the travel screen carries the first Flight line.
@@ -119,7 +125,8 @@ bool URunSubsystem::TravelToNextArea()
 	const int32 Act = GetActIndex();
 	if (Act >= Settings->AreaMaps.Num() && Act > 0)
 	{
-		return TravelToEnding();
+		// Brief 31A: the way home first, when it is on; else the ending, as before.
+		return Settings->IsReturnHomeOn() ? StartReturnHome() : TravelToEnding();
 	}
 	const int32 Next = Act + 1;
 	if (!Settings->AreaMaps.IsValidIndex(Next - 1))
@@ -170,7 +177,7 @@ bool URunSubsystem::TravelTo(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu
 	return TravelToLevel(Level, false, Label, ReadingSeconds, What);
 }
 
-bool URunSubsystem::TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FText& Label, float ReadingSeconds, const FString& What)
+bool URunSubsystem::TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FText& Label, float ReadingSeconds, const FString& What, bool bMarkerRightToLeft)
 {
 	UGameInstance* GameInstance = GetGameInstance();
 	UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
@@ -200,6 +207,7 @@ bool URunSubsystem::TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMai
 		FStdTravelOptions Options;
 		Options.Label = Label;
 		Options.MinCoveredSeconds = FMath::Clamp(FMath::Max(UTheLastShiftSettings::Get()->TravelHoldSeconds, ReadingSeconds), 0.f, 60.f);
+		Options.bMarkerRightToLeft = bMarkerRightToLeft;
 		bStarted = Flow->TravelToLevelWithOptions(Level, Options);
 		if (bStarted)
 		{
@@ -255,7 +263,15 @@ void URunSubsystem::TakeSnapshot(int32 Act)
 	Snapshot.bEntityFound = bEntityFound;
 	Snapshot.bFirstContact = bFirstContact;
 
-	const int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& Old) { return Old.ActIndex >= Act; });
+	int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& Old) { return Old.ActIndex >= Act; });
+	// The return comes after every act: entering an area discards it, as it discards the later acts.
+	if (bHasReturnSnapshot)
+	{
+		bHasReturnSnapshot = false;
+		ReturnSnapshot = FAreaSnapshot();
+		++Discarded;
+		UE_LOG(LogRun, Log, TEXT("Snapshot: the return's entry discarded on entering act %d."), Act);
+	}
 	Snapshots.Add(Snapshot);
 	UE_LOG(LogRun, Log, TEXT("Snapshot: act %d, battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s, first contact %s (%d replaced or discarded, %d snapshots)."),
 		Act, Snapshot.BatteryFraction, Snapshot.HomeSecondsElapsed, Snapshot.BankedEnergy, Snapshot.Archive.LogOrders.Num(), Snapshot.Archive.TwinPartsPlayed,
@@ -274,14 +290,19 @@ void URunSubsystem::WriteSave()
 	}
 	Save->Version = URunSaveGame::CurrentVersion;
 	Save->Snapshots = Snapshots;
+	Save->bHasReturn = bHasReturnSnapshot;
+	Save->Return = bHasReturnSnapshot ? ReturnSnapshot : FAreaSnapshot();
 	bLastSaveOk = UGameplayStatics::SaveGameToSlot(Save, SaveSlotName(), 0);
 	++SaveWrites;
-	UE_LOG(LogRun, Log, TEXT("Save: %d snapshots written to slot '%s': %s."), Snapshots.Num(), SaveSlotName(), bLastSaveOk ? TEXT("ok") : TEXT("FAILED"));
+	UE_LOG(LogRun, Log, TEXT("Save: %d snapshots%s written to slot '%s' (version %d): %s."), Snapshots.Num(), bHasReturnSnapshot ? TEXT(" and the return's") : TEXT(""), SaveSlotName(),
+		URunSaveGame::CurrentVersion, bLastSaveOk ? TEXT("ok") : TEXT("FAILED"));
 }
 
 bool URunSubsystem::LoadSave()
 {
 	Snapshots.Reset();
+	bHasReturnSnapshot = false;
+	ReturnSnapshot = FAreaSnapshot();
 	LoadedSaveVersion = 0;
 	if (UGameplayStatics::DoesSaveGameExist(SaveSlotName(), 0))
 	{
@@ -300,20 +321,30 @@ bool URunSubsystem::LoadSave()
 					Snapshots.Add(Snapshot);
 				}
 			}
+			// A file before version 5 holds no return: it loads with none (bHasReturn at its default).
+			if (Save->bHasReturn)
+			{
+				bHasReturnSnapshot = true;
+				ReturnSnapshot = Save->Return;
+				ReturnSnapshot.ActIndex = 0;
+			}
 		}
 		else
 		{
 			UE_LOG(LogRun, Warning, TEXT("Save: slot '%s' exists but does not load as a run save; ignored."), SaveSlotName());
 		}
 	}
-	UE_LOG(LogRun, Log, TEXT("Save: %d snapshots read from slot '%s' (save version %d)."), Snapshots.Num(), SaveSlotName(), LoadedSaveVersion);
+	UE_LOG(LogRun, Log, TEXT("Save: %d snapshots read from slot '%s' (save version %d)%s."), Snapshots.Num(), SaveSlotName(), LoadedSaveVersion,
+		bHasReturnSnapshot ? (HasReturnEntry() ? TEXT(", with the return's entry") : TEXT(", with a return's entry that the way home, off, does not offer")) : TEXT(""));
 	OnSnapshotsChanged.Broadcast();
-	return Snapshots.Num() > 0;
+	return HasSavedRun();
 }
 
 void URunSubsystem::ClearSave()
 {
 	Snapshots.Reset();
+	bHasReturnSnapshot = false;
+	ReturnSnapshot = FAreaSnapshot();
 	if (UGameplayStatics::DoesSaveGameExist(SaveSlotName(), 0))
 	{
 		UGameplayStatics::DeleteGameInSlot(SaveSlotName(), 0);
@@ -451,6 +482,7 @@ void URunSubsystem::ResetRunState(const TCHAR* Why)
 	SetArchive(FSuitArchive(), Why);
 	SetEntityFound(false, Why);
 	SetFirstContact(false, Why);
+	SetReturningHome(false, Why);
 }
 
 bool URunSubsystem::RestartFromAct(int32 Act)
@@ -470,19 +502,16 @@ bool URunSubsystem::RestartFromAct(int32 Act)
 		return false;
 	}
 	const FAreaSnapshot Restored = *Snapshot;
-	UGameInstance* GameInstance = GetGameInstance();
-	if (UHomeStateSubsystem* Home = GameInstance->GetSubsystem<UHomeStateSubsystem>())
+	RestoreRunState(Restored, FString::Printf(TEXT("restart from act %d"), Act));
+	SetReturningHome(false, *FString::Printf(TEXT("restart from act %d"), Act));
+	int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& S) { return S.ActIndex > Act; });
+	// The return comes after every act: restarting from one discards it.
+	if (bHasReturnSnapshot)
 	{
-		Home->RestoreState(Restored.BatteryFraction, Restored.HomeSecondsElapsed);
+		bHasReturnSnapshot = false;
+		ReturnSnapshot = FAreaSnapshot();
+		++Discarded;
 	}
-	if (UEnergySubsystem* Energy = GameInstance->GetSubsystem<UEnergySubsystem>())
-	{
-		Energy->RestoreBankedEnergy(Restored.BankedEnergy);
-	}
-	SetArchive(Restored.Archive, *FString::Printf(TEXT("restart from act %d"), Act));
-	SetEntityFound(Restored.bEntityFound, FString::Printf(TEXT("restart from act %d"), Act));
-	SetFirstContact(Restored.bFirstContact, FString::Printf(TEXT("restart from act %d"), Act));
-	const int32 Discarded = Snapshots.RemoveAll([Act](const FAreaSnapshot& S) { return S.ActIndex > Act; });
 	UE_LOG(LogRun, Log, TEXT("Restart from act %d: battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s, first contact %s; %d later snapshots discarded."),
 		Act, Restored.BatteryFraction, Restored.HomeSecondsElapsed, Restored.BankedEnergy, Restored.Archive.LogOrders.Num(), Restored.Archive.TwinPartsPlayed,
 		Restored.bEntityFound ? TEXT("found") : TEXT("not found"), Restored.bFirstContact ? TEXT("happened") : TEXT("not happened"), Discarded);
@@ -493,12 +522,131 @@ bool URunSubsystem::RestartFromAct(int32 Act)
 
 bool URunSubsystem::ContinueRun()
 {
+	if (HasReturnEntry())
+	{
+		// Brief 31A: the latest entry is the return.
+		return RestartFromReturn();
+	}
 	if (Snapshots.IsEmpty())
 	{
 		UE_LOG(LogRun, Warning, TEXT("Continue refused: no saved run."));
 		return false;
 	}
 	return RestartFromAct(Snapshots.Last().ActIndex);
+}
+
+// --- The way home (Brief 31A) ---
+
+void URunSubsystem::RestoreRunState(const FAreaSnapshot& Restored, const FString& Why)
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	if (UHomeStateSubsystem* Home = GameInstance ? GameInstance->GetSubsystem<UHomeStateSubsystem>() : nullptr)
+	{
+		Home->RestoreState(Restored.BatteryFraction, Restored.HomeSecondsElapsed);
+	}
+	if (UEnergySubsystem* Energy = GameInstance ? GameInstance->GetSubsystem<UEnergySubsystem>() : nullptr)
+	{
+		Energy->RestoreBankedEnergy(Restored.BankedEnergy);
+	}
+	SetArchive(Restored.Archive, *Why);
+	SetEntityFound(Restored.bEntityFound, Why);
+	SetFirstContact(Restored.bFirstContact, Why);
+}
+
+void URunSubsystem::SetReturningHome(bool bReturning, const TCHAR* Why)
+{
+	if (bReturningHome != bReturning)
+	{
+		UE_LOG(LogRun, Log, TEXT("The run is %s (%s)."), bReturning ? TEXT("on its way home") : TEXT("no longer on its way home"), Why);
+	}
+	bReturningHome = bReturning;
+}
+
+bool URunSubsystem::IsReturnStateOf(const UWorld* World)
+{
+	const URunSubsystem* Run = World ? URunSubsystem::Get(World) : nullptr;
+	return Run && Run->IsReturningHome() && UTheLastShiftSettings::Get()->IsReturnHomeOn() && GetPrologueStageOf(World) == 1;
+}
+
+bool URunSubsystem::HasReturnEntry() const
+{
+	return bHasReturnSnapshot && UTheLastShiftSettings::Get()->IsReturnHomeOn();
+}
+
+bool URunSubsystem::TravelHome(const FString& What)
+{
+	const UGameInstance* GameInstance = GetGameInstance();
+	FText Label;
+	float ReadingSeconds = 0.f;
+	UHomeAIComponent::BuildReturnTravelLabel(GameInstance ? GameInstance->GetWorld() : nullptr, Label, ReadingSeconds);
+	// The flight back: the marker crosses the other way.
+	const bool bStarted = TravelToLevel(UTheLastShiftSettings::Get()->PrologueHomeMap, false, Label, ReadingSeconds, What, true);
+	if (bStarted)
+	{
+		SetReturningHome(true, *What);
+	}
+	return bStarted;
+}
+
+bool URunSubsystem::StartReturnHome()
+{
+	if (!UTheLastShiftSettings::Get()->IsReturnHomeOn())
+	{
+		UE_LOG(LogRun, Log, TEXT("The way home is off: the ending."));
+		return TravelToEnding();
+	}
+	if (!CanTravelNow(TEXT("The way home")))
+	{
+		return false;
+	}
+	return TravelHome(FString::Printf(TEXT("act %d -> home (the flight back)"), GetActIndex()));
+}
+
+void URunSubsystem::NotifyReturnEntered(UWorld* World)
+{
+	if (TravelRequestTime >= 0.0)
+	{
+		LastTravelReady = static_cast<float>(FPlatformTime::Seconds() - TravelRequestTime);
+	}
+	RecordTravelStep(TEXT("AreaReady"));
+	const UGameInstance* GameInstance = GetGameInstance();
+	const UHomeStateSubsystem* Home = GameInstance ? GameInstance->GetSubsystem<UHomeStateSubsystem>() : nullptr;
+	const UEnergySubsystem* Energy = GameInstance ? GameInstance->GetSubsystem<UEnergySubsystem>() : nullptr;
+	FAreaSnapshot Snapshot;
+	Snapshot.ActIndex = 0;
+	Snapshot.BatteryFraction = Home ? Home->GetBatteryFraction() : 1.0;
+	Snapshot.HomeSecondsElapsed = Home ? Home->GetHomeSecondsElapsed() : 0.0;
+	Snapshot.BankedEnergy = Energy ? Energy->GetBankedEnergy() : 0;
+	Snapshot.Archive = Archive;
+	Snapshot.bEntityFound = bEntityFound;
+	Snapshot.bFirstContact = bFirstContact;
+	ReturnSnapshot = Snapshot;
+	bHasReturnSnapshot = true;
+	UE_LOG(LogRun, Log, TEXT("Snapshot: the return (%s), battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s, first contact %s (%d act snapshots)."),
+		*GetNameSafe(World), Snapshot.BatteryFraction, Snapshot.HomeSecondsElapsed, Snapshot.BankedEnergy, Snapshot.Archive.LogOrders.Num(), Snapshot.Archive.TwinPartsPlayed,
+		Snapshot.bEntityFound ? TEXT("found") : TEXT("not found"), Snapshot.bFirstContact ? TEXT("happened") : TEXT("not happened"), Snapshots.Num());
+	WriteSave();
+	OnSnapshotsChanged.Broadcast();
+}
+
+bool URunSubsystem::RestartFromReturn()
+{
+	if (!HasReturnEntry())
+	{
+		UE_LOG(LogRun, Warning, TEXT("Restart from the return refused: no return entry (stored %d, the way home %s)."), bHasReturnSnapshot ? 1 : 0,
+			UTheLastShiftSettings::Get()->IsReturnHomeOn() ? TEXT("on") : TEXT("off"));
+		return false;
+	}
+	if (!CanTravelNow(TEXT("Restart from the return")))
+	{
+		return false;
+	}
+	const FAreaSnapshot Restored = ReturnSnapshot;
+	RestoreRunState(Restored, TEXT("restart from the return"));
+	UE_LOG(LogRun, Log, TEXT("Restart from the return: battery %.4f, home %.0f s, banked %d, archive %d log entries and %d twin parts, entity %s, first contact %s; nothing discarded."),
+		Restored.BatteryFraction, Restored.HomeSecondsElapsed, Restored.BankedEnergy, Restored.Archive.LogOrders.Num(), Restored.Archive.TwinPartsPlayed,
+		Restored.bEntityFound ? TEXT("found") : TEXT("not found"), Restored.bFirstContact ? TEXT("happened") : TEXT("not happened"));
+	return TravelHome(TEXT("the return's entry -> home"));
 }
 
 bool URunSubsystem::ReturnToMainMenu()

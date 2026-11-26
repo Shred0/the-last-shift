@@ -81,6 +81,15 @@ struct THELASTSHIFT_API FTravelStepRecord
  * ended with a contact (MarkFirstContact). They are run state like the archive: they survive map changes, every snapshot
  * carries them, restoring a snapshot restores them, a new run clears them.
  *
+ * Brief 31A, the way home (UTheLastShiftSettings::IsReturnHomeOn): after the last area the run travels to the home map in
+ * its return state (StartReturnHome: the flight back, the Return label, the marker from right to left). That the run is
+ * on its way home is run state owned here (IsReturningHome): set when the last area's exit fires, cleared when the
+ * ending closes and by a new game or a new run; Continue and the list of entries set or clear it by the entry they
+ * restore. The return is a fifth entry of the run, after the four areas': its snapshot (the same run state as an area's,
+ * ActIndex 0) is taken on entering the home map in the return state (NotifyReturnEntered) and saved; entering an area or
+ * restarting from an act discards it, as it discards the later acts' snapshots. It is no act: nothing keyed by the act
+ * index ever sees it.
+ *
  * On UHomeStateSubsystem::OnRunLost it shows the loss screen (URunActListWidget, RunLost): game input off, the pause
  * menu refused, UI input on the screen.
  *
@@ -160,9 +169,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Run")
 	const TArray<FAreaSnapshot>& GetSnapshots() const { return Snapshots; }
 
-	/** True when the save holds at least one snapshot. */
+	/** True when the save holds at least one snapshot (an act's or the return's). */
 	UFUNCTION(BlueprintPure, Category = "Run")
-	bool HasSavedRun() const { return Snapshots.Num() > 0; }
+	bool HasSavedRun() const { return Snapshots.Num() > 0 || HasReturnEntry(); }
 
 	/**
 	 * Restores the snapshot of Act, discards the later snapshots, saves and travels to area Act through the travel
@@ -176,7 +185,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Run")
 	bool StartNewRun();
 
-	/** RestartFromAct of the latest act reached. False when there is no saved run. */
+	/** The latest entry reached: RestartFromReturn when the return has been reached, else RestartFromAct of the latest act. False when there is no saved run. */
 	UFUNCTION(BlueprintCallable, Category = "Run")
 	bool ContinueRun();
 
@@ -256,6 +265,45 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Run|Entity")
 	FOnEntityFirstContact OnFirstContact;
 
+	// --- The way home (Brief 31A) ---
+
+	/** The run is on its way home: the home map is in its return state. */
+	UFUNCTION(BlueprintPure, Category = "Run|Return")
+	bool IsReturningHome() const { return bReturningHome; }
+
+	/** Sets or clears the run's way home (the ending closing clears it; debug). */
+	void SetReturningHome(bool bReturning, const TCHAR* Why);
+
+	/** World is the home map in its return state: the run on its way home and the way home switched on. */
+	static bool IsReturnStateOf(const UWorld* World);
+
+	/**
+	 * The last area left: with the way home on, the run is on its way home and travels to the home map (the flight back:
+	 * the travel screen's label is the first Return row of the epilogue table, its marker crosses from right to left); off,
+	 * TravelToEnding. Refused while time is Stopped or while a transition runs.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Run|Return")
+	bool StartReturnHome();
+
+	/** Called when the home map begins in its return state: takes the return's snapshot and saves. */
+	void NotifyReturnEntered(UWorld* World);
+
+	/** The return has been reached and the way home is on: the return's entry is offered (after act 4) and restored by Continue. */
+	UFUNCTION(BlueprintPure, Category = "Run|Return")
+	bool HasReturnEntry() const;
+
+	/** The return's snapshot (valid when HasReturnEntry). */
+	UFUNCTION(BlueprintPure, Category = "Run|Return")
+	const FAreaSnapshot& GetReturnSnapshot() const { return ReturnSnapshot; }
+
+	/**
+	 * Restores the return's snapshot and travels to the home map in its return state, through the travel screen of the
+	 * flight back. Nothing is discarded: the return is the last entry. Refused without a return entry, while time is
+	 * Stopped or while a transition runs.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Run|Return")
+	bool RestartFromReturn();
+
 	/** Version of the save file read last by LoadSave (0 when there was none). */
 	int32 GetLoadedSaveVersion() const { return LoadedSaveVersion; }
 
@@ -292,7 +340,13 @@ private:
 	 * A travel through StdCore's travel screen with Label, covered for at least TravelHoldSeconds and ReadingSeconds (or
 	 * to the main menu, without a label). Refused while time is Stopped.
 	 */
-	bool TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FText& Label, float ReadingSeconds, const FString& What);
+	bool TravelToLevel(const TSoftObjectPtr<UWorld>& Level, bool bMainMenu, const FText& Label, float ReadingSeconds, const FString& What, bool bMarkerRightToLeft = false);
+
+	/** The flight back to the home map (its label and marker), the run set on its way home once it has started. */
+	bool TravelHome(const FString& What);
+
+	/** Restores battery, home time, banked energy, archive and the entity's states from Snapshot. */
+	void RestoreRunState(const FAreaSnapshot& Snapshot, const FString& Why);
 
 	/** Battery full, no home time, no banked energy, an empty archive, the entity not found, no first contact (the save is not touched). */
 	void ResetRunState(const TCHAR* Why);
@@ -316,6 +370,10 @@ private:
 	TArray<FTravelStepRecord> LastTravelSteps;
 
 	TArray<FAreaSnapshot> Snapshots;
+	/** The return's snapshot, when bHasReturnSnapshot. */
+	FAreaSnapshot ReturnSnapshot;
+	bool bHasReturnSnapshot = false;
+	bool bReturningHome = false;
 	FSuitArchive Archive;
 	bool bEntityFound = false;
 	bool bFirstContact = false;

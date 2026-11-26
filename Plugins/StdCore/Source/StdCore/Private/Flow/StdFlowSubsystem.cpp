@@ -95,10 +95,12 @@ bool UStdFlowSubsystem::TravelToLevelWithOptions(TSoftObjectPtr<UWorld> Level, c
 		return false;
 	}
 
-	UE_LOG(LogStdCore, Log, TEXT("Travelling to %s (label '%s', covered at least %.2f s)."), *PackageName, *Options.Label.ToString(), Options.MinCoveredSeconds);
+	UE_LOG(LogStdCore, Log, TEXT("Travelling to %s (label '%s', covered at least %.2f s%s)."), *PackageName, *Options.Label.ToString(), Options.MinCoveredSeconds,
+		Options.bMarkerRightToLeft ? TEXT(", the marker from right to left") : TEXT(""));
 	PendingLevel = Level;
 	Label = Options.Label;
 	MinCoveredSeconds = FMath::Clamp(Options.MinCoveredSeconds, 0.f, 60.f);
+	bMarkerRightToLeft = Options.bMarkerRightToLeft;
 	bQuitAfterFadeOut = false;
 	BeginFadeOut();
 	return true;
@@ -124,13 +126,14 @@ void UStdFlowSubsystem::QuitGame()
 
 	UE_LOG(LogStdCore, Log, TEXT("Quitting."));
 	PendingLevel.Reset();
+	bMarkerRightToLeft = false;
 	bQuitAfterFadeOut = true;
 	BeginFadeOut();
 }
 
 void UStdFlowSubsystem::BeginFadeOut()
 {
-	Progress.Reset(MinCoveredSeconds);
+	Progress.Reset(MinCoveredSeconds, bMarkerRightToLeft);
 	EnsureOverlay();
 	SetInputBlocked(true);
 	SetState(EStdFlowState::FadingOut);
@@ -261,6 +264,7 @@ void UStdFlowSubsystem::FinishTransition()
 	CoveredSince = -1.0;
 	Label = FText::GetEmpty();
 	MinCoveredSeconds = 0.f;
+	bMarkerRightToLeft = false;
 	SetState(EStdFlowState::Idle);
 	SetInputBlocked(false);
 }
@@ -349,7 +353,7 @@ void UStdFlowSubsystem::CoverNow()
 	{
 		CoveredSince = FPlatformTime::Seconds();
 		// A new covered period: whatever is held for is still loading.
-		Progress.Reset(State == EStdFlowState::Idle ? 0.f : MinCoveredSeconds);
+		Progress.Reset(State == EStdFlowState::Idle ? 0.f : MinCoveredSeconds, State != EStdFlowState::Idle && bMarkerRightToLeft);
 	}
 	Alpha = 1.f;
 	FadeInDelayRemaining = UStdProjectSettings::Get()->FadeInDelay;

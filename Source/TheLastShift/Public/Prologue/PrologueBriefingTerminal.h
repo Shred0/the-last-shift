@@ -18,7 +18,7 @@ class UWorld;
  *
  * Before that it takes no payment and offers none: no Interact prompt, and an Interact does nothing. It shows in scans
  * in the interactable colour in every state, like any terminal. Once paid it offers nothing again (its door closes
- * behind the player and stays closed).
+ * behind the player and stays closed). Brief 31A: in the home map's return state it offers and takes nothing.
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API APrologueBriefingTerminal : public APowerTerminal
@@ -58,8 +58,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	bool HasBeenPaid() const { return bPaid; }
 
-	virtual bool AcceptsPayment() const override { return bBriefed && !bPaid; }
-	virtual bool OffersPayment() const override { return bBriefed && !bPaid && HasUnpoweredTarget(); }
+	virtual bool AcceptsPayment() const override { return bBriefed && !bPaid && !bReturnInert; }
+	virtual bool OffersPayment() const override { return bBriefed && !bPaid && !bReturnInert && HasUnpoweredTarget(); }
+
+	/** The home map began in its return state: the terminal offers and takes nothing. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	bool IsInertOnReturn() const { return bReturnInert; }
 
 protected:
 	virtual void BeginPlay() override;
@@ -84,5 +88,6 @@ private:
 	bool bLastRowSeen = false;
 	bool bBriefed = false;
 	bool bPaid = false;
+	bool bReturnInert = false;
 	double BriefedRun = -1.0;
 };

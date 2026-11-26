@@ -1337,6 +1337,19 @@ namespace SceneDebug
 		{
 			NarrativeFixture::Install(W());
 			Run()->ClearSave();
+			// Brief 31A: the chain tests the last area's exit opening the ending, the way home switched off for its run (tls.ReturnCheck tests the way home).
+			UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+			const bool bReturn = Settings->bReturnHome;
+			Settings->bReturnHome = false;
+			GRun.Cleanup = [Cleanup = GRun.Cleanup, bReturn]()
+			{
+				GetMutableDefault<UTheLastShiftSettings>()->bReturnHome = bReturn;
+				if (Cleanup)
+				{
+					Cleanup();
+				}
+			};
+			Note(TEXT("chain: the way home switched off for the run"));
 			Check(TimeStateDebug::ClickMainMenuPlay(W()), TEXT("chain: New game (the prologue skipped)"));
 			return 0.5f;
 		}));

@@ -1007,6 +1007,21 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
 	TSoftObjectPtr<UDataTable> PrologueTable;
 
+	/**
+	 * Brief 31A: the home AI's lines on the way home (FPrologueRow, groups Return, Landing, Passage, Chamber: EpilogueGroups),
+	 * imported from Narrative/DT_Epilogue.csv.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> EpilogueTable;
+
+	/**
+	 * Brief 31A: the way home. On: area 4's exit travels to PrologueHomeMap in its return state (the flight back), whose
+	 * corridor opens the ending; the return is a fifth entry of the run after the four areas'. Off: area 4's exit opens the
+	 * ending as before, PrologueHomeMap is only ever in its departure state, and no return entry is taken, offered or restored.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	bool bReturnHome = true;
+
 	/** Normal-time seconds the arrival hangar's hatch takes to close once the player has left the ship. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
 	float HatchCloseSeconds = 4.f;
@@ -1073,6 +1088,9 @@ public:
 	/** bPrologueMaps, with both prologue maps set. */
 	bool ArePrologueMapsOn() const { return bPrologueMaps && !PrologueHomeMap.IsNull() && !PrologueArrivalMap.IsNull(); }
 
+	/** bReturnHome, with the home map set. */
+	bool IsReturnHomeOn() const { return bReturnHome && !PrologueHomeMap.IsNull(); }
+
 	/** 1 for the prologue's home map, 2 for its arrival map (PIE prefix ignored), 0 for any other map. */
 	int32 GetPrologueStageOfMap(const FString& PackageName) const;
 
@@ -1103,6 +1121,12 @@ public:
 
 	/** PrologueTable, loaded (null when unset or missing). */
 	UDataTable* LoadPrologueTable() const;
+
+	/** EpilogueTable, loaded (null when unset or missing). */
+	UDataTable* LoadEpilogueTable() const;
+
+	/** The table a group of home AI lines lives in: EpilogueTable for the epilogue's groups (EpilogueGroups), else PrologueTable. */
+	UDataTable* LoadGroupTable(FName Group) const;
 
 	/** Level of the home AI's text at a battery fraction, with the thresholds of TextDegradation (clamped). */
 	ETextDegradation GetTextLevel(double BatteryFraction) const;

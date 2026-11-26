@@ -1179,14 +1179,16 @@ namespace PrologueDebug
 			FString::Printf(TEXT("%s: the hangar's hatch is in the 30 m wall on the left (-Y) of a player entering: opening %s, Y from %.0f (hangar from %.0f)"), *Label,
 				HatchOpening.IsValid ? *HatchOpening.GetSize().ToCompactString() : TEXT("-"), HatchOpening.Max.Y, HangarBox.Min.Y));
 
-		// The lights by space: print room, corridor, monitor room, hangar.
-		const FBox Spaces[4] = {
+		// The lights by space: print room, corridor, monitor room, hangar, and (Brief 31A) the way home's corridor beyond the
+		// hangar's wall opposite its hatch.
+		const FBox Spaces[5] = {
 			FBox(FVector(0.f, -400.f, 0.f), FVector(800.f, 400.f, 400.f)),
 			FBox(FVector(810.f, -150.f, 0.f), FVector(2810.f, 150.f, 350.f)),
 			FBox(FVector(RoomCentre.X - 700.f, RoomCentre.Y - 700.f, 0.f), FVector(RoomCentre.X + 700.f, RoomCentre.Y + 700.f, 600.f)),
-			HangarBox };
-		const TCHAR* Names[4] = { TEXT("print room"), TEXT("corridor"), TEXT("monitor room"), TEXT("hangar") };
-		int32 Count[4] = { 0, 0, 0, 0 };
+			HangarBox,
+			FBox(FVector(HangarBox.Min.X, HangarBox.Max.Y + 1.f, 0.f), FVector(HangarBox.Max.X, HangarBox.Max.Y + 3100.f, 400.f)) };
+		const TCHAR* Names[5] = { TEXT("print room"), TEXT("corridor"), TEXT("monitor room"), TEXT("hangar"), TEXT("way home's corridor") };
+		int32 Count[5] = { 0, 0, 0, 0, 0 };
 		int32 Total = 0;
 		// Brief 15: every light of the home's light group is a movable light without shadows (so it goes dark while
 		// Stopped); Brief 14 also required the hangar's four lights at 6000 lm each.
@@ -1202,7 +1204,7 @@ namespace PrologueDebug
 				++Total;
 				const ULightComponent* LC = Light->GetLightComponent();
 				FString Space = TEXT("none");
-				for (int32 I = 0; I < 4; ++I)
+				for (int32 I = 0; I < 5; ++I)
 				{
 					if (Spaces[I].ExpandBy(1.f).IsInside(Light->GetActorLocation()))
 					{
@@ -1216,10 +1218,11 @@ namespace PrologueDebug
 					LC ? LC->Intensity : -1.f, LC && Cast<UPointLightComponent>(LC) && Cast<UPointLightComponent>(LC)->IntensityUnits == ELightUnits::Lumens ? TEXT("lm") : TEXT("(units)")));
 			}
 		}
-		// Brief 15: 20 lights, print room 3, corridor 5, monitor room 4, hangar 8 (Brief 14: 10, 1 / 3 / 2 / 4).
-		Check(Total == 20 && Count[0] == 3 && Count[1] == 5 && Count[2] == 4 && Count[3] == 8 && bNoShadows,
-			FString::Printf(TEXT("%s: %d lights: print room %d, corridor %d, monitor room %d, hangar %d (all movable, no shadows: %d)"), *Label, Total, Count[0], Count[1], Count[2], Count[3],
-				bNoShadows ? 1 : 0));
+		// Brief 31A: 21 lights, the way home's corridor 1 at its mouth (Brief 15: 20 lights, print room 3, corridor 5, monitor
+		// room 4, hangar 8; Brief 14: 10, 1 / 3 / 2 / 4).
+		Check(Total == 21 && Count[0] == 3 && Count[1] == 5 && Count[2] == 4 && Count[3] == 8 && Count[4] == 1 && bNoShadows,
+			FString::Printf(TEXT("%s: %d lights: print room %d, corridor %d, monitor room %d, hangar %d, way home's corridor %d (all movable, no shadows: %d)"), *Label, Total, Count[0],
+				Count[1], Count[2], Count[3], Count[4], bNoShadows ? 1 : 0));
 	}
 
 	/** Stop for 1 s, then the pause menu for 1 s: Progress() and the departure's phase stand still in both. */
@@ -1564,7 +1567,9 @@ namespace PrologueDebug
 			CheckInput(TEXT("A: menu to home"));
 			const APlayerStart* Start = First<APlayerStart>();
 			const TArray<ADoorDevice*> Doors = All<ADoorDevice>();
-			Check(Start && Doors.Num() == 2 && Start->GetActorLocation().X < Doors[0]->GetActorLocation().X,
+			// Brief 31A: 4 doors (Brief 14: 2): the print room's and the hangar's entry door, then the way home's door and the
+			// door that closes its corridor, both shut in the departure.
+			Check(Start && Doors.Num() == 4 && Start->GetActorLocation().X < Doors[0]->GetActorLocation().X,
 				FString::Printf(TEXT("A: the player starts in the print room, before the first of %d doors"), Doors.Num()));
 			CheckLightsLit(TEXT("A: home"));
 			CheckHomeLayout(TEXT("A: home"));

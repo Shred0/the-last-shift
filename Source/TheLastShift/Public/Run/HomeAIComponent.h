@@ -45,7 +45,9 @@ struct FHomeJump;
  * - The prologue's maps (outside the run): every row of a group of the prologue table (FPrologueRow), once per map, in
  *   order: Wake when the home map begins, the others when the map's triggers fire (APrologueLineTrigger::OnAnyLine:
  *   Hologram, Hangar on entering their rooms, Light when the player steps out of the ship in the arrival, Hatch when the
- *   arrival's hatch has closed and the Light lines are typed out, Door once the Hatch lines are typed out).
+ *   arrival's hatch has closed and the Light lines are typed out, Door once the Hatch lines are typed out). Brief 31A: the
+ *   epilogue's groups come from the epilogue table (Landing when the player steps out of the ship on the way home); on
+ *   the way home the home map's Wake lines are not said.
  * The travel screen's labels are built here too, for the run subsystem: BuildTravelLabel (an AreaEntry row) and
  * BuildPrologueTravelLabel (the first Flight row).
  *
@@ -88,6 +90,9 @@ public:
 
 	/** The label of the travel screen between the prologue's two maps: the first Flight row, as BuildTravelLabel builds a line. */
 	static bool BuildPrologueTravelLabel(const UObject* WorldContext, FText& OutLabel, float& OutReadingSeconds);
+
+	/** Brief 31A: the label of the flight back: the first Return row of the epilogue table, as BuildTravelLabel builds a line. */
+	static bool BuildReturnTravelLabel(const UObject* WorldContext, FText& OutLabel, float& OutReadingSeconds);
 
 	/** Rows of Group in a prologue table (FPrologueRow), in ascending Order (ties by row name). */
 	static TArray<FName> FindPrologueRows(const UDataTable* Table, FName Group);

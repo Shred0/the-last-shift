@@ -11,6 +11,7 @@
 #include "Narrative/NarrativeRows.h"
 #include "Prologue/PrologueLineTrigger.h"
 #include "Run/HomeAIComponent.h"
+#include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "TextChannel/TextChannelComponent.h"
 #include "TheLastShift.h"
@@ -32,13 +33,16 @@ void APrologueBriefingTerminal::BeginPlay()
 {
 	Super::BeginPlay();
 	bAsked = bLastRowSeen = bBriefed = bPaid = false;
+	// Brief 31A: on the way home the hangar's terminal offers and takes nothing.
+	bReturnInert = URunSubsystem::IsReturnStateOf(GetWorld());
 	BriefedRun = -1.0;
 	Rows.Reset();
 	Weights.Reset();
 	TotalWeight = 0.f;
 	Progress = 0.f;
 	LineHandle = APrologueLineTrigger::OnAnyLine.AddUObject(this, &APrologueBriefingTerminal::HandleLine);
-	UE_LOG(LogTheLastShift, Log, TEXT("%s: waits for the briefing (group %s) before it works."), *GetName(), *BriefingGroup.ToString());
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: %s (group %s)."), *GetName(), bReturnInert ? TEXT("the way home: offers nothing") : TEXT("waits for the briefing before it works"),
+		*BriefingGroup.ToString());
 }
 
 void APrologueBriefingTerminal::EndPlay(const EEndPlayReason::Type EndPlayReason)
