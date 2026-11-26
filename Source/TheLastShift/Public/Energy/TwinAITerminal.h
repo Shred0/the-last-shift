@@ -35,6 +35,19 @@ public:
 
 	virtual bool AcceptsPayment() const override;
 	virtual bool OffersPayment() const override { return AcceptsPayment(); }
+	virtual EPaymentKind GetPaymentKind() const override { return EPaymentKind::Twin; }
+
+	/**
+	 * Brief 26: the first payment wakes the twin AI and costs UTheLastShiftSettings::TwinAIWakeCost, every later part
+	 * TwinAIPartCost (one owner of both: the settings; Cost is not read here). The prompt and the refusal show it.
+	 */
+	virtual int32 GetCost() const override;
+
+	/** Its own body: UTheLastShiftSettings::TwinTerminalBodyMesh (SM_TwinTerminal), set into a wall of the twin AI's room. */
+	virtual UStaticMesh* GetModelledBodyMesh() const override;
+
+	/** Brief 27: the slanted desk at the front of SM_TwinTerminal, its one screen. */
+	virtual bool GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const override;
 
 protected:
 	virtual void HandlePaid(APawn* InstigatorPawn) override;

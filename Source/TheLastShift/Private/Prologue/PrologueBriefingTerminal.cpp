@@ -56,22 +56,36 @@ void APrologueBriefingTerminal::HandleLine(UWorld* World, FName Group)
 	}
 	bAsked = true;
 	const UDataTable* Table = UTheLastShiftSettings::Get()->LoadPrologueTable();
-	Rows = UHomeAIComponent::FindPrologueRows(Table, BriefingGroup);
+	const UDataTable* Engineer = UTheLastShiftSettings::Get()->LoadEngineerLinesTable();
+	const TArray<FName> GroupRows = UHomeAIComponent::FindPrologueRows(Table, BriefingGroup);
+	Rows.Reset();
 	Weights.Reset();
 	TotalWeight = 0.f;
-	for (const FName& RowName : Rows)
+	int32 EngineerLines = 0;
+	for (const FName& RowName : GroupRows)
 	{
+		// The engineer's lines before a row of the briefing are said before it, so they are rows of the briefing too.
+		for (const FName& LineName : UTextChannelComponent::FindEngineerLines(Engineer, RowName))
+		{
+			const FEngineerLineRow* Line = Engineer->FindRow<FEngineerLineRow>(LineName, TEXT("Briefing"), false);
+			Rows.Add(LineName);
+			Weights.Add(FMath::Max(1.f, Line ? static_cast<float>(Line->Text.ToString().Len()) : 1.f));
+			TotalWeight += Weights.Last();
+			++EngineerLines;
+		}
 		const FPrologueRow* Row = Table ? Table->FindRow<FPrologueRow>(RowName, TEXT("Briefing"), false) : nullptr;
+		Rows.Add(RowName);
 		Weights.Add(FMath::Max(1.f, Row ? static_cast<float>(Row->Text.ToString().Len()) : 1.f));
 		TotalWeight += Weights.Last();
 	}
-	if (Rows.IsEmpty())
+	if (GroupRows.IsEmpty())
 	{
 		SetBriefed(TEXT("the briefing group has no row"));
 		return;
 	}
-	LastRow = Rows.Last();
-	UE_LOG(LogTheLastShift, Log, TEXT("%s: the briefing started (%d rows); works once %s is typed out."), *GetName(), Rows.Num(), *LastRow.ToString());
+	LastRow = GroupRows.Last();
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: the briefing started (%d rows, %d engineer lines among them); works once %s is typed out."), *GetName(), Rows.Num(), EngineerLines,
+		*LastRow.ToString());
 }
 
 void APrologueBriefingTerminal::SetBriefed(const TCHAR* Why)
@@ -101,7 +115,8 @@ void APrologueBriefingTerminal::Tick(float DeltaSeconds)
 	}
 	UpdateProgress(Channel);
 	bLastRowSeen |= Channel->GetCurrentRowName() == LastRow;
-	if (bLastRowSeen && Channel->IsTypedOut())
+	// The last row shown, or gone from the queue without being shown (dropped at Silent): what came before it is typed out.
+	if ((bLastRowSeen || !Channel->IsQueued(LastRow)) && Channel->IsTypedOut())
 	{
 		SetBriefed(*FString::Printf(TEXT("%s typed out"), *LastRow.ToString()));
 	}

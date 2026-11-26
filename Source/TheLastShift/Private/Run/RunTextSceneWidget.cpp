@@ -3,6 +3,7 @@
 #include "Run/RunTextSceneWidget.h"
 
 #include "Run/RunEndingWidget.h"
+#include "Run/RunSceneSubsystem.h"
 #include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 
@@ -21,12 +22,25 @@ void URunTextSceneWidget::Play(ERunSceneKind InKind, FName InSceneName, const TA
 	ContinueLabel = LOCTEXT("SceneContinue", "Continue");
 	SkipLabel = LOCTEXT("SceneSkip", "Skip");
 	SetShowControls(true);
-	TArray<FStdTextSceneEntry> NewEntries;
+	TArray<ESceneVoice> Voices;
 	for (const FRunSceneLine& Line : Lines)
 	{
+		Voices.Add(Line.Voice);
+	}
+	TArray<FStdTextSceneEntry> NewEntries;
+	for (int32 Index = 0; Index < Lines.Num(); ++Index)
+	{
+		const FRunSceneLine& Line = Lines[Index];
 		FStdTextSceneEntry& Entry = NewEntries.AddDefaulted_GetRef();
 		Entry.Text = FText::FromString(Line.Text);
 		Settings->GetSceneVoiceColors(Line.Voice, Entry.TextColor, Entry.BackgroundColor);
+		// Brief 27: the cut from the paradise's white to black (where the interruption's noise plays) fills with static.
+		if (RunScenes::IsInterruptionLine(Voices, Index))
+		{
+			Entry.BackgroundEffect = EStdTextSceneEffect::Noise;
+			Entry.EffectSeconds = Settings->GetStaticSeconds();
+			Entry.EffectFadeSeconds = Settings->GetStaticFadeSeconds();
+		}
 	}
 	OnEntryStarted.AddUniqueDynamic(this, &URunTextSceneWidget::HandleEntryStarted);
 	OnSceneFinished.AddUniqueDynamic(this, &URunTextSceneWidget::HandleFinished);

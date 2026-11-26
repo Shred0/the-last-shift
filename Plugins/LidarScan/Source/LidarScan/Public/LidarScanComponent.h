@@ -15,6 +15,92 @@ class UNiagaraSystem;
 class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 
+/** How the neighbour search finds the links of a scan (see ULidarScanComponent::LinkMode). */
+UENUM(BlueprintType)
+enum class ELidarLinkMode : uint8
+{
+	/** Each point to at most LinkNeighbours of its nearest points, mutual nearest neighbours. */
+	Nearest,
+	/** Each point to the next live point to its right and below it on the capture's grid (at most 4 links a point). */
+	Grid
+};
+
+/**
+ * One scan's capture as the scan memory reads it (see ULidarScanComponent::MemoryRatio and the contract in
+ * LidarScanComponent.cpp): its pose and coverage, the size of its depth capture and the sampling values it was taken with.
+ */
+USTRUCT(BlueprintType)
+struct FLidarMemoryCapture
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	FLidarScanContext Context;
+
+	/** Width of the depth capture, texels. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 Width = 0;
+
+	/** Height of the depth capture, texels. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 Height = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory", meta = (Units = "cm"))
+	float MinSampleDepth = 0.f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory", meta = (Units = "cm"))
+	float NearThinningDistance = 0.f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory", meta = (Units = "cm"))
+	float SurfaceBias = 0.f;
+
+	/** Texels. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	float SampleJitter = 0.f;
+};
+
+/**
+ * What the scan memory did at the last scan that tested older scans: the captured points and line particles of the older
+ * scans right before its points appeared, and the same scans now (GPU counts, read back with a frame or two of latency).
+ */
+USTRUCT(BlueprintType)
+struct FLidarMemoryStats
+{
+	GENERATED_BODY()
+
+	/** The scan the older ones were tested against, -1 when no scan has tested older ones yet. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 ScanIndex = INDEX_NONE;
+
+	/** The ratio and tolerance that scan was tested with. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	float Ratio = 0.f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory", meta = (Units = "cm"))
+	float Tolerance = 0.f;
+
+	/** Older scans tested, and how many of them are still alive (only those are counted below). */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 OlderScans = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 OlderScansAlive = 0;
+
+	/** Captured points of the older scans still alive, right before and now. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 PointsBefore = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 PointsNow = 0;
+
+	/** Line particles of the older scans still alive, right before and now. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 LinesBefore = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Memory")
+	int32 LinesNow = 0;
+};
+
 /**
  * One scan slot: a Niagara instance holding the points of one scan plus the depth target it was spawned from.
  * Once MaxAliveScans is reached the oldest scan is evicted (its particles removed) and its slot holds the new scan.
@@ -68,6 +154,18 @@ struct FLidarScanSlot
 
 	/** Last growth fraction of the lines pushed to the slot's system, negative when none. */
 	float PushedLinkGrowth = -1.f;
+
+	/** The capture of the slot's scan as the scan memory reads it (pose, size, sampling values at scan time). */
+	UPROPERTY(Transient)
+	FLidarMemoryCapture MemoryCapture;
+
+	/** The slot's point system tests its points against a newer scan's capture (scan memory on, this scan not the newest). */
+	bool bMemoryTest = false;
+
+	/** Scan memory diagnostics: the newer scan this slot was last tested against, and its particles right before. */
+	int32 MemoryTestedBy = INDEX_NONE;
+	int32 MemoryPointsBefore = 0;
+	int32 MemoryLinesBefore = 0;
 
 	bool IsActive() const { return ScanIndex != INDEX_NONE; }
 	bool IsWarming() const { return !IsActive() && WarmUntilRealTime >= 0.0; }
@@ -129,7 +227,7 @@ struct FLidarLinkStats
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
 	int32 Dropped = 0;
 
-	/** Most links on one point (never above LinkNeighbours). */
+	/** Most links on one point (never above LinkNeighbours in the Nearest mode, 4 in the Grid mode). */
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
 	int32 MaxDegree = 0;
 
@@ -155,6 +253,17 @@ struct FLidarLinkStats
 	/** Texels of the sample target the spawn did not write (0 when every texel of the capture was written). */
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
 	int32 UnwrittenTexels = 0;
+
+	/** The mode the scan's links were found with. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	ELidarLinkMode Mode = ELidarLinkMode::Nearest;
+
+	/**
+	 * Texel of the capture (y * width + x) of the first point whose link the cap dropped, -1 when none was. Links are kept
+	 * in texel order, so every link from a texel after it is dropped too: the rows of the capture from its row down.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	int32 FirstDroppedTexel = INDEX_NONE;
 };
 
 /** One link of a scan (diagnostics): the two points' surface positions, their texels in the capture and their channels. */
@@ -180,6 +289,13 @@ struct FLidarLink
 
 	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
 	int32 EndChannel = 0;
+
+	/** The two points' surface normals. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	FVector StartNormal = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Lidar|Links")
+	FVector EndNormal = FVector::ZeroVector;
 };
 
 struct FLidarLinkJob;
@@ -454,12 +570,13 @@ public:
 	// --- Occlusion (live) ---
 
 	/**
-	 * Points behind the real geometry: 0 hides them (the engine's depth test, exactly as a component without this
-	 * setting: same material, same points, same cost); above 0 they are drawn at this factor of their own intensity,
+	 * Points behind the real geometry: 0 hides them (the point material's own depth test, exactly as a component without
+	 * this setting: same material, same points, same cost); above 0 they are drawn at this factor of their own intensity,
 	 * channel colour kept. At 1 every alive point is drawn as if it had no depth test: the scan looks as if the geometry
 	 * were not there. Between 0 and 1 a point behind geometry by less than max(5 cm, 1% of its depth), or within 8 pixels
 	 * of an occluder's edge, stays hidden. A point on a surface in view is never treated as hidden. Injected points behind
-	 * geometry stay hidden unless their source sets FLidarSourceSettings::bShowBehindGeometry.
+	 * geometry stay hidden unless their source sets FLidarSourceSettings::bShowBehindGeometry. The two point materials test
+	 * depth on the same values, so every pixel of a sprite is drawn by exactly one of them, a depth tie included.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Occlusion", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
 	float OccludedIntensity = 0.f;
@@ -494,19 +611,35 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Lidar|Diagnostics")
 	int32 GetOccludedMaterialSlotCount() const;
 
-	// --- Links (neighbours, distance, angle and cap applied on the next scan; width and intensity live) ---
+	// --- Links (mode, neighbours, distance, angle and cap applied on the next scan; width and intensity live) ---
 
 	/**
-	 * Neighbour lines. 0 = off: no search, no line, and the capture, the points and the cost are those of a component
-	 * without lines. Above 0, each captured point of a scan is linked to at most this many of its nearest points of the
-	 * same scan and channel within LinkMaxDistance: a link joins two points when each is among the other's nearest
-	 * (mutual nearest neighbours), so no point has more links than this. Links are found once per scan, on a worker
-	 * thread, from the scan's depth capture read back from the GPU a few frames after the scan; they never join two scans
-	 * and never touch injected points. A scan's lines grow from both of their points toward each other over LinkSeconds,
-	 * fade, clear and are removed with the scan, and are depth-tested against the real geometry whatever OccludedIntensity.
+	 * Neighbour lines. 0 = off, in either LinkMode: no search, no line, and the capture, the points and the cost are those
+	 * of a component without lines. Above 0, in the Nearest mode each captured point of a scan is linked to at most this
+	 * many of its nearest points of the same scan and channel within LinkMaxDistance: a link joins two points when each is
+	 * among the other's nearest (mutual nearest neighbours), so no point has more links than this. In the Grid mode the
+	 * value only says that lines are on. Links are found once per scan, on a worker thread, from the scan's samples read
+	 * back from the GPU a few frames after the scan; they never join two scans and never touch injected points. A scan's
+	 * lines grow from both of their points toward each other over LinkSeconds, fade, clear and are removed with the scan,
+	 * and are depth-tested against the real geometry whatever OccludedIntensity.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "0", ClampMax = "8", UIMin = "0", UIMax = "8"))
 	int32 LinkNeighbours = 0;
+
+	/**
+	 * How the links are found when lines are on (LinkNeighbours > 0). Nearest: mutual nearest neighbours, as above.
+	 * Grid: each captured point is linked to the next live sample to its right in its row of the capture and to the next
+	 * live sample below it in its column (looked for over a few texels, more near the capture where the near thinning
+	 * keeps few samples), when that sample is of the same channel, within LinkMaxDistance and within LinkMaxNormalAngle;
+	 * a regular mesh with at most 4 links a point. Only the search differs: the lines are the same in both modes. Applies
+	 * from the next scan; alive scans keep their lines.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links")
+	ELidarLinkMode LinkMode = ELidarLinkMode::Nearest;
+
+	/** Sets LinkMode, from the next scan. */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Links")
+	void SetLinkMode(ELidarLinkMode InMode) { LinkMode = InMode; }
 
 	/** Longest link, between the two points' surface positions. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Links", meta = (ClampMin = "1.0", ClampMax = "1000.0", UIMin = "1.0", UIMax = "1000.0", Units = "cm"))
@@ -596,12 +729,66 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Lidar|Diagnostics")
 	bool GetLastScanSamples(TArray<FVector>& OutPositions, TArray<int32>& OutChannels, int32& OutWidth, FLidarScanContext& OutContext) const;
 
+	/** Diagnostics: per texel the surface normal of the last searched scan's samples, as read back (see GetLastScanSamples). */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Diagnostics")
+	bool GetLastScanSampleNormals(TArray<FVector>& OutNormals) const;
+
 	/**
 	 * Diagnostics: the links of the last searched scan, and per texel of its capture the planar depth of its point (-1
 	 * without one) and its number of links. False before the first search.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Lidar|Diagnostics")
 	bool GetLastScanLinks(TArray<FLidarLink>& OutLinks, TArray<float>& OutPointDepths, TArray<int32>& OutDegrees, int32& OutWidth) const;
+
+	// --- Memory (applied from the next scan) ---
+
+	/**
+	 * Scan memory by density. 0 = off: every scan keeps all of its points until its slot is reused or the scans are
+	 * cleared, and the points, the lines, the counts and the cost are those of a component without it. Above 0, when a
+	 * scan's points appear, every captured point of every older alive scan is removed if all of these hold: it lies inside
+	 * the new capture's coverage; it is farther from the new capture than the new scan's MinSampleDepth; the new capture
+	 * holds the surface the point lies on (the surface reconstructed from the new depth capture at the texel the point falls
+	 * in faces the same way as the point's own surface, within 60 degrees, and the point lies within MemoryTolerance of it,
+	 * plus the point's own sampling error: the jitter of its sample across a texel of its own scan); and the new scan is
+	 * dense enough there: its sample spacing on that surface at the point is at most MemoryRatio times the spacing of the
+	 * point's own scan at the point. Spacing is the one the points' level rule uses (the width of a capture texel at the
+	 * sample's depth, times the near thinning's spread), taken on the surface in world units: over the cosine between the
+	 * surface's normal and the capture's ray. At 2 a scan taken from about the same distance or nearer replaces the older
+	 * points, one taken from much farther leaves them; a very large value lets the newest scan replace whatever it
+	 * captures. A line goes when either of its points goes. Injected points are never removed. One scan alone is never
+	 * touched. Applied from the next scan.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Memory", meta = (ClampMin = "0.0", ClampMax = "100000.0", UIMin = "0.0", UIMax = "8.0"))
+	float MemoryRatio = 0.f;
+
+	/**
+	 * Scan memory: how far a point of an older scan may lie from the surface the new capture holds and still be on it,
+	 * on top of its own sampling error. Below the step between two parallel faces it must tell apart (a rib on a panel);
+	 * the other face of a wall faces the other way and is never on the same surface. Applied from the next scan.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Memory", meta = (ClampMin = "0.0", ClampMax = "50.0", UIMin = "0.0", UIMax = "50.0", Units = "cm"))
+	float MemoryTolerance = 4.f;
+
+	/** Sets MemoryRatio and MemoryTolerance (clamped), from the next scan. */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Memory")
+	void SetMemory(float InRatio, float InTolerance);
+
+	/** What the scan memory did at the last scan that tested older scans (diagnostics). */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Memory")
+	FLidarMemoryStats GetLastMemoryStats() const;
+
+	/** The capture of an alive scan as the scan memory reads it; false when no alive scan has that index (diagnostics). */
+	UFUNCTION(BlueprintCallable, Category = "Lidar|Memory")
+	bool GetScanMemoryCapture(int32 ScanIndex, FLidarMemoryCapture& OutCapture) const;
+
+	/**
+	 * The scan memory's rule as the point system applies it (the contract in LidarScanComponent.cpp): true when the point
+	 * of an older scan at SurfacePosition with Normal (as its scan spawned them), whose scan's capture is Own, is removed by
+	 * the newer scan whose capture is Newer and whose depth capture is NewerDepth (Newer.Width x Newer.Height planar
+	 * depths, row by row from the top), at Ratio and Tolerance. A reference for tests; the point system does not call it.
+	 */
+	static bool MemoryRemovesPoint(const FVector& SurfacePosition, const FVector& Normal, const FLidarMemoryCapture& Own,
+		const FLidarMemoryCapture& Newer, TConstArrayView<float> NewerDepth, float Ratio, float Tolerance);
 
 	// --- Injected (applied on the next scan) ---
 
@@ -743,6 +930,21 @@ private:
 	void RejectLinks(FLidarScanSlot* Slot, const FLidarLinkJob& Job, int32 Points, const TCHAR* Why);
 
 	/**
+	 * Scan memory: as the points of scan NewestScanIndex appear, gives every older alive scan the newest scan's capture to
+	 * test its points against (MemoryRatio above 0), or switches the test off where it was on. Nothing is set on any slot
+	 * while the memory stays off.
+	 */
+	void PushMemory(int32 NewestScanIndex);
+	/** Switches a slot's memory test off (its scan is gone or is the newest). */
+	void StopMemoryTest(FLidarScanSlot& Slot);
+
+	/** The scan the older scans were last tested against, with the values it used (-1: none yet). */
+	int32 LastMemoryScanIndex = INDEX_NONE;
+	float LastMemoryRatio = 0.f;
+	float LastMemoryTolerance = 0.f;
+	int32 LastMemoryOlderScans = 0;
+
+	/**
 	 * 1 x 1 target bound as the sample target of every slot that has none of its own (lines never on in it): the point
 	 * system's render target interface needs a bound target, and with User.ExportSamples false nothing is written to it.
 	 */
@@ -756,6 +958,7 @@ private:
 	int32 DiscardedLinkResults = 0;
 	TArray<FVector> LastSamplePositions;
 	TArray<int32> LastSampleChannels;
+	TArray<FVector> LastSampleNormals;
 	FLidarScanContext LastSampleContext;
 	/** Advances the searches (readback ready, search launched, links handed to their slot); true while any is pending. */
 	bool TickLinkSearches();

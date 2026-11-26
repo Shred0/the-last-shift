@@ -12,6 +12,7 @@
 #include "Input/StdInputSubsystem.h"
 #include "InputAction.h"
 #include "Styling/CoreStyle.h"
+#include "UI/StdUIStyle.h"
 #include "UI/StdUITheme.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(StdKeyPromptWidget)
@@ -173,12 +174,14 @@ FText UStdKeyPromptWidget::GetKeyText() const
 
 void UStdKeyPromptWidget::ApplyStyle()
 {
+	// The theme's body font (the style's font while the style is on), at the prompt's own size.
 	FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Regular", 18);
 	if (const UStdUITheme* Theme = StdUITheme::Get())
 	{
 		Font = Theme->BodyFont;
 	}
 	Font.Size = FMath::Clamp(FontSize, 8, 64);
+	Font.LetterSpacing = 0;
 
 	if (Text_Key)
 	{
@@ -197,7 +200,9 @@ void UStdKeyPromptWidget::ApplyStyle()
 	if (Border_Key)
 	{
 		const float Outline = FMath::Clamp(CapOutline, 0.f, 4.f);
-		Border_Key->SetBrush(FSlateRoundedBoxBrush(FLinearColor::Transparent, 4.f, Outline > 0.f ? Color : FLinearColor::Transparent, Outline));
+		// With the style on the key cap is square, like the style's frames.
+		const float Radius = StdUIStyle::IsEnabled() ? 0.f : 4.f;
+		Border_Key->SetBrush(FSlateRoundedBoxBrush(FLinearColor::Transparent, Radius, Outline > 0.f ? Color : FLinearColor::Transparent, Outline));
 	}
 }
 

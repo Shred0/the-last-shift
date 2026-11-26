@@ -120,7 +120,13 @@
  * ClearScans fades a scan out by scaling PointColor.a on that instance, so the system needs no extra parameter.
  *
  * Occlusion display. Each emitter has two sprite renderers with the same bindings. The first is the one described
- * above: material M_LidarPoint, depth tested, so a point behind real geometry is hidden; it never changes. The second
+ * above: material M_LidarPoint, so a point behind real geometry is hidden; it never changes with OccludedIntensity.
+ * M_LidarPoint has no hardware depth test: it makes the test itself, on the same two values the second material reads,
+ * and draws Base only where the fragment's device Z (Parameters.SvPosition.z) >= the scene's device Z at the same pixel
+ * (LookupDeviceZ of the pixel; reversed Z: the test a depth-tested translucent material makes, equal depth included),
+ * else nothing. A hardware test and a comparison in the shader could disagree by a rounding step where the two depths
+ * tie (a sprite cut by its own surface), and a pixel was then drawn by neither renderer; with both tests in the
+ * shaders on the same values, every pixel of a sprite falls to exactly one side. The second
  * draws with User.PointMaterial (MaterialUserParamBinding; M_LidarPointOccluded when unset) and is enabled by the user
  * bool User.OcclusionDisplay (RendererEnabledBinding), false by default: disabled, it generates and draws nothing, so
  * with OccludedIntensity = 0 (the component never sets either parameter) the points, the materials and the cost are
@@ -134,9 +140,10 @@
  * at F = 1 (OccludedIntensity 1, or any pulse during its link time):
  *   Base * BehindWeight                    if the fragment's device Z < the scene's device Z at the same pixel,
  *   0                                      otherwise,
- * the exact complement of the first renderer's depth test (reversed Z: it keeps device Z >= scene device Z), so the
- * two renderers together draw every sprite pixel of a BehindWeight-1 point once, whatever covers it: as if the points
- * had no depth test, with no margin and no edge band; and between 0 and 1 (F < 1):
+ * the exact complement of the first renderer's test (it keeps device Z >= scene device Z, on the same two values), so
+ * the two renderers together draw every sprite pixel of a BehindWeight-1 point exactly once, never by neither and never
+ * by both, whatever covers it: as if the points had no depth test, with no margin and no edge band; and between 0 and 1
+ * (F < 1):
  *   0                                      if Zp <= Zs(pixel) * 1.001 + 2 cm   (in front, or sunk into its own surface:
  *                                                                               left to the first renderer),
  *   Base * W                               if Zp >  Zmax + max(5 cm, 0.01 * Zp)          (behind geometry),
@@ -156,7 +163,8 @@
  * hidden behind geometry at every moment of the pulse. A channel only changes Base, so a hidden point keeps its
  * channel's colour.
  *
- * Neighbour lines (LinkNeighbours > 0). At 0 nothing below runs: no write, no readback, no search, no line particle. What
+ * Neighbour lines (LinkNeighbours > 0, in either LinkMode). At 0 nothing below runs, whatever LinkMode: no write, no
+ * readback, no search, no line particle. What
  * remains is the Lines emitter of each instance, with no particle, and the shared 1 x 1 placeholder target
  * (PlaceholderSampleTarget) bound to User.SampleTarget with User.ExportSamples false, because the system's render target
  * interface needs a bound target; with 16 scans alive these cost about 0.05 ms of GPU time.
@@ -180,13 +188,27 @@
  * search waits LinkResultDelaySeconds (diagnostics, 0 in normal use) before it is handed to its scan, so that tests can make a
  * result arrive after its scan is gone.
  *
- * The search (worker thread): for each live sample, its LinkNeighbours nearest live samples of the same channel among the
- * samples within 3 texels in the capture (wider near the capture, where the thinning keeps few), within LinkMaxDistance
- * and with normals at most LinkMaxNormalAngle apart; a link joins two samples when each is among the other's nearest
- * (mutual nearest neighbours), so no point has more than LinkNeighbours links; each link once, at most MaxLinksPerScan.
+ * The search (worker thread), in the LinkMode the scan was taken with (FLidarLinkStats::Mode); only the search differs
+ * between the two modes, the lines below are the same.
+ * Nearest: for each live sample, its LinkNeighbours nearest live samples of the same channel among the samples within 3
+ * texels in the capture (wider near the capture, where the thinning keeps few), within LinkMaxDistance and with normals at
+ * most LinkMaxNormalAngle apart; a link joins two samples when each is among the other's nearest (mutual nearest
+ * neighbours), so no point has more than LinkNeighbours links.
+ * Grid: for each live sample at texel (x, y), the first live sample at (x + s, y), s = 1..R, and the first at (x, y + s),
+ * s = 1..R, with R = 1 where the sample's depth is at least NearThinningDistance (a missing neighbour is a hole: an edge,
+ * a sample out of range) and R = min(64, 1 + ceil(3 (Thin^2 - 1))) nearer, Thin = NearThinningDistance / depth (the
+ * thinning keeps one sample in Thin^2 there); the link is kept when that sample is of the same channel, within
+ * LinkMaxDistance and with normals at most LinkMaxNormalAngle apart; a live sample that fails ends the look (a link never
+ * passes over a live sample), and the per-sample jitter stays inside its texel, so it never changes who is next. At most 4
+ * links a point. Where the near thinning leaves gaps, a right link and a link below can cross on screen over a texel that
+ * has no sample.
+ * In both modes each link once, from its lower texel, in texel order (the grid's right link before the one below), and
+ * MaxLinksPerScan keeps the first ones: the links dropped are those of the last rows of the capture (the bottom of the
+ * view, FLidarLinkStats::FirstDroppedTexel).
  *
  * Lines emitter (third emitter of the same instance: ghost cap, ClearScans and eviction reach it as the others). Spawn:
  * one burst (loop count 1) of User.LinkSpawnCount = min(MaxLinksPerScan, ceil(LinkNeighbours * W * H / 2)) particles
+ * (Grid: min(MaxLinksPerScan, 2 * W * H))
  * with the points; particle i stores Particles.LidarLinkIndex = i. Update: while User.LinkCount is -1 (the search runs)
  * every particle has size 0; once the links arrive, particles with LidarLinkIndex >= LinkCount die. Each reads A, B, NA, NB
  * (LinkStarts, LinkEnds, LinkStartNormals with the channel in a, LinkEndNormals) at its index:
@@ -208,6 +230,48 @@
  * where UV.y <= g / 2 or UV.y >= 1 - g / 2, g = DynamicMaterialParameter.x (all of it at g >= 0.999): a line grows from
  * both of its points toward its middle. User.LinkGrowth = (world time since the scan) / LinkSeconds, clamped to [0, 1]: the
  * pulse's clock, so it stands still behind the pause menu, and older scans stay at 1.
+ *
+ * Scan memory (MemoryRatio > 0). When a scan's points are activated (ActivateScanPoints, the frame they appear in), every
+ * other alive scan that is older and not fading out gets the new scan's capture: User.MemoryDepthTextureDI (texture interface
+ * bound to the new slot's depth target, R = planar depth), User.MemoryOrigin (position), User.MemoryForward, MemoryRight,
+ * MemoryUp (vectors), User.MemoryTanHalfFov, User.MemoryCaptureWidth, User.MemoryCaptureHeight, User.MemoryMaxRange,
+ * User.MemoryMinSampleDepth, User.MemoryNearThinningDistance (the new scan's values), User.MemoryTolerance, User.MemoryRatio
+ * and User.MemoryTest = true. The newest scan, and every slot while the memory is off, has User.MemoryRatio = 0 and
+ * User.MemoryTest = false (their defaults); with the memory off from the start the component sets none of these on any slot,
+ * so the points, lines and counts are those of a component without it. The test runs in the update of the Points emitter (on
+ * each point, S = LidarSurfacePosition, N = LidarNormal) and of the Lines emitter (on each end, S = LinkA or LinkB, N =
+ * LinkNA.rgb or LinkNB.rgb: the same values the point was spawned with, read back), every frame, against the newest scan's
+ * capture; once removed a particle is dead, so each older scan keeps only what no newer scan captured densely enough. The
+ * Injected emitter is not tested. With O, F, T, W the instance's own capture (CaptureOrigin, CaptureForward, TanHalfFov.x,
+ * CaptureWidth), b = SurfaceBias, J = SampleJitter, NTD = NearThinningDistance, and C the newer capture (O', F', R', U', T',
+ * W', H', MaxRange', MinSampleDepth', NTD' from the Memory* parameters, Z'(x, y) its depth texel), a point is removed when
+ *   MemoryRatio > 0 and |N|^2 >= 0.25,
+ *   d0 = max(dot(S - O, F), 0.001), Raw = d0 + b, S' = O + (S - O) * Raw / d0  (the sample before its bias),
+ *   V = S' - O', d = dot(V, F'), u = dot(V, R') / (d T'.x), v = dot(V, U') / (d T'.y)  (d floored at 0.001):
+ *   max(MinSampleDepth', 1) < d < MaxRange' and |u| <= 1 and |v| <= 1                      (coverage, nearest depth),
+ *   texel (x, y) = clamp(floor(((u + 1) / 2 W', (1 - v) / 2 H')), 0, (W' - 1, H' - 1)), Zc = Z'(x, y), 1 < Zc < MaxRange',
+ *   Pc = O' + Ray'(x, y) Zc with Ray'(x, y) = F' + (2 (x + 0.5) / W' - 1) T'.x R' + (1 - 2 (y + 0.5) / H') T'.y U',
+ *   N' = the captured surface's normal at (x, y): per axis, of the neighbour texels (x +- 1, or y +- 1) that are inside the
+ *        target and have 1 < Z' < MaxRange', the one whose one-sided tangent (T+ = P(+1) - Pc, T- = Pc - P(-1)) lies flattest
+ *        on the point's own surface, |dot(T, n)| / |T| the smaller (+1 on a tie; at a corner, the neighbour on the point's
+ *        side of it), gives that axis's tangent; if an axis has none, or the chosen |Z' - Zc| > 0.25 max(Zc, 1), or
+ *        |cross|^2 <= 1e-8, N' = normalize(O' - Pc), else N' = normalize(cross(TX, TY)) turned toward O' (texel y + 1 is
+ *        down: its ray is Ray' - 2 T'.y / H' U'),
+ *   dot(n, N') >= 0.5 with n = normalize(N)                                     (the same surface faces the same way),
+ *   Dist <= MemoryTolerance + sqrt(2) J w sqrt(max(0, 1 - dot(n, F)^2)), w = Raw 2 T / W   (on that surface: the tolerance
+ *        plus the sample's own error, its jittered ray across up to J texels at its texel's depth), with Dist the smallest of
+ *        |dot(S' - Pc, N')| and |dot(S' - Pk, n)| for Pk = O' + Ray'(k) Z'(k), k the centre texel and its four neighbours
+ *        inside the target with 1 < Z'(k) < MaxRange' (within a texel the captured sample may lie on the next face of the
+ *        same surface, a step or an edge, while the point lies on the other),
+ *   s' <= MemoryRatio s, the spacings on the surface in world units at the point:
+ *        s  = w Thin / max(|dot(n, normalize(S' - O))|, 0.02),  Thin  = NTD > 0 ? max(1, NTD / max(Raw, 1)) : 1,
+ *        s' = d 2 T'.x / W' Thin' / max(|dot(n, normalize(V))|, 0.02), Thin' = NTD' > 0 ? max(1, NTD' / max(d, 1)) : 1.
+ * A removed point gets DataInstance.Alive = false. A line particle dies when User.LinkCount >= 0 and either of its ends passes
+ * the same test, so a line goes with either of its points (its ends are the points' own values, in either link mode); a
+ * line of a scan whose links have not arrived yet (LinkCount -1) is never tested. The depth reads are five SampleTexture
+ * modules per point or line end (nearest filter, texel centres) that write the depth into Particles.Color before the colour
+ * module rewrites it, copied into Transient values. ULidarScanComponent::MemoryRemovesPoint is the same rule on the CPU, for
+ * tests.
  *
  * Slots and the ghost cap: one instance holds exactly one scan. At most MaxAliveScans instances exist; when a scan
  * needs a slot and none is idle, the oldest scan's slot is reused and that scan is evicted: the component completes
@@ -315,6 +379,22 @@ namespace LidarScanParams
 	static const FName LineLiftMaxCm(TEXT("User.LineLiftMaxCm"));
 	static const FName ExportSamples(TEXT("User.ExportSamples"));
 	static const FName SampleTarget(TEXT("User.SampleTarget"));
+
+	/** Scan memory: the newer capture an older scan's points and lines are tested against (see the contract above). */
+	static const FName MemoryTest(TEXT("User.MemoryTest"));
+	static const FName MemoryRatio(TEXT("User.MemoryRatio"));
+	static const FName MemoryTolerance(TEXT("User.MemoryTolerance"));
+	static const FName MemoryDepthTexture(TEXT("User.MemoryDepthTextureDI"));
+	static const FName MemoryOrigin(TEXT("User.MemoryOrigin"));
+	static const FName MemoryForward(TEXT("User.MemoryForward"));
+	static const FName MemoryRight(TEXT("User.MemoryRight"));
+	static const FName MemoryUp(TEXT("User.MemoryUp"));
+	static const FName MemoryTanHalfFov(TEXT("User.MemoryTanHalfFov"));
+	static const FName MemoryCaptureWidth(TEXT("User.MemoryCaptureWidth"));
+	static const FName MemoryCaptureHeight(TEXT("User.MemoryCaptureHeight"));
+	static const FName MemoryMaxRange(TEXT("User.MemoryMaxRange"));
+	static const FName MemoryMinSampleDepth(TEXT("User.MemoryMinSampleDepth"));
+	static const FName MemoryNearThinningDistance(TEXT("User.MemoryNearThinningDistance"));
 
 	/** Scalar parameter of OccludedPointMaterial that carries the pulse factor. */
 	static const FName OccludedFactorParameter(TEXT("OccludedFactor"));
@@ -782,13 +862,24 @@ void ULidarScanComponent::Scan()
 	Slot.StartWorldTime = World ? World->GetTimeSeconds() : 0.0;
 	Slot.SupersededRealTime = -1.0;
 
-	// Lines: the emitter spawns, with the points, as many line particles as the scan can have links (each point has at
-	// most LinkNeighbours, each link two points); they stay invisible until the search hands the links over (LinkCount
-	// -1), then those above LinkCount die. Off: nothing spawns, nothing is read back or searched.
+	// The values the scan memory reads of this capture, as pushed to the slot's system above.
+	Slot.MemoryCapture.Context = Slot.Context;
+	Slot.MemoryCapture.Width = Target->SizeX;
+	Slot.MemoryCapture.Height = Target->SizeY;
+	Slot.MemoryCapture.MinSampleDepth = FMath::Clamp(MinSampleDepth, 0.f, 200.f);
+	Slot.MemoryCapture.NearThinningDistance = FMath::Clamp(NearThinningDistance, 0.f, 1000.f);
+	Slot.MemoryCapture.SurfaceBias = SurfaceBias;
+	Slot.MemoryCapture.SampleJitter = FMath::Clamp(SampleJitter, 0.f, 1.f);
+
+	// Lines: the emitter spawns, with the points, as many line particles as the scan can have links (Nearest: each point
+	// has at most LinkNeighbours, each link two points; Grid: each point starts at most two, right and below); they stay
+	// invisible until the search hands the links over (LinkCount -1), then those above LinkCount die. Off: nothing
+	// spawns, nothing is read back or searched, in either mode.
 	const int32 Neighbours = FMath::Clamp(LinkNeighbours, 0, 8);
 	if (Neighbours > 0)
 	{
-		const int64 Bound = (static_cast<int64>(Neighbours) * Target->SizeX * Target->SizeY + 1) / 2;
+		const int64 Bound = LinkMode == ELidarLinkMode::Grid ? 2 * static_cast<int64>(Target->SizeX) * Target->SizeY
+			: (static_cast<int64>(Neighbours) * Target->SizeX * Target->SizeY + 1) / 2;
 		Points->SetVariableInt(LidarScanParams::LinkSpawnCount, static_cast<int32>(FMath::Min<int64>(Bound, FMath::Clamp(MaxLinksPerScan, 0, 262144))));
 		Points->SetVariableInt(LidarScanParams::LinkCount, -1);
 		// A sample target created now is bound like a new depth target: the spawn waits one frame for it.
@@ -1146,6 +1237,9 @@ void ULidarScanComponent::ActivateScanPoints(int32 ScanIndex)
 		}
 	}
 
+	// Scan memory: the older scans test their points against this capture from the frame these points appear in.
+	PushMemory(ScanIndex);
+
 	// The GPU spawn burst runs on the system's next tick; report completion once that frame has gone through.
 	if (UWorld* World = GetWorld())
 	{
@@ -1398,6 +1492,8 @@ void ULidarScanComponent::ReleaseSlot(FLidarScanSlot& Slot)
 	{
 		Slot.Points->DeactivateImmediate();
 	}
+	// The slot's next scan is the newest when it appears: it tests nothing until a newer one does.
+	StopMemoryTest(Slot);
 	Slot.ScanIndex = INDEX_NONE;
 	Slot.SupersededRealTime = -1.0;
 	Slot.FadeOutDuration = 0.f;
@@ -1699,6 +1795,282 @@ void ULidarScanComponent::SetLineLift(float InLiftTexels, float InLiftMaxCm)
 	}
 }
 
+// --- Memory ---
+
+namespace LidarScanMemory
+{
+	/** Upper clamps of the two values (MemoryRatio, MemoryTolerance). */
+	static constexpr float MaxRatio = 100000.f;
+	static constexpr float MaxTolerance = 50.f;
+
+	/** Live captured points and line particles of a slot's system (GPU counts, read back with a frame or two of latency). */
+	static void CountParticles(const FLidarScanSlot& Slot, int32& OutPoints, int32& OutLines)
+	{
+		OutPoints = 0;
+		OutLines = 0;
+		const UNiagaraComponent* Points = Slot.Points;
+		const FNiagaraSystemInstanceControllerConstPtr Controller = Points ? Points->GetSystemInstanceController() : nullptr;
+		const FNiagaraSystemInstance* Instance = Controller.IsValid() ? Controller->GetSystemInstance_Unsafe() : nullptr;
+		if (!Instance)
+		{
+			return;
+		}
+		for (const FNiagaraEmitterInstanceRef& Emitter : Instance->GetEmitters())
+		{
+			const FName Name = Emitter->GetEmitterHandle().GetName();
+			const int32 Count = Emitter->IsComplete() ? 0 : Emitter->GetNumParticles();
+			if (Name == LidarScanParams::CapturedEmitterName)
+			{
+				OutPoints += Count;
+			}
+			else if (Name == LidarScanParams::LinesEmitterName)
+			{
+				OutLines += Count;
+			}
+		}
+	}
+}
+
+void ULidarScanComponent::SetMemory(float InRatio, float InTolerance)
+{
+	MemoryRatio = FMath::Clamp(InRatio, 0.f, LidarScanMemory::MaxRatio);
+	MemoryTolerance = FMath::Clamp(InTolerance, 0.f, LidarScanMemory::MaxTolerance);
+}
+
+void ULidarScanComponent::StopMemoryTest(FLidarScanSlot& Slot)
+{
+	if (Slot.bMemoryTest && Slot.Points)
+	{
+		Slot.Points->SetVariableFloat(LidarScanParams::MemoryRatio, 0.f);
+		Slot.Points->SetVariableBool(LidarScanParams::MemoryTest, false);
+	}
+	Slot.bMemoryTest = false;
+}
+
+void ULidarScanComponent::PushMemory(int32 NewestScanIndex)
+{
+	const float Ratio = FMath::Clamp(MemoryRatio, 0.f, LidarScanMemory::MaxRatio);
+	const float Tolerance = FMath::Clamp(MemoryTolerance, 0.f, LidarScanMemory::MaxTolerance);
+	const FLidarScanSlot* Newest = Slots.FindByPredicate([NewestScanIndex](const FLidarScanSlot& S) { return S.IsActive() && S.ScanIndex == NewestScanIndex; });
+	const bool bOn = Ratio > 0.f && Newest && Newest->DepthTarget;
+	int32 Older = 0;
+	for (FLidarScanSlot& Slot : Slots)
+	{
+		const bool bTest = bOn && &Slot != Newest && Slot.Points && Slot.IsActive() && !Slot.IsFadingOut() && Slot.ScanIndex < NewestScanIndex;
+		if (!bTest)
+		{
+			// Off, or the newest scan: nothing is set on a slot that never tested (off stays exactly as without memory).
+			StopMemoryTest(Slot);
+			continue;
+		}
+
+		// Diagnostics: the slot's particles right before its test against this scan.
+		Slot.MemoryTestedBy = NewestScanIndex;
+		LidarScanMemory::CountParticles(Slot, Slot.MemoryPointsBefore, Slot.MemoryLinesBefore);
+
+		const FLidarMemoryCapture& New = Newest->MemoryCapture;
+		UNiagaraComponent* Points = Slot.Points;
+		UNiagaraFunctionLibrary::SetTextureObject(Points, LidarScanParams::MemoryDepthTexture.ToString(), Newest->DepthTarget);
+		Points->SetVariablePosition(LidarScanParams::MemoryOrigin, New.Context.CaptureOrigin);
+		Points->SetVariableVec3(LidarScanParams::MemoryForward, New.Context.CaptureForward);
+		Points->SetVariableVec3(LidarScanParams::MemoryRight, New.Context.CaptureRight);
+		Points->SetVariableVec3(LidarScanParams::MemoryUp, New.Context.CaptureUp);
+		Points->SetVariableVec2(LidarScanParams::MemoryTanHalfFov, New.Context.TanHalfFOV);
+		Points->SetVariableInt(LidarScanParams::MemoryCaptureWidth, New.Width);
+		Points->SetVariableInt(LidarScanParams::MemoryCaptureHeight, New.Height);
+		Points->SetVariableFloat(LidarScanParams::MemoryMaxRange, New.Context.MaxRange);
+		Points->SetVariableFloat(LidarScanParams::MemoryMinSampleDepth, New.MinSampleDepth);
+		Points->SetVariableFloat(LidarScanParams::MemoryNearThinningDistance, New.NearThinningDistance);
+		Points->SetVariableFloat(LidarScanParams::MemoryTolerance, Tolerance);
+		Points->SetVariableFloat(LidarScanParams::MemoryRatio, Ratio);
+		Points->SetVariableBool(LidarScanParams::MemoryTest, true);
+		Slot.bMemoryTest = true;
+		++Older;
+	}
+	if (bOn)
+	{
+		LastMemoryScanIndex = NewestScanIndex;
+		LastMemoryRatio = Ratio;
+		LastMemoryTolerance = Tolerance;
+		LastMemoryOlderScans = Older;
+	}
+}
+
+FLidarMemoryStats ULidarScanComponent::GetLastMemoryStats() const
+{
+	FLidarMemoryStats Stats;
+	Stats.ScanIndex = LastMemoryScanIndex;
+	if (LastMemoryScanIndex == INDEX_NONE)
+	{
+		return Stats;
+	}
+	Stats.Ratio = LastMemoryRatio;
+	Stats.Tolerance = LastMemoryTolerance;
+	Stats.OlderScans = LastMemoryOlderScans;
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (!Slot.IsActive() || Slot.MemoryTestedBy != LastMemoryScanIndex || Slot.ScanIndex >= LastMemoryScanIndex)
+		{
+			continue;
+		}
+		int32 Points = 0, Lines = 0;
+		LidarScanMemory::CountParticles(Slot, Points, Lines);
+		++Stats.OlderScansAlive;
+		Stats.PointsBefore += Slot.MemoryPointsBefore;
+		Stats.LinesBefore += Slot.MemoryLinesBefore;
+		Stats.PointsNow += Points;
+		Stats.LinesNow += Lines;
+	}
+	return Stats;
+}
+
+bool ULidarScanComponent::GetScanMemoryCapture(int32 ScanIndex, FLidarMemoryCapture& OutCapture) const
+{
+	for (const FLidarScanSlot& Slot : Slots)
+	{
+		if (Slot.IsActive() && Slot.ScanIndex == ScanIndex)
+		{
+			OutCapture = Slot.MemoryCapture;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool ULidarScanComponent::MemoryRemovesPoint(const FVector& SurfacePosition, const FVector& Normal, const FLidarMemoryCapture& Own,
+	const FLidarMemoryCapture& Newer, TConstArrayView<float> NewerDepth, float Ratio, float Tolerance)
+{
+	// The rule of the contract (Scan memory), step by step, in the order the point system evaluates it.
+	if (Ratio <= 0.f || Normal.SizeSquared() < 0.25 || Newer.Width <= 0 || Newer.Height <= 0 || NewerDepth.Num() < Newer.Width * Newer.Height)
+	{
+		return false;
+	}
+	const FLidarScanContext& O = Own.Context;
+	const FLidarScanContext& C = Newer.Context;
+	const double OwnDepth = FVector::DotProduct(SurfacePosition - O.CaptureOrigin, O.CaptureForward);
+	if (OwnDepth <= 0.0)
+	{
+		return false;
+	}
+	// The sample before its surface bias: at its raw depth on its (jittered) ray.
+	const double Raw = OwnDepth + Own.SurfaceBias;
+	const FVector Sample = O.CaptureOrigin + (SurfacePosition - O.CaptureOrigin) * (Raw / OwnDepth);
+
+	// Coverage and the new scan's nearest depth.
+	const FVector V = Sample - C.CaptureOrigin;
+	const double D = FVector::DotProduct(V, C.CaptureForward);
+	if (D <= FMath::Max(static_cast<double>(Newer.MinSampleDepth), 1.0) || D >= C.MaxRange)
+	{
+		return false;
+	}
+	const double U = FVector::DotProduct(V, C.CaptureRight) / (D * C.TanHalfFOV.X);
+	const double Vv = FVector::DotProduct(V, C.CaptureUp) / (D * C.TanHalfFOV.Y);
+	if (FMath::Abs(U) > 1.0 || FMath::Abs(Vv) > 1.0)
+	{
+		return false;
+	}
+	const int32 W = Newer.Width;
+	const int32 H = Newer.Height;
+	const int32 X = FMath::Clamp(FMath::FloorToInt32((U + 1.0) * 0.5 * W), 0, W - 1);
+	const int32 Y = FMath::Clamp(FMath::FloorToInt32((1.0 - Vv) * 0.5 * H), 0, H - 1);
+	auto DepthAt = [&](int32 Tx, int32 Ty) { return static_cast<double>(NewerDepth[Ty * W + Tx]); };
+	auto Valid = [&](double Z) { return Z > 1.0 && Z < C.MaxRange; };
+	auto Unproject = [&](int32 Tx, int32 Ty, double Z)
+	{
+		const double Cu = 2.0 * (Tx + 0.5) / W - 1.0;
+		const double Cv = 1.0 - 2.0 * (Ty + 0.5) / H;
+		return C.CaptureOrigin + (C.CaptureForward + Cu * C.TanHalfFOV.X * C.CaptureRight + Cv * C.TanHalfFOV.Y * C.CaptureUp) * Z;
+	};
+	const double Zc = DepthAt(X, Y);
+	if (!Valid(Zc))
+	{
+		return false;
+	}
+	const FVector Pc = Unproject(X, Y, Zc);
+	const FVector N = Normal.GetSafeNormal();
+
+	// The captured surface's normal at that texel: per axis the one-sided difference that lies flattest on the point's own
+	// surface (the smaller |cos| between it and the point's normal; at a corner the neighbour on the point's side of it).
+	auto Tangent = [&](int32 Dx, int32 Dy, FVector& Out)
+	{
+		const bool bPlusIn = X + Dx >= 0 && X + Dx < W && Y + Dy >= 0 && Y + Dy < H;
+		const bool bMinusIn = X - Dx >= 0 && X - Dx < W && Y - Dy >= 0 && Y - Dy < H;
+		const double Zp = bPlusIn ? DepthAt(X + Dx, Y + Dy) : 0.0;
+		const double Zm = bMinusIn ? DepthAt(X - Dx, Y - Dy) : 0.0;
+		const bool bPlus = bPlusIn && Valid(Zp);
+		const bool bMinus = bMinusIn && Valid(Zm);
+		if (!bPlus && !bMinus)
+		{
+			return false;
+		}
+		const FVector Plus = bPlus ? Unproject(X + Dx, Y + Dy, Zp) - Pc : FVector::ZeroVector;
+		const FVector Minus = bMinus ? Pc - Unproject(X - Dx, Y - Dy, Zm) : FVector::ZeroVector;
+		const bool bUsePlus = bPlus && (!bMinus || FMath::Abs(FVector::DotProduct(Plus, N)) * Minus.Size() <= FMath::Abs(FVector::DotProduct(Minus, N)) * Plus.Size());
+		const double Zk = bUsePlus ? Zp : Zm;
+		if (FMath::Abs(Zk - Zc) > 0.25 * FMath::Max(Zc, 1.0))
+		{
+			return false;
+		}
+		Out = bUsePlus ? Plus : Minus;
+		return true;
+	};
+	FVector TangentX, TangentY;
+	FVector Captured = (C.CaptureOrigin - Pc).GetSafeNormal();
+	const bool bTangentX = Tangent(1, 0, TangentX);
+	const bool bTangentY = Tangent(0, 1, TangentY);
+	if (bTangentX && bTangentY)
+	{
+		const FVector Cross = FVector::CrossProduct(TangentX, TangentY);
+		if (Cross.SizeSquared() > 1.e-8)
+		{
+			Captured = Cross.GetUnsafeNormal() * (FVector::DotProduct(Cross, C.CaptureOrigin - Pc) >= 0.0 ? 1.0 : -1.0);
+		}
+	}
+
+	// The same surface: facing the same way, and the sample on it within the tolerance plus its own sampling error (the
+	// jitter of its ray across a texel of its own scan, which moves it off its surface by up to sqrt(2) jitter texels'
+	// width times the sine between the surface's normal and its capture's axis).
+	if (FVector::DotProduct(N, Captured) < 0.5)
+	{
+		return false;
+	}
+	const double OwnTexel = Raw * 2.0 * O.TanHalfFOV.X / FMath::Max(Own.Width, 1);
+	const double AxisCos = FVector::DotProduct(N, O.CaptureForward);
+	const double OwnError = UE_SQRT_2 * Own.SampleJitter * OwnTexel * FMath::Sqrt(FMath::Max(0.0, 1.0 - AxisCos * AxisCos));
+	// The distance to the captured surface: to the plane through Pc with the captured normal, or to the plane with the point's
+	// own normal through the centre texel or one of its four neighbours (in range), the nearest: within a texel the captured
+	// sample may lie on the next face of the same surface (a step, an edge), while the point lies on the other.
+	double Dist = FMath::Abs(FVector::DotProduct(Sample - Pc, Captured));
+	const int32 Offsets[5][2] = { { 0, 0 }, { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+	for (const auto& Off : Offsets)
+	{
+		const int32 Tx = X + Off[0];
+		const int32 Ty = Y + Off[1];
+		if (Tx < 0 || Tx >= W || Ty < 0 || Ty >= H)
+		{
+			continue;
+		}
+		const double Zk = DepthAt(Tx, Ty);
+		if (Valid(Zk))
+		{
+			Dist = FMath::Min(Dist, FMath::Abs(FVector::DotProduct(Sample - Unproject(Tx, Ty, Zk), N)));
+		}
+	}
+	if (Dist > Tolerance + OwnError)
+	{
+		return false;
+	}
+
+	// Dense enough: the spacing of the two scans on the surface at the point, in world units.
+	const double OwnThin = Own.NearThinningDistance > 0.f ? FMath::Max(1.0, Own.NearThinningDistance / FMath::Max(Raw, 1.0)) : 1.0;
+	const double NewThin = Newer.NearThinningDistance > 0.f ? FMath::Max(1.0, Newer.NearThinningDistance / FMath::Max(D, 1.0)) : 1.0;
+	const double OwnCos = FMath::Max(FMath::Abs(FVector::DotProduct(N, (Sample - O.CaptureOrigin).GetSafeNormal())), 0.02);
+	const double NewCos = FMath::Max(FMath::Abs(FVector::DotProduct(N, V.GetSafeNormal())), 0.02);
+	const double OwnSpacing = OwnTexel * OwnThin / OwnCos;
+	const double NewSpacing = D * 2.0 * C.TanHalfFOV.X / W * NewThin / NewCos;
+	return NewSpacing <= Ratio * OwnSpacing;
+}
+
 float ULidarScanComponent::GetLinkGrowth(int32 ScanIndex) const
 {
 	const UWorld* World = GetWorld();
@@ -1743,6 +2115,12 @@ bool ULidarScanComponent::GetLastScanSamples(TArray<FVector>& OutPositions, TArr
 	OutWidth = LastLinkWidth;
 	OutContext = LastSampleContext;
 	return LastLinkStats.ScanIndex != INDEX_NONE && LastSamplePositions.Num() > 0;
+}
+
+bool ULidarScanComponent::GetLastScanSampleNormals(TArray<FVector>& OutNormals) const
+{
+	OutNormals = LastSampleNormals;
+	return LastLinkStats.ScanIndex != INDEX_NONE && LastSampleNormals.Num() > 0;
 }
 
 UTextureRenderTarget2D* ULidarScanComponent::GetPlaceholderSampleTarget()
@@ -1842,6 +2220,7 @@ bool ULidarScanComponent::StartLinkSearch(FLidarScanSlot& Slot)
 	In.Forward = Slot.Context.CaptureForward;
 	In.NearThinningDistance = FMath::Clamp(NearThinningDistance, 0.f, 1000.f);
 	In.Neighbours = FMath::Clamp(LinkNeighbours, 0, 8);
+	In.bGrid = LinkMode == ELidarLinkMode::Grid;
 	In.MaxDistance = FMath::Clamp(LinkMaxDistance, 1.f, 1000.f);
 	In.MinNormalDot = LinkMaxNormalAngle >= 180.f ? -2.f : FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(LinkMaxNormalAngle, 0.f, 180.f)));
 	In.MaxLinks = FMath::Clamp(MaxLinksPerScan, 0, 262144);
@@ -1891,11 +2270,13 @@ void ULidarScanComponent::RejectLinks(FLidarScanSlot* Slot, const FLidarLinkJob&
 	LastLinkStats.ScanIndex = Job.ScanIndex;
 	LastLinkStats.Points = Points;
 	LastLinkStats.bRejected = true;
+	LastLinkStats.Mode = Job.Input.bGrid ? ELidarLinkMode::Grid : ELidarLinkMode::Nearest;
 	LastLinks.Reset();
 	LastLinkPointDepths.Reset();
 	LastLinkDegrees.Reset();
 	LastSamplePositions.Reset();
 	LastSampleChannels.Reset();
+	LastSampleNormals.Reset();
 	UE_LOG(LogLidarScan, Warning, TEXT("%s: scan %d gets no lines: %s."), *GetName(), Job.ScanIndex, Why);
 }
 
@@ -2036,6 +2417,8 @@ bool ULidarScanComponent::TickLinkSearches()
 				LastLinkStats.SearchMilliseconds = static_cast<float>(Out.Milliseconds);
 				LastLinkStats.ReadySeconds = static_cast<float>(Now - Job->StartRealTime);
 				LastLinkStats.UnwrittenTexels = Out.Unwritten;
+				LastLinkStats.Mode = Job->Input.bGrid ? ELidarLinkMode::Grid : ELidarLinkMode::Nearest;
+				LastLinkStats.FirstDroppedTexel = Out.FirstDroppedTexel;
 				LastLinks.SetNum(Out.Starts.Num());
 				for (int32 Link = 0; Link < Out.Starts.Num(); ++Link)
 				{
@@ -2046,6 +2429,8 @@ bool ULidarScanComponent::TickLinkSearches()
 					L.EndTexel = Out.EndTexels[Link];
 					L.StartChannel = FMath::RoundToInt32(Out.StartNormals[Link].A);
 					L.EndChannel = FMath::RoundToInt32(Out.EndNormals[Link].A);
+					L.StartNormal = FVector(Out.StartNormals[Link].R, Out.StartNormals[Link].G, Out.StartNormals[Link].B);
+					L.EndNormal = FVector(Out.EndNormals[Link].R, Out.EndNormals[Link].G, Out.EndNormals[Link].B);
 				}
 				LastLinkPointDepths = Out.PointDepths;
 				LastLinkDegrees.SetNum(Out.Degrees.Num());
@@ -2056,11 +2441,13 @@ bool ULidarScanComponent::TickLinkSearches()
 				const int32 Texels = Job->Input.Samples.Num();
 				LastSamplePositions.SetNumUninitialized(Texels);
 				LastSampleChannels.SetNumUninitialized(Texels);
+				LastSampleNormals.SetNumUninitialized(Texels);
 				for (int32 Texel = 0; Texel < Texels; ++Texel)
 				{
 					const FVector4f& Sample = Job->Input.Samples[Texel];
 					LastSamplePositions[Texel] = FVector(Sample.X, Sample.Y, Sample.Z);
 					LastSampleChannels[Texel] = FMath::RoundToInt32(Sample.W);
+					LastSampleNormals[Texel] = Job->Input.Normals.IsValidIndex(Texel) ? FVector(Job->Input.Normals[Texel]) : FVector::ZeroVector;
 				}
 				LastSampleContext = Job->Context;
 				LastLinkWidth = Job->Input.Width;

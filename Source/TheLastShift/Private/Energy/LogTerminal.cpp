@@ -81,6 +81,27 @@ void ALogTerminal::ApplyBodyLayout()
 		Mesh->SetRelativeScale3D(SlabScale);
 	}
 	Screen->SetRelativeLocation(FVector(Face + ScreenGap, 0.f, ScreenHeight));
+	UpdateScreenPlate();
+}
+
+bool ALogTerminal::GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const
+{
+	using namespace LogTerminalLayout;
+	if (!BodyMesh || !Mesh || Mesh->GetStaticMesh() != BodyMesh)
+	{
+		return false;
+	}
+	// The console's screen backing: the face inside the frame's opening, 90 x 65 cm, under the surface's widget.
+	OutCentre = FVector(ConsoleScreenFace, 0.f, ScreenHeight);
+	OutNormal = FVector::XAxisVector;
+	OutUp = FVector::ZAxisVector;
+	OutSize = FVector2D(89.6f, 64.6f);
+	return true;
+}
+
+bool ALogTerminal::IsScreenBlank() const
+{
+	return !(Screen && Screen->IsVisible());
 }
 
 void ALogTerminal::OnConstruction(const FTransform& Transform)
@@ -170,6 +191,7 @@ bool ALogTerminal::TryActivate(APawn* InstigatorPawn)
 		return false;
 	}
 	ShowNextEntry();
+	OnRead.Broadcast(this);
 	return true;
 }
 
@@ -274,6 +296,8 @@ void ALogTerminal::UpdateDisplays(bool bShowSurface, bool bShowPanel)
 	if (Screen->IsVisible() != bShowSurface)
 	{
 		Screen->SetVisibility(bShowSurface);
+		// A screen showing an entry shows it as before; one with none is black.
+		UpdateScreenPlate();
 	}
 	ULogDisplayWidget* PanelWidget = bShowPanel ? EnsurePanel() : Panel.Get();
 	if (PanelWidget)

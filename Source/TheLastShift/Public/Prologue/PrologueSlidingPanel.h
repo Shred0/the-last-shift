@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Energy/DoorDevice.h"
 #include "GameFramework/Actor.h"
 #include "PrologueSlidingPanel.generated.h"
 
@@ -80,6 +81,17 @@ public:
 
 	UStaticMeshComponent* GetPanel() const { return Panel; }
 
+	/**
+	 * The panel starts to move (timed): to open when its fraction starts to rise, to close when it starts to fall, also
+	 * when it reverses before reaching an end (the motion before it is replaced, with no end announced for it).
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Panel|Events")
+	FOnMotionStarted OnMotionStarted;
+
+	/** The panel's motion has ended: it reached fully open (opening) or closed (closing). */
+	UPROPERTY(BlueprintAssignable, Category = "Panel|Events")
+	FOnMotionEnded OnMotionEnded;
+
 protected:
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
@@ -95,4 +107,7 @@ private:
 	TObjectPtr<UBoxComponent> Blocker;
 
 	float OpenFraction = 0.f;
+
+	/** The motion under way: +1 opening, -1 closing, 0 at rest. */
+	int32 MotionDirection = 0;
 };

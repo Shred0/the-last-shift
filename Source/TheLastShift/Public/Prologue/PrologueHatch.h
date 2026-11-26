@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Energy/DoorDevice.h"
 #include "GameFramework/Actor.h"
 #include "PrologueHatch.generated.h"
 
@@ -115,6 +116,14 @@ public:
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Hatch")
 	void ReceiveHatchStateChanged(EPrologueHatchState NewState);
+
+	/** The hatch starts to close (Open -> Closing, timed). It never opens again. */
+	UPROPERTY(BlueprintAssignable, Category = "Hatch|Events")
+	FOnMotionStarted OnMotionStarted;
+
+	/** The hatch has closed (Closing -> Closed): the end of its motion. */
+	UPROPERTY(BlueprintAssignable, Category = "Hatch|Events")
+	FOnMotionEnded OnMotionEnded;
 
 protected:
 	virtual void OnConstruction(const FTransform& Transform) override;

@@ -1,0 +1,4 @@
+---,Before,Order,Text
+E_A1_AreaStart_1_1,A1_AreaStart_1,1,"[PLACEHOLDER] Engineer line before A1_AreaStart_1, at the start of area 1."
+E_A1_EntityContact_1_1,A1_EntityContact_1,1,"[PLACEHOLDER] Engineer line before A1_EntityContact_1, at the first contact in area 1."
+E_Light_1_1,Light_1,1,"[PLACEHOLDER] Engineer line before Light_1, when the player steps out of the ship."

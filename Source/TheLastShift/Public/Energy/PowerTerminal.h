@@ -15,6 +15,38 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTerminalActivated, int32, Cost);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnTerminalInsufficientEnergy, int32, Cost, int32, BankedEnergy, bool, bTimeStopped);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnAnyTerminalActivated, APowerTerminal* /*Terminal*/, int32 /*Cost*/);
 
+/** What a payment at a terminal is for (APowerTerminal::GetPaymentKind). */
+UENUM(BlueprintType)
+enum class EPaymentKind : uint8
+{
+	/** None of the kinds below: a terminal that powers nothing, or devices of different kinds or of another class. */
+	Other,
+	/** Every target is a door (a gate's door). */
+	Door,
+	/** Every target is a group of lights that is no beacon's. */
+	Lights,
+	/** Every target is a beacon's light group (the device of an ABeaconBody). */
+	Beacon,
+	/** A log terminal. */
+	Log,
+	/** The twin AI's terminal. */
+	Twin
+};
+
+inline const TCHAR* LexToString(EPaymentKind Kind)
+{
+	switch (Kind)
+	{
+	case EPaymentKind::Other: return TEXT("Other");
+	case EPaymentKind::Door: return TEXT("Door");
+	case EPaymentKind::Lights: return TEXT("Lights");
+	case EPaymentKind::Beacon: return TEXT("Beacon");
+	case EPaymentKind::Log: return TEXT("Log");
+	case EPaymentKind::Twin: return TEXT("Twin");
+	}
+	return TEXT("Unknown");
+}
+
 /**
  * Where energy is spent: Interact within InteractRadius, in Normal time, spends Cost banked energy and powers every
  * device in Targets (which can be far away). With too little energy, or while time is Stopped (terminals work only in
@@ -66,6 +98,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	virtual bool OffersRead() const { return false; }
 
+	/**
+	 * What a payment here is for, by what it powers: Door, Lights or Beacon when every target is of that kind, Other when
+	 * there is none or they differ. The log terminal and the twin AI's terminal give their own kind. The home AI's spending
+	 * comment follows it.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	virtual EPaymentKind GetPaymentKind() const;
+
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	bool IsInRange(const APawn* InstigatorPawn) const;
 
@@ -73,9 +113,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	bool HasUnpoweredTarget() const;
 
-	/** Cost, clamped as TryActivate spends it. */
+	/** What the next payment costs, as TryActivate spends it: Cost, clamped. The twin AI's terminal gives its own (Brief 26). */
 	UFUNCTION(BlueprintPure, Category = "Terminal")
-	int32 GetCost() const;
+	virtual int32 GetCost() const;
 
 	/** InteractRadius, clamped as IsInRange reads it. */
 	UFUNCTION(BlueprintPure, Category = "Terminal", meta = (Units = "cm"))
@@ -96,6 +136,31 @@ public:
 
 	/** Gives Mesh the modelled body when bModelledBody is set (the area generator calls it after setting the flag on a terminal it spawns). */
 	void ApplyTerminalBody();
+
+	/** The modelled body this terminal shows with bModelledBody: TerminalBodyMesh; the twin AI's terminal, its own (Brief 26). */
+	virtual UStaticMesh* GetModelledBodyMesh() const;
+
+	/**
+	 * Brief 27: the screen's face of the body Mesh shows now, in Mesh's own frame: its centre, its normal (out of the
+	 * screen), the screen's up direction in its plane and its size (width along normal x up, height along up), cm.
+	 * False when the body has no screen (the engine's cube). The power terminals' body: its slanted panel; the twin AI's
+	 * terminal and the log terminal override it.
+	 */
+	virtual bool GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const;
+
+	/** Brief 27: the screen shows nothing now (the log terminal: while no entry is on its surface). */
+	virtual bool IsScreenBlank() const { return true; }
+
+	/** Lays ScreenPlate over GetScreenFace, shown while the screen is blank (call after the body or what the screen shows changes). */
+	void UpdateScreenPlate();
+
+	/** The black plate over the body's screen (null on a class without one). */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	UStaticMeshComponent* GetScreenPlate() const { return ScreenPlate; }
+
+	/** The plate is on screen: the body has a screen and it shows nothing. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	bool IsScreenPlateShown() const;
 
 	/** The terminal nearest to Pawn within its InteractRadius, or null. */
 	static APowerTerminal* FindNearestInRange(const APawn* Pawn);
@@ -119,4 +184,12 @@ protected:
 	/** The terminal's body; tagged for the interactable scan channel at BeginPlay. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")
 	TObjectPtr<UStaticMeshComponent> Mesh;
+
+	/**
+	 * Brief 27: a flat plate laid over the body's screen (the engine's plane scaled to the face, attached to Mesh), in
+	 * UTheLastShiftSettings::ScreenMaterial: the screen is black while it shows nothing. It collides with nothing, casts no
+	 * shadow and is never captured by a scan (the scan still sees the body's own face under it).
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")
+	TObjectPtr<UStaticMeshComponent> ScreenPlate;
 };

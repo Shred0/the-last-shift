@@ -21,6 +21,7 @@
 #include "Engine/GameInstance.h"
 #include "Engine/PointLight.h"
 #include "Engine/SpotLight.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
@@ -39,6 +40,36 @@
 #include "UObject/ObjectSaveContext.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(AreaGenerator)
+
+#if !UE_BUILD_SHIPPING
+static TAutoConsoleVariable<int32> CVarAreaWayOut(
+	TEXT("tls.Area.WayOut"), 1,
+	TEXT("1: the route ends in the twin AI's room (where the recipe asks for it) and the exit corridor (Brief 26). 0: neither, the exit at the route's end as before Brief 26 (diagnostics: the layout hash is then the one before Brief 26). Read at each generation."),
+	ECVF_Default);
+static TAutoConsoleVariable<int32> CVarAreaFloorStrips(
+	TEXT("tls.Area.FloorStrips"), 1,
+	TEXT("1: a strip of the floor plates' family fills the floor from each wall panel's foot to its slab (Brief 26). 0: none, the gap before Brief 26 (diagnostics). Read at each generation."),
+	ECVF_Default);
+#endif
+
+/** Whether the way out (Brief 26) is built: always, but tls.Area.WayOut 0 turns it off for diagnostics. */
+static bool IsAreaWayOutOn()
+{
+#if !UE_BUILD_SHIPPING
+	return CVarAreaWayOut.GetValueOnGameThread() != 0;
+#else
+	return true;
+#endif
+}
+
+static bool IsAreaFloorStripsOn()
+{
+#if !UE_BUILD_SHIPPING
+	return CVarAreaFloorStrips.GetValueOnGameThread() != 0;
+#else
+	return true;
+#endif
+}
 
 const TCHAR* LexToString(EAreaPieceKind Kind)
 {
@@ -265,6 +296,12 @@ namespace AreaGen
 		FVector2D DoorPos = FVector2D::ZeroVector;
 		int32 DoorDir = 0;
 		float PoweredSeconds = 0.f;
+		// The way out (Brief 26): the exit corridor and the twin AI's room, their mouth (the corridor's) or entrance (the
+		// room's) and the direction they are entered in.
+		bool bExitCorridor = false;
+		bool bTwinRoom = false;
+		FVector2D Mouth = FVector2D::ZeroVector;
+		int32 EnterDir = 0;
 	};
 
 	struct FSpot
@@ -295,6 +332,10 @@ namespace AreaGen
 		TArray<int32> RouteSeg;
 		TArray<float> RouteDist;
 		TArray<FSpot> SpurEnds;
+		/** Cell edges (cell X, cell Y, direction) the exit corridor ends on: open on the dark, their wall collision only (Brief 26). */
+		TSet<FIntVector> OpenEdges;
+		/** Route length before the way out (the recipe's own route): what every placement made before it reads. */
+		float LengthBeforeWayOut = 0.f;
 
 		bool IsFloor(const FIntPoint& C) const { const FCell* E = Cells.Find(C); return E && E->Kind == EKind::Floor; }
 		bool IsPillar(const FIntPoint& C) const { const FCell* E = Cells.Find(C); return E && E->Kind == EKind::Pillar; }
@@ -501,6 +542,166 @@ namespace AreaGen
 		TArray<FLightPlacement> LightPlacements;
 		TArray<FVector2D> NormalResidues;
 		TArray<FVector2D> UsedSideSpots;
+		/** Where the recipe's route ends and the way it heads there. */
+		FVector2D EndHead = FVector2D::ZeroVector;
+		int32 EndDir = 0;
+
+		// --- The way out (Brief 26) ---
+		//
+		// After the layout is chosen and everything of the recipe is placed, from the finished plan, with no random draw:
+		// the twin AI's room (when the recipe asks for it) and the exit corridor after it, so no draw of the stream and no
+		// placement before them changes. The corridor is straight: it goes on in the route's last direction, or, after the
+		// room, from the middle of one of the room's two side walls (toward the route's start line first). A seed whose plan
+		// cannot take them fails this layout.
+
+		struct FWayOut
+		{
+			int32 RoomSegment = -1;
+			int32 CorridorSegment = -1;
+			FBox2D RoomRect = FBox2D(ForceInit);
+			int32 RoomDir = 0;
+			FVector2D ExitPos = FVector2D::ZeroVector;
+			FVector2D ExitDir = FVector2D(1.0, 0.0);
+			float HalfWidth = 0.f;
+			float Length = 0.f;
+		};
+		FWayOut WayOut;
+		FString WayOutError;
+
+		bool PlaceWayOut(bool bEnabled)
+		{
+			Plan.LengthBeforeWayOut = Plan.RouteLength();
+			if (!bEnabled)
+			{
+				return true;
+			}
+			const float W = SnapWidth(FMath::Clamp(G.ExitCorridorWidth, 200.f, 1000.f));
+			const float Depth = SnapLen(FMath::Clamp(R.ExitTriggerDepthM, 2.f, 50.f) * 100.f);
+			const float Run = SnapLen(FMath::Clamp(R.ExitRunLengthM, 10.f, 200.f) * 100.f);
+			const float Len = Depth + Run;
+			const FVector2D Head = EndHead;
+			const int32 Dir = EndDir;
+			const float PrevWidth = Plan.Segs.Num() > 0 ? Plan.Segs.Last().Width : 0.f;
+			auto JointZone = [&](const FVector2D& At, float Width)
+			{
+				const double Reach = (Margin + 2) * Cell + 0.5 * FMath::Max(Width, PrevWidth) + 50.0;
+				return FBox2D(At - FVector2D(Reach, Reach), At + FVector2D(Reach, Reach));
+			};
+
+			TArray<int32> CorridorDirs;
+			FVector2D RoomCentre = FVector2D::ZeroVector;
+			float Side = 0.f;
+			if (R.bTwinAIRoom)
+			{
+				Side = SnapWidth(FMath::Clamp(G.TwinRoomSide, 1000.f, 1400.f));
+				const float Passage = SnapLen(FMath::Clamp(G.TwinRoomPassageLength, 300.f, 1000.f));
+				const FVector2D F = DirV(Dir);
+				FSeg Room;
+				Room.Type = EAreaSegmentType::Room;
+				Room.bClosed = true;
+				Room.bTwinRoom = true;
+				Room.Width = Side;
+				Room.Mouth = Head;
+				Room.EnterDir = Dir;
+				FLeg PassageLeg;
+				PassageLeg.Rect = MakeRect(Head, Dir, 0.0, Passage, -W * 0.5, W * 0.5);
+				PassageLeg.Start = Head;
+				PassageLeg.Dir = Dir;
+				PassageLeg.Length = Passage;
+				FLeg RoomLeg;
+				RoomLeg.Rect = MakeRect(Head + F * Passage, Dir, 0.0, Side, -Side * 0.5, Side * 0.5);
+				RoomLeg.Start = Head + F * Passage;
+				RoomLeg.Dir = Dir;
+				RoomLeg.Length = Side;
+				Room.Legs = { PassageLeg, RoomLeg };
+				TArray<FIntPoint> Cells;
+				CellsIn(PassageLeg.Rect, Cells);
+				CellsIn(RoomLeg.Rect, Cells);
+				const TArray<FIntPoint> Unique = TSet<FIntPoint>(Cells).Array();
+				TArray<FIntPoint> Sorted = Unique;
+				Sorted.Sort([](const FIntPoint& X, const FIntPoint& Y) { return X.Y != Y.Y ? X.Y < Y.Y : X.X < Y.X; });
+				const int32 Index = Plan.Segs.Num();
+				if (!Plan.CanPlace(Sorted, Index, false, { JointZone(Head, W) }, Margin))
+				{
+					WayOutError = FString::Printf(TEXT("the twin AI's room (%.0f m a side) does not fit after the route's end at (%.0f, %.0f) without touching another segment"), Side / 100.f, Head.X, Head.Y);
+					return false;
+				}
+				Plan.Segs.Add(Room);
+				Plan.Commit(Sorted, Index, EKind::Floor);
+				RoomCentre = Head + F * (Passage + Side * 0.5f);
+				Plan.AddRoute(RoomCentre, Index);
+				WayOut.RoomSegment = Index;
+				WayOut.RoomRect = RoomLeg.Rect;
+				WayOut.RoomDir = Dir;
+				if (Dir == 0)
+				{
+					const int32 Toward = Head.Y > 0.0 ? 3 : 1;
+					CorridorDirs = { Toward, Opposite(Toward) };
+				}
+				else
+				{
+					CorridorDirs = { 0 };
+				}
+			}
+			else
+			{
+				CorridorDirs = { Dir };
+			}
+
+			const int32 Index = Plan.Segs.Num();
+			for (const int32 D : CorridorDirs)
+			{
+				const FVector2D Start = R.bTwinAIRoom ? RoomCentre + DirV(D) * (Side * 0.5f) : Head;
+				const FBox2D Rect = MakeRect(Start, D, 0.0, Len, -W * 0.5, W * 0.5);
+				TArray<FIntPoint> Cells;
+				CellsIn(Rect, Cells);
+				// After the room only the room may be near its mouth; else the predecessor around the joint, as any segment.
+				const FBox2D Zone = R.bTwinAIRoom ? Grow(WayOut.RoomRect, Cell) : JointZone(Head, W);
+				if (!Plan.CanPlace(Cells, Index, false, { Zone }, Margin))
+				{
+					continue;
+				}
+				FSeg Corridor;
+				Corridor.Type = EAreaSegmentType::Corridor;
+				Corridor.bClosed = true;
+				Corridor.bExitCorridor = true;
+				Corridor.Width = W;
+				Corridor.Mouth = Start;
+				Corridor.EnterDir = D;
+				FLeg Leg;
+				Leg.Rect = Rect;
+				Leg.Start = Start;
+				Leg.Dir = D;
+				Leg.Length = Len;
+				Corridor.Legs.Add(Leg);
+				Plan.Segs.Add(Corridor);
+				Plan.Commit(Cells, Index, EKind::Floor);
+				if (R.bTwinAIRoom)
+				{
+					Plan.AddRoute(Start, Index - 1);
+				}
+				Plan.AddRoute(Start + DirV(D) * Len, Index);
+				// The far end: open on the dark (its wall box is kept for collision only, never dressed or rendered).
+				const TSet<FIntPoint> Own(Cells);
+				for (const FIntPoint& C : Cells)
+				{
+					if (!Own.Contains(C + Dirs[D]))
+					{
+						Plan.OpenEdges.Add(FIntVector(C.X, C.Y, D));
+					}
+				}
+				Plan.ComputeRouteDistances();
+				WayOut.CorridorSegment = Index;
+				WayOut.ExitPos = Start + DirV(D) * Depth;
+				WayOut.ExitDir = DirV(D);
+				WayOut.HalfWidth = W * 0.5f;
+				WayOut.Length = Len;
+				return true;
+			}
+			WayOutError = FString::Printf(TEXT("the exit corridor (%.0f m) does not fit %s without touching another segment"), Len / 100.f,
+				R.bTwinAIRoom ? TEXT("from either side wall of the twin AI's room") : *FString::Printf(TEXT("straight on from the route's end at (%.0f, %.0f)"), Head.X, Head.Y));
+			return false;
+		}
 
 		bool Build()
 		{
@@ -519,7 +720,10 @@ namespace AreaGen
 					return false;
 				}
 			}
+			EndHead = Head;
+			EndDir = Dir;
 			Plan.ComputeRouteDistances();
+			Plan.LengthBeforeWayOut = Plan.RouteLength();
 
 			for (int32 Index = 0; Index < Plan.Segs.Num(); ++Index)
 			{
@@ -1463,7 +1667,8 @@ namespace AreaGen
 			{
 				Others.Emplace(P, OthersReach);
 			}
-			const float L = Plan.RouteLength();
+			// The recipe's route: the way out (Brief 26) moves no terminal placed along it.
+			const float L = Plan.LengthBeforeWayOut;
 			bool bAll = true;
 
 			// Log terminals: one per equal part of the route, each in its own closed corridor or room, in route order.
@@ -1509,14 +1714,15 @@ namespace AreaGen
 				}
 			}
 
-			// The twin AI's terminal: the last closed segment of the route.
-			const int32 Twins = FMath::Clamp(R.TwinAITerminalCount, 0, 1);
+			// The twin AI's terminal: in the twin AI's room when there is one (PlaceTwinInRoom), else the last closed segment
+			// of the recipe's route.
+			const int32 Twins = WayOut.RoomSegment >= 0 ? 0 : FMath::Clamp(R.TwinAITerminalCount, 0, 1);
 			for (int32 K = 0; K < Twins; ++K)
 			{
 				int32 Last = -1;
 				for (int32 Index = Plan.Segs.Num() - 1; Index >= 0 && Last < 0; --Index)
 				{
-					Last = Plan.Segs[Index].bClosed ? Index : -1;
+					Last = Plan.Segs[Index].bClosed && !Plan.Segs[Index].bExitCorridor ? Index : -1;
 				}
 				FString Why = TEXT("the route has no closed segment");
 				FWallPlacement Spot;
@@ -1545,6 +1751,38 @@ namespace AreaGen
 				}
 			}
 			return bAll;
+		}
+
+		/**
+		 * Brief 26: the twin AI's terminal in its room, set into the middle of the wall that faces the entrance: its back
+		 * (BackX, the body's back along its +X) on the wall panels' slab, facing the entrance; its standing place Stand in
+		 * front of its front (FrontX). WallThickness: the wall box's (the slab is its middle). False (and WallError) when the
+		 * standing place is not free or not within Reach.
+		 */
+		bool PlaceTwinInRoom(float BackX, float FrontX, float Stand, float Reach, float WallThickness)
+		{
+			if (WayOut.RoomSegment < 0 || R.TwinAITerminalCount <= 0)
+			{
+				return true;
+			}
+			const FSeg& Room = Plan.Segs[WayOut.RoomSegment];
+			const FLeg& Leg = Room.Legs.Last();
+			const FVector2D F = DirV(Leg.Dir);
+			const FVector2D FarFace = Leg.Start + F * Leg.Length;
+			FWallPlacement Spot;
+			Spot.Segment = WayOut.RoomSegment;
+			Spot.Facing = -F;
+			Spot.Pos = FarFace + F * (0.5f * WallThickness + BackX);
+			Spot.Stand = Spot.Pos - F * (FrontX + Stand);
+			Spot.RouteDistance = Plan.Project(Spot.Pos);
+			if (!Plan.IsClear(Spot.Stand, 60.0) || FVector2D::Distance(Spot.Pos, Spot.Stand) > Reach - 10.f)
+			{
+				WallError += FString::Printf(TEXT("%stwin AI terminal: its standing place in the room (%.0f, %.0f) is not free or out of reach (%.0f cm of %.0f)"),
+					WallError.IsEmpty() ? TEXT("") : TEXT("; "), Spot.Stand.X, Spot.Stand.Y, FVector2D::Distance(Spot.Pos, Spot.Stand), Reach);
+				return false;
+			}
+			TwinPlacements.Add(Spot);
+			return true;
 		}
 
 		// --- Beacons (Brief 10) ---
@@ -1755,7 +1993,8 @@ namespace AreaGen
 						continue;
 					}
 					const float RouteS = Plan.Project(Pos);
-					if (RouteS < MinS || RouteS >= MaxS || RouteS < 300.f || RouteS > Plan.RouteLength() - 600.f || Plan.Project(Stand) > Plan.RouteLength() - 600.f)
+					const float RouteEnd = Plan.LengthBeforeWayOut;
+					if (RouteS < MinS || RouteS >= MaxS || RouteS < 300.f || RouteS > RouteEnd - 600.f || Plan.Project(Stand) > RouteEnd - 600.f)
 					{
 						++OffRange;
 						continue;
@@ -1809,6 +2048,8 @@ namespace AreaGen
 		// Parallel to Walls, Curbs, Ceilings and Pillars: what the dressing needs to know of each box.
 		TArray<FEdgeRun> WallRuns, CurbRuns;
 		TArray<int32> CeilingSegments, PillarSegments;
+		/** Parallel to Walls: the exit corridor's far end (Brief 26), open on the dark: collision only, never dressed. */
+		TArray<bool> WallOpen;
 	};
 
 	static FBox BoxTransform(const FVector& Min, const FVector& Max)
@@ -1956,6 +2197,16 @@ namespace AreaGen
 				const FVector Min = bAlongY ? FVector(Out0, Run0, -FT) : FVector(Run0, Out0, -FT);
 				const FVector Max = bAlongY ? FVector(Out1, Run1, Height) : FVector(Run1, Out1, Height);
 				(bWall ? Out.Walls : Out.Curbs).Add(BoxTransform(Min, Max));
+				if (bWall)
+				{
+					bool bOpen = Plan.OpenEdges.Num() > 0;
+					for (int32 RC = R0; RC <= R1 && bOpen; ++RC)
+					{
+						const FIntPoint Floor = bAlongY ? FIntPoint(D == 0 ? Line - 1 : Line, RC) : FIntPoint(RC, D == 1 ? Line - 1 : Line);
+						bOpen = Plan.OpenEdges.Contains(FIntVector(Floor.X, Floor.Y, D));
+					}
+					Out.WallOpen.Add(bOpen);
+				}
 				FEdgeRun Run;
 				Run.D = D;
 				Run.Line = Line;
@@ -1987,9 +2238,24 @@ namespace AreaGen
 			const FVector2D P = CellCenter(Pair.Key);
 			Coarse.Add(FIntPoint(FMath::FloorToInt(P.X / CoarseSize), FMath::FloorToInt(P.Y / CoarseSize)));
 		}
+		// Brief 26: nothing stands beyond the open end of an exit corridor, in its line, out to the backdrop's reach, so that
+		// no mass closes it in a scan.
+		TArray<FBox2D> ViewStrips;
+		for (const FSeg& S : Plan.Segs)
+		{
+			if (S.bExitCorridor && S.Legs.Num() > 0)
+			{
+				const FLeg& Leg = S.Legs[0];
+				ViewStrips.Add(MakeRect(Leg.Start, Leg.Dir, Leg.Length, Leg.Length + Radius + G.BackdropClearance, -0.5 * S.Width, 0.5 * S.Width));
+			}
+		}
 		auto Clear = [&](const FBox2D& Box)
 		{
 			const FBox2D B = Grow(Box, G.BackdropClearance);
+			for (const FBox2D& Strip : ViewStrips)
+			{
+				if (B.Intersect(Strip)) { return false; }
+			}
 			for (int32 Y = FMath::FloorToInt(B.Min.Y / CoarseSize); Y <= FMath::FloorToInt(B.Max.Y / CoarseSize); ++Y)
 			{
 				for (int32 X = FMath::FloorToInt(B.Min.X / CoarseSize); X <= FMath::FloorToInt(B.Max.X / CoarseSize); ++X)
@@ -2043,8 +2309,16 @@ namespace AreaGen
 	{
 		TArray<bool> FloorHidden, WallHidden, CurbHidden, PillarHidden, CeilingHidden;
 		TArray<FTransform> Panels, Plates, CeilingPlates, Posts, Beams, Conduits, Curbs, Frames, GateFrames;
+		/** Brief 26: strips of the floor plates' family from each wall panel's foot to its slab (appended to Plates when published). */
+		TArray<FTransform> FloorStrips;
 		FString Report;
 		AAreaGenerator::FDressPanelPick Squeezed, Stretched, FirstMouth;
+		/** Brief 28: the open segments' parts (a hall's own parts, a catwalk's floor boxes), for the backdrop's levels of walkways. */
+		struct FOpenPart { FBox2D Rect; int32 Segment = -1; bool bPlatform = false; };
+		TArray<FOpenPart> OpenParts;
+		/** Brief 28: every catwalk frame's lowest point, with its line along its part and its piece across it, for the pillars. */
+		struct FFrameTip { FVector Tip; int32 Line = 0; int32 Lines = 1; int32 Piece = 0; int32 Pieces = 1; bool bPlatform = false; bool bAlongX = true; };
+		TArray<FFrameTip> FrameTips;
 	};
 
 	/** The floor cell across a run's edge line from RunCell (the other side of the line). */
@@ -2409,7 +2683,12 @@ namespace AreaGen
 			return Gm;
 		};
 		auto At = [](const FRunGeo& Gm, double Mid, double S) { return Gm.bAlongY ? FVector2D(Mid, S) : FVector2D(S, Mid); };
-		auto PlacePieces = [&](const FRunGeo& Gm, double A1, double B1, bool bWall)
+		// Brief 26: the wall panel's slab stands at the wall box's middle, its ribs reach the floor's edge: between the ribs
+		// the floor would stop short of the wall by half the box. A strip of SM_KitFloorPlate (the floors' family) under each
+		// panel fills it, from the floor's edge to 1 cm into the slab, its top at the floor's.
+		const bool bStrips = IsAreaFloorStripsOn();
+		const double StripWidth = 0.5 * T + 1.0;
+		auto PlacePieces = [&](const FRunGeo& Gm, double A1, double B1, bool bWall, bool bStrip)
 		{
 			const double Len = B1 - A1;
 			if (Len < 1.0)
@@ -2440,6 +2719,15 @@ namespace AreaGen
 					if (PanelAlong.Count == 0 || Factor > Out.Stretched.Factor) { Out.Stretched = { C, DirV(Gm.Facing), Factor }; }
 					PanelAlong.Add(Factor, C);
 					Out.Panels.Add(FitPiece(C, -FT, Gm.Facing, T, PieceLen, WallTop + FT, Size));
+					if (bStrip && bStrips)
+					{
+						// The strip's middle: from the floor's edge (the box's face toward the floor) into the slab.
+						const FVector2D Toward = DirV(Gm.Facing);
+						const FVector2D SC = C + Toward * (0.5 * T - 0.5 * StripWidth);
+						const double Yaw = Gm.bAlongY ? 90.0 : 0.0;  // the plate's long side (its X) along the run
+						Out.FloorStrips.Add(FTransform(FRotator(0.0, Yaw, 0.0), FVector(SC.X, SC.Y, -FT),
+							FVector(PieceLen / PlateSize.X, StripWidth / PlateSize.Y, FT / PlateSize.Z)));
+					}
 				}
 				else
 				{
@@ -2458,12 +2746,14 @@ namespace AreaGen
 			const double B1 = Gm.B - (Gm.bConvex1 ? T : 0.0);
 			for (const FVector2D& Span : Spans(Gm.bAlongY, Gm.Mid, A1, B1))
 			{
-				PlacePieces(Gm, Span.X, Span.Y, bWall);
+				PlacePieces(Gm, Span.X, Span.Y, bWall, bWall);
 			}
 		};
+		auto IsOpenWall = [&Geo](int32 I) { return Geo.WallOpen.IsValidIndex(I) && Geo.WallOpen[I]; };
 		for (int32 I = 0; I < Geo.WallRuns.Num(); ++I)
 		{
-			if (Out.WallHidden[I])
+			// The exit corridor's open end (Brief 26) is not dressed: nothing shows there.
+			if (Out.WallHidden[I] && !IsOpenWall(I))
 			{
 				DressRun(Geo.WallRuns[I], true);
 			}
@@ -2498,7 +2788,7 @@ namespace AreaGen
 				Gm.Out0 = Face.Out0;
 				Gm.Mid = Face.Out0 + 0.5 * T;
 				Gm.Facing = Face.Facing;
-				PlacePieces(Gm, Face.A, Face.B, true);
+				PlacePieces(Gm, Face.A, Face.B, true, false);
 			}
 			for (const FVector2D& Corner : { FVector2D(P.Min.X, P.Min.Y), FVector2D(P.Max.X - T, P.Min.Y), FVector2D(P.Min.X, P.Max.Y - T), FVector2D(P.Max.X - T, P.Max.Y - T) })
 			{
@@ -2515,6 +2805,16 @@ namespace AreaGen
 		{
 			const FSquare& Sq = Squares[Key];
 			const FVector2D C = Sq.Box.GetCenter();
+			// No post on the exit corridor's open end (Brief 26): its side walls simply stop.
+			bool bOnOpenEnd = false;
+			for (int32 I = 0; I < Geo.Walls.Num() && !bOnOpenEnd; ++I)
+			{
+				bOnOpenEnd = IsOpenWall(I) && C.X > Geo.Walls[I].Min.X - 0.1 && C.X < Geo.Walls[I].Max.X + 0.1 && C.Y > Geo.Walls[I].Min.Y - 0.1 && C.Y < Geo.Walls[I].Max.Y + 0.1;
+			}
+			if (bOnOpenEnd)
+			{
+				continue;
+			}
 			bool bShownCovers = false;
 			bool bWallCovers = Sq.bWall;
 			auto Covers = [&C](const FBox& Box) { return C.X > Box.Min.X + 0.1 && C.X < Box.Max.X - 0.1 && C.Y > Box.Min.Y + 0.1 && C.Y < Box.Max.Y - 0.1; };
@@ -2586,7 +2886,7 @@ namespace AreaGen
 		for (int32 I = 0; I < Geo.WallRuns.Num(); ++I)
 		{
 			const FEdgeRun& R = Geo.WallRuns[I];
-			if (!Out.WallHidden[I])
+			if (!Out.WallHidden[I] || IsOpenWall(I))
 			{
 				continue;
 			}
@@ -2862,7 +3162,8 @@ namespace AreaGen
 		// A web hall's frame across more than this many times SM_KitCatwalkFrame's span is made of several, end to end
 		// (the widest a Catwalk segment uses is its 6 m platforms, x1.88).
 		constexpr double FrameMaxFactor = 1.9;
-		auto FrameBox = [&](const FBox& Box, bool bHall)
+		const double FrameTipDepth = FMath::Max(0.0, static_cast<double>(G.DressFrameTipDepth));
+		auto FrameBox = [&](const FBox& Box, bool bHall, bool bPlatform)
 		{
 			const double SX = Box.Max.X - Box.Min.X;
 			const double SY = Box.Max.Y - Box.Min.Y;
@@ -2891,23 +3192,43 @@ namespace AreaGen
 					const FVector2D C = bAlongX ? FVector2D(S, Mid) : FVector2D(Mid, S);
 					(bHall ? HallFrameF : CatwalkFrameF).Add(Piece / FrameSpan, C);
 					Out.Frames.Add(FitPiece(C, -FT, bAlongX ? 0 : 1, 1.0, Piece, 1.0, FVector(1.0, FrameSpan, 1.0)));
+					// Brief 28: the frame's lowest point (its pivot is the deck's underside, its tip FrameTipDepth under it).
+					Out.FrameTips.Add({ FVector(C.X, C.Y, -FT - FrameTipDepth), K, N, P, Pieces, bPlatform, bAlongX });
 				}
 			}
 		};
-		for (int32 I = 0; I < Geo.FloorRects.Num() && FrameSpacing > 0.0; ++I)
+		// A catwalk's floor box is a platform when the platform at the end of one of its spurs lies in it.
+		auto HoldsSpurPlatform = [&Plan](const FBox& Box, int32 Segment)
+		{
+			for (const FSpot& Spot : Plan.SpurEnds)
+			{
+				if (Spot.Segment == Segment && Spot.Pos.X > Box.Min.X && Spot.Pos.X < Box.Max.X && Spot.Pos.Y > Box.Min.Y && Spot.Pos.Y < Box.Max.Y)
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+		for (int32 I = 0; I < Geo.FloorRects.Num(); ++I)
 		{
 			const FAreaFloorRect& Rect = Geo.FloorRects[I];
 			if (Out.FloorHidden[I] && Plan.Segs.IsValidIndex(Rect.Segment) && Plan.Segs[Rect.Segment].Type == EAreaSegmentType::Catwalk)
 			{
-				FrameBox(Rect.Box, false);
+				const bool bPlatform = HoldsSpurPlatform(Rect.Box, Rect.Segment);
+				Out.OpenParts.Add({ FBox2D(FVector2D(Rect.Box.Min), FVector2D(Rect.Box.Max)), Rect.Segment, bPlatform });
+				if (FrameSpacing > 0.0)
+				{
+					FrameBox(Rect.Box, false, bPlatform);
+				}
 			}
 		}
 		// Web halls: under each of the hall's parts (its platforms and walkways), as under a catwalk. Floor halls have none.
 		for (const FHallPart& Part : HallParts)
 		{
+			Out.OpenParts.Add({ FBox2D(FVector2D(Part.Box.Min), FVector2D(Part.Box.Max)), Part.Segment, Part.bPlatform });
 			if (FrameSpacing > 0.0 && Plan.Segs[Part.Segment].bWeb)
 			{
-				FrameBox(Part.Box, true);
+				FrameBox(Part.Box, true, Part.bPlatform);
 			}
 		}
 
@@ -2932,6 +3253,630 @@ namespace AreaGen
 		Out.Report += FString::Printf(TEXT("; conduit runs across %d niche and dead-end mouths, %s, brackets over a mouth %d, lines left unsolved %d"),
 			MouthsCrossed, *ConduitCrossF.ToString(TEXT("conduits across a mouth")), BracketsOverMouth, LinesUnsolved);
 		Out.Report += FString::Printf(TEXT("; plates by family: floors %d, ceilings %d"), Out.Plates.Num(), Out.CeilingPlates.Num());
+		int32 OpenWalls = 0;
+		for (int32 I = 0; I < Geo.Walls.Num(); ++I) { OpenWalls += IsOpenWall(I) ? 1 : 0; }
+		Out.Report += FString::Printf(TEXT("; floor strips to the wall panels' slab %d (%s, %.0f cm wide); exit corridor open ends %d (collision only, not dressed)"),
+			Out.FloorStrips.Num(), bStrips ? TEXT("on") : TEXT("off, tls.Area.FloorStrips 0"), StripWidth, OpenWalls);
+	}
+
+	/**
+	 * Brief 26: the conduits and cables of the twin AI's room, from the terminal's placement (Pos, facing Facing, its body's
+	 * box Body in its own space) and the room (Room: its rectangle; the walls' slab half a wall box behind its edges): two
+	 * conduits from the top of the body into the ceiling, two along the far wall from the body's sides into the side walls,
+	 * two along the floor from the base that turn down into the floor, bundles of cables from the top into the ceiling and
+	 * along the far wall into the side walls at two heights. Every run tiled by pieces of PieceLen scaled to fit (at most
+	 * x1.25 or x0.75). No random draw; look only.
+	 */
+	static void BuildTwinDressing(const AAreaGenerator& G, const FVector2D& Pos, const FVector2D& Facing, const FBox& Body, const FBox2D& Room,
+		TArray<FTransform>& Conduits, TArray<FTransform>& Bends, TArray<FTransform>& Cables, FString& Report)
+	{
+		const double PieceLen = FMath::Max(10.0, static_cast<double>(G.DressTwinPieceLength));
+		const double BendR = FMath::Max(10.0, static_cast<double>(G.DressTwinBendRadius));
+		const double Top = G.WallHeight + G.FloorThickness * 0.5;  // into the ceiling's box
+		const FVector Fwd(Facing.X, Facing.Y, 0.0);
+		const FVector Left(-Facing.Y, Facing.X, 0.0);
+		const FVector Origin(Pos.X, Pos.Y, 0.0);
+		auto World = [&](double X, double Y, double Z) { return Origin + Fwd * X + Left * Y + FVector(0.0, 0.0, Z); };
+		// How far the side walls' slab is from the body's centre line, along Left (the room is centred on it).
+		const FVector2D Centre = Room.GetCenter();
+		const double HalfRoom = 0.5 * FMath::Abs(FVector2D::DotProduct(Room.GetSize(), FVector2D(Left.X, Left.Y)));
+		const double OffCentre = FVector2D::DotProduct(Pos - Centre, FVector2D(Left.X, Left.Y));
+		const double SideSlab = HalfRoom + 0.5 * G.WallThickness;
+		const double Back = Body.Min.X;
+		int32 Runs = 0;
+		auto Tile = [&](TArray<FTransform>& Out, const FVector& A, const FVector& B)
+		{
+			const FVector D = B - A;
+			const double Len = D.Size();
+			if (Len < 1.0)
+			{
+				return;
+			}
+			++Runs;
+			const int32 N = FMath::Max(1, FMath::RoundToInt(Len / PieceLen));
+			const FRotator Rot = D.GetSafeNormal().Rotation();
+			for (int32 K = 0; K < N; ++K)
+			{
+				Out.Add(FTransform(Rot, A + D * (double(K) / N), FVector(Len / N / PieceLen, 1.0, 1.0)));
+			}
+		};
+		const double PipeX = Back + 30.0;  // the conduits' and cables' axis, in front of the wall
+		for (const double S : { 1.0, -1.0 })
+		{
+			const double SideY = S * Body.Max.Y;
+			const double WallY = S * SideSlab - OffCentre;
+			// From the top into the ceiling.
+			Tile(Conduits, World(PipeX - 10.0, S * 0.3 * Body.Max.Y, Body.Max.Z), World(PipeX - 10.0, S * 0.3 * Body.Max.Y, Top));
+			// From the sides into the side walls, under the ceiling.
+			Tile(Conduits, World(PipeX, SideY, Body.Max.Z * 0.77), World(PipeX, WallY, Body.Max.Z * 0.77));
+			// Along the floor from the base, turning down into the floor.
+			const double FloorZ = 12.0;
+			const double Turn = SideY + S * 1.5 * PieceLen;
+			Tile(Conduits, World(PipeX, SideY, FloorZ), World(PipeX, Turn, FloorZ));
+			{
+				// SM_KitTwinConduitBend turns from its +X to its +Z: +X along the run (away from the body), +Z down.
+				const FVector Along = Left * S;
+				const FVector Down(0.0, 0.0, -1.0);
+				const FVector Side = FVector::CrossProduct(Down, Along);
+				Bends.Add(FTransform(FMatrix(Along, Side, Down, World(PipeX, Turn, FloorZ))));
+			}
+			// Cables from the top into the ceiling, and along the far wall into the side walls at two heights.
+			Tile(Cables, World(PipeX - 5.0, S * 0.08 * Body.Max.Y, Body.Max.Z), World(PipeX - 5.0, S * 0.08 * Body.Max.Y, Top));
+			for (const double Z : { 0.40, 0.50 })
+			{
+				Tile(Cables, World(PipeX - 8.0, SideY, Body.Max.Z * Z), World(PipeX - 8.0, WallY, Body.Max.Z * Z));
+			}
+		}
+		Report = FString::Printf(TEXT("twin AI's room: %d runs, conduits %d, bends %d, cables %d"), Runs, Conduits.Num(), Bends.Num(), Cables.Num());
+	}
+
+	// --- The backdrop's dressing (Brief 28): the masses' modules, the levels of walkways above and below, the pillars ---
+	// Look only (the graphs spawn them with no collision and no navigation), computed from the finished plan with no random
+	// draw: the plan, the layout hash and everything placed stay as they are.
+
+	/** What BuildDecor places, by the generator's array (EDecorMesh order), and what it records for tls.BackdropCheck. */
+	struct FDecorOut
+	{
+		TArray<FTransform> Arrays[AAreaGenerator::DecorMeshCount];
+		TArray<AAreaGenerator::FDecorFaceRecord> Faces;
+		TArray<AAreaGenerator::FDecorLevelRecord> Levels;
+		TArray<AAreaGenerator::FDecorPillarRecord> Pillars;
+		TArray<AAreaGenerator::FDecorShotPick> MassPicks;
+		AAreaGenerator::FDecorShotPick PillarPick;
+		TArray<FBox> Forbidden;
+		TArray<FBox2D> ExitClearance;
+		FString Report;
+	};
+
+	/** The module of a family for the cell (Column, Row) of a face: a fixed pattern, no random draw. */
+	static int32 DecorModuleFor(EAreaBackdropFamily Family, int32 Column, int32 Row)
+	{
+		using M = AAreaGenerator;
+		switch (Family)
+		{
+		case EAreaBackdropFamily::Hull:
+			// Deep ribs every other column, from bottom to top; plating between them, a deep stringer every third row.
+			return Column % 2 == 0 ? M::DecorHullRib : (Row % 3 == 2 ? M::DecorHullFrame : M::DecorHullPlate);
+		case EAreaBackdropFamily::Servers:
+			// Stacks of tiers, a cable riser every fourth column, some tiers of closed bays.
+			return Column % 4 == 3 ? M::DecorServerRiser : (Column % 2 == 1 && Row % 2 == 1 ? M::DecorServerBays : M::DecorServerStack);
+		case EAreaBackdropFamily::Machinery:
+			// Banded columns, pipes, ringed columns, column by column.
+			return Column % 3 == 0 ? M::DecorMachColumn : (Column % 3 == 1 ? M::DecorMachPipes : M::DecorMachRing);
+		default:
+			return -1;
+		}
+	}
+
+	static const TCHAR* LexDecorFamily(EAreaBackdropFamily Family)
+	{
+		switch (Family)
+		{
+		case EAreaBackdropFamily::Hull: return TEXT("Hull");
+		case EAreaBackdropFamily::Servers: return TEXT("Servers");
+		case EAreaBackdropFamily::Machinery: return TEXT("Machinery");
+		case EAreaBackdropFamily::ServersAndMachinery: return TEXT("ServersAndMachinery");
+		default: return TEXT("None");
+		}
+	}
+
+	/** Columns (or rows) of modules across Span and their size: within the factor range, or the nearest count clamped to it (then centred, with a gap). */
+	static void FitModules(double Span, double Module, double MinF, double MaxF, int32& OutCount, double& OutSize)
+	{
+		OutCount = FMath::Max(1, FMath::RoundToInt(Span / Module));
+		double F = Span / (OutCount * Module);
+		if (F > MaxF) { ++OutCount; }
+		else if (F < MinF && OutCount > 1) { --OutCount; }
+		F = FMath::Clamp(Span / (OutCount * Module), MinF, MaxF);
+		OutSize = F * Module;
+		if (OutCount * OutSize > Span + 0.5)
+		{
+			// Too short for even one module at its smallest: none.
+			OutCount = FMath::Max(0, FMath::FloorToInt(Span / OutSize + 1e-6));
+		}
+	}
+
+	static void BuildDecor(const AAreaGenerator& G, const FPlan& Plan, const FGeometryPlan& Geo, const FDressing& Dressing, const FAreaBackdropRecipe& R, FDecorOut& Out)
+	{
+		const double FT = G.FloorThickness;
+		const double T = G.WallThickness;
+		const double Side = FMath::Max(0.0, static_cast<double>(G.DecorSideClearance));
+		const double Vert = FMath::Max(0.0, static_cast<double>(G.DecorVerticalClearance));
+		const double TipDepth = FMath::Max(0.0, static_cast<double>(G.DressFrameTipDepth));
+		const FVector PlateSize = G.DressFloorPlateSize.ComponentMax(FVector(1.0));
+		const FVector CurbSize = G.DressCurbSize.ComponentMax(FVector(1.0));
+		const FVector PostSize = G.DressCornerPostSize.ComponentMax(FVector(1.0));
+		const double FrameSpan = FMath::Max(1.0, static_cast<double>(G.DressFrameSpan));
+		constexpr double FrameMaxFactor = 1.9;
+
+		// The walkable floors and the space kept clear round them: 2 m off their sides, 8 m above and below them.
+		TArray<FBox> Walk;
+		for (const FAreaFloorRect& Rect : Geo.FloorRects)
+		{
+			Walk.Add(Rect.Box);
+			Out.Forbidden.Add(FBox(Rect.Box.Min - FVector(Side, Side, Vert), Rect.Box.Max + FVector(Side, Side, Vert)));
+		}
+		// The exit corridors' clearance (Brief 26): their line past the open end out to the backdrop's reach, grown by the
+		// clearance the masses keep from it. Every height.
+		const double Radius = FMath::Clamp(static_cast<double>(G.BackdropRadius), 0.0, 100000.0);
+		for (const FSeg& S : Plan.Segs)
+		{
+			if (S.bExitCorridor && S.Legs.Num() > 0)
+			{
+				const FLeg& Leg = S.Legs[0];
+				Out.ExitClearance.Add(Grow(MakeRect(Leg.Start, Leg.Dir, Leg.Length, Leg.Length + Radius + G.BackdropClearance, -0.5 * S.Width, 0.5 * S.Width), G.BackdropClearance));
+			}
+		}
+		auto InExitClearance = [&Out](const FBox2D& B)
+		{
+			for (const FBox2D& C : Out.ExitClearance)
+			{
+				if (B.Intersect(C)) { return true; }
+			}
+			return false;
+		};
+		auto Overlaps = [](const FBox& A, const FBox& B)
+		{
+			return A.Min.X < B.Max.X && A.Max.X > B.Min.X && A.Min.Y < B.Max.Y && A.Max.Y > B.Min.Y && A.Min.Z < B.Max.Z && A.Max.Z > B.Min.Z;
+		};
+		auto InForbidden = [&](const FBox& B)
+		{
+			if (InExitClearance(FBox2D(FVector2D(B.Min), FVector2D(B.Max))))
+			{
+				return true;
+			}
+			for (const FBox& F : Out.Forbidden)
+			{
+				if (Overlaps(B, F)) { return true; }
+			}
+			return false;
+		};
+		const TArray<FBox>& Masses = Geo.Backdrop;
+		int32 Totals[AAreaGenerator::DecorMeshCount] = {};
+		FString MassReport = TEXT("masses off");
+		FString LayerReport = TEXT("layers off");
+		FString PillarReport = TEXT("pillars off");
+
+		// --- Part A: the masses' faces seen from the route, dressed with the area's modules ---
+		if (R.bMasses && R.Family != EAreaBackdropFamily::None)
+		{
+			const double Module = FMath::Max(50.0, static_cast<double>(G.DecorModuleSize));
+			const double Depth = FMath::Max(0.0, static_cast<double>(G.DecorModuleDepth));
+			const double MinF = FMath::Clamp(static_cast<double>(G.DecorModuleMinFactor), 0.1, 1.0);
+			const double MaxF = FMath::Clamp(static_cast<double>(G.DecorModuleMaxFactor), 1.0, 4.0);
+			const double Reach = FMath::Max(0.0, R.MassReachM * 100.0);
+			int32 Toward = 0, Dressed = 0, BeyondReach = 0, CellsSkippedMass = 0, CellsSkippedClear = 0;
+			FFactorRange AlongF, UpF;
+			// The walkable volumes the faces are seen from: the floors up to the eye.
+			TArray<FBox> Seen;
+			for (const FBox& W : Walk) { Seen.Add(FBox(W.Min, FVector(W.Max.X, W.Max.Y, W.Max.Z + 200.0))); }
+			double BestPick[3] = { TNumericLimits<double>::Max(), TNumericLimits<double>::Max(), TNumericLimits<double>::Max() };
+			for (int32 M = 0; M < Masses.Num(); ++M)
+			{
+				const FBox& B = Masses[M];
+				const EAreaBackdropFamily Family = R.Family == EAreaBackdropFamily::ServersAndMachinery
+					? (M % 2 == 0 ? EAreaBackdropFamily::Servers : EAreaBackdropFamily::Machinery) : R.Family;
+				for (int32 Face = 0; Face < 6; ++Face)
+				{
+					// Faces 0..5: +X, -X, +Y, -Y, +Z, -Z.
+					const int32 Axis = Face / 2;
+					const double Sign = Face % 2 == 0 ? 1.0 : -1.0;
+					FVector N = FVector::ZeroVector;
+					N[Axis] = Sign;
+					const FVector Up = Axis == 2 ? FVector(1.0, 0.0, 0.0) : FVector(0.0, 0.0, 1.0);
+					const FRotator Rot = FRotationMatrix::MakeFromXZ(N, Up).Rotator();
+					const FVector AxY = FRotationMatrix(Rot).GetScaledAxis(EAxis::Y);
+					const FVector AxZ = FRotationMatrix(Rot).GetScaledAxis(EAxis::Z);
+					const FVector Size = B.GetSize();
+					const double W = FMath::Abs(FVector::DotProduct(Size, AxY));
+					const double H = FMath::Abs(FVector::DotProduct(Size, AxZ));
+					FVector Centre = B.GetCenter();
+					Centre[Axis] = Sign > 0.0 ? B.Max[Axis] : B.Min[Axis];
+					AAreaGenerator::FDecorFaceRecord Rec;
+					Rec.Mass = M;
+					Rec.Face = Face;
+					Rec.Normal = N;
+					Rec.Centre = Centre;
+					Rec.Size = FVector2D(W, H);
+					Rec.Family = Family;
+					// Turned to the route: some walkable volume lies on the face's outer side.
+					for (const FBox& V : Seen)
+					{
+						if (Sign > 0.0 ? V.Max[Axis] > B.Max[Axis] : V.Min[Axis] < B.Min[Axis]) { Rec.bTowardRoute = true; break; }
+					}
+					if (!Rec.bTowardRoute)
+					{
+						Out.Faces.Add(Rec);
+						continue;
+					}
+					++Toward;
+					// The walkable volumes within reach of the face's rectangle (a box round the face, grown by the reach).
+					const FBox FaceBox(Centre - (AxY * W + AxZ * H).GetAbs() * 0.5, Centre + (AxY * W + AxZ * H).GetAbs() * 0.5);
+					TArray<const FBox*> Near;
+					for (const FBox& V : Seen)
+					{
+						if (FMath::Sqrt(FaceBox.ComputeSquaredDistanceToBox(V)) <= Reach) { Near.Add(&V); }
+					}
+					if (Near.Num() == 0)
+					{
+						++BeyondReach;
+						Out.Faces.Add(Rec);
+						continue;
+					}
+					int32 NCols = 0, NRows = 0;
+					double CW = 0.0, CH = 0.0;
+					FitModules(W, Module, MinF, MaxF, NCols, CW);
+					FitModules(H, Module, MinF, MaxF, NRows, CH);
+					const double Y0 = -0.5 * NCols * CW;
+					const double Z0 = -0.5 * NRows * CH;
+					for (int32 Row = 0; Row < NRows; ++Row)
+					{
+						for (int32 Col = 0; Col < NCols; ++Col)
+						{
+							const FVector Base = Centre + AxY * (Y0 + (Col + 0.5) * CW) + AxZ * (Z0 + Row * CH);
+							const FVector Mid = Base + AxZ * (0.5 * CH);
+							double Best = TNumericLimits<double>::Max();
+							for (const FBox* V : Near) { Best = FMath::Min(Best, V->ComputeSquaredDistanceToPoint(Mid)); }
+							if (FMath::Sqrt(Best) > Reach)
+							{
+								continue;
+							}
+							++Rec.CellsInReach;
+							// The module's box: the cell on the face, out to the modules' depth.
+							const FVector C0 = Base - AxY * (0.5 * CW);
+							const FVector C1 = Base + AxY * (0.5 * CW) + AxZ * CH + N * Depth;
+							const FBox Cell3(C0.ComponentMin(C1), C0.ComponentMax(C1));
+							bool bOtherMass = false;
+							for (int32 O = 0; O < Masses.Num() && !bOtherMass; ++O)
+							{
+								bOtherMass = O != M && Overlaps(Cell3, Masses[O]);
+							}
+							if (bOtherMass)
+							{
+								++Rec.SkippedMass;
+								++CellsSkippedMass;
+								continue;
+							}
+							if (InForbidden(Cell3))
+							{
+								++Rec.SkippedClear;
+								++CellsSkippedClear;
+								continue;
+							}
+							const int32 Mesh = DecorModuleFor(Family, Col, Row);
+							if (Mesh < 0)
+							{
+								continue;
+							}
+							Out.Arrays[Mesh].Add(FTransform(Rot, Base, FVector(1.0, CW / Module, CH / Module)));
+							++Totals[Mesh];
+							++Rec.Placed;
+							AlongF.Add(CW / Module, FVector2D(Base));
+							UpF.Add(CH / Module, FVector2D(Base));
+							// The shot of each family: a module on a side face, nearest the route, about the eye's height.
+							const int32 Fam = Mesh / 3;
+							const double Score = FMath::Sqrt(Best) + FMath::Abs(Mid.Z - 300.0) * 2.0;
+							if (Axis != 2 && Score < BestPick[Fam])
+							{
+								BestPick[Fam] = Score;
+								AAreaGenerator::FDecorShotPick Pick;
+								Pick.Family = LexDecorFamily(Fam == 0 ? EAreaBackdropFamily::Hull : Fam == 1 ? EAreaBackdropFamily::Servers : EAreaBackdropFamily::Machinery);
+								Pick.At = Mid;
+								Pick.Normal = N;
+								bool bFound = false;
+								for (AAreaGenerator::FDecorShotPick& P : Out.MassPicks)
+								{
+									if (P.Family == Pick.Family) { P = Pick; bFound = true; }
+								}
+								if (!bFound) { Out.MassPicks.Add(Pick); }
+							}
+						}
+					}
+					Dressed += Rec.Placed > 0 ? 1 : 0;
+					Out.Faces.Add(Rec);
+				}
+			}
+			int32 Modules = 0;
+			for (int32 I = 0; I <= AAreaGenerator::DecorMachRing; ++I) { Modules += Totals[I]; }
+			MassReport = FString::Printf(TEXT("masses %d, family %s: faces turned to the route %d, dressed %d, beyond reach (%.0f m) %d; modules %d (hull rib %d plate %d frame %d, servers stack %d bays %d riser %d, machinery column %d pipes %d ring %d); cells left: against another mass %d, in the route's clearance %d; %s, %s"),
+				Masses.Num(), LexDecorFamily(R.Family), Toward, Dressed, R.MassReachM, BeyondReach, Modules,
+				Totals[0], Totals[1], Totals[2], Totals[3], Totals[4], Totals[5], Totals[6], Totals[7], Totals[8], CellsSkippedMass, CellsSkippedClear,
+				*AlongF.ToString(TEXT("factor along")), *UpF.ToString(TEXT("factor up")));
+		}
+
+		// --- Part B: levels of walkways above and below every open segment ---
+		struct FDecorTip { FVector Tip; int32 Line = 0; int32 Lines = 1; int32 Piece = 0; int32 Pieces = 1; bool bPlatform = false; bool bAlongX = true; };
+		TArray<FDecorTip> LayerTips;
+		TArray<FBox> LayerDecks;
+		if (R.bLayers && (R.LayerCountAbove > 0 || R.LayerCountBelow > 0))
+		{
+			const double Spacing = FMath::Max(100.0, R.LayerSpacingM * 100.0);
+			const double Scale = FMath::Clamp(static_cast<double>(R.LayerScale), 1.0, 4.0);
+			const double PieceLen = FMath::Max(100.0, R.LayerPieceLengthM * 100.0);
+			const int32 Above = FMath::Clamp(R.LayerCountAbove, 0, 4);
+			const int32 Below = FMath::Clamp(R.LayerCountBelow, 0, 4);
+			int32 Cut = 0;
+			TArray<int32> Segments;
+			for (const FDressing::FOpenPart& P : Dressing.OpenParts) { Segments.AddUnique(P.Segment); }
+			Segments.Sort();
+			for (const int32 S : Segments)
+			{
+				const FVector2D C = Plan.Segs[S].Bounds.GetCenter();
+				double WalkedReach = 0.0;
+				for (const FDressing::FOpenPart& P : Dressing.OpenParts)
+				{
+					if (P.Segment != S) { continue; }
+					for (const FVector2D& Q : { P.Rect.Min, P.Rect.Max, FVector2D(P.Rect.Min.X, P.Rect.Max.Y), FVector2D(P.Rect.Max.X, P.Rect.Min.Y) })
+					{
+						WalkedReach = FMath::Max(WalkedReach, FVector2D::Distance(Q, C));
+					}
+				}
+				for (int32 L = 0; L < Above + Below; ++L)
+				{
+					const bool bAbove = L < Above;
+					const int32 K = bAbove ? L + 1 : L - Above + 1;
+					const double Z = (bAbove ? 1.0 : -1.0) * K * Spacing;
+					// A quarter turn more for each level: the levels above first, then those below.
+					const int32 Turns = (L + 1) % 4;
+					AAreaGenerator::FDecorLevelRecord Rec;
+					Rec.Segment = S;
+					Rec.Level = bAbove ? K : -K;
+					Rec.Z = static_cast<float>(Z);
+					Rec.Turns = Turns;
+					Rec.WalkedReach = WalkedReach;
+					Rec.Bounds = FBox2D(ForceInit);
+					// The level's parts: the walked ones turned about the segment's centre and enlarged, cut into pieces.
+					struct FPiece { FBox2D Box; bool bAlongX; int32 J; int32 NA; int32 K; int32 NC; bool bPlatform; };
+					TArray<FPiece> Kept;
+					for (const FDressing::FOpenPart& P : Dressing.OpenParts)
+					{
+						if (P.Segment != S) { continue; }
+						FBox2D Box(ForceInit);
+						for (FVector2D Q : { P.Rect.Min, P.Rect.Max })
+						{
+							FVector2D D = Q - C;
+							for (int32 Tn = 0; Tn < Turns; ++Tn) { D = FVector2D(-D.Y, D.X); }
+							Box += C + D * Scale;
+						}
+						const double SX = Box.Max.X - Box.Min.X;
+						const double SY = Box.Max.Y - Box.Min.Y;
+						const bool bAlongX = SX >= SY;
+						const double Long = bAlongX ? SX : SY;
+						const double Wide = bAlongX ? SY : SX;
+						const int32 NA = FMath::Max(1, FMath::RoundToInt(Long / PieceLen));
+						const int32 NC = FMath::Max(1, FMath::RoundToInt(Wide / PieceLen));
+						for (int32 J = 0; J < NA; ++J)
+						{
+							for (int32 Kc = 0; Kc < NC; ++Kc)
+							{
+								const double A0 = J * Long / NA, A1 = (J + 1) * Long / NA;
+								const double W0 = Kc * Wide / NC, W1 = (Kc + 1) * Wide / NC;
+								const FBox2D Piece = bAlongX ? FBox2D(FVector2D(Box.Min.X + A0, Box.Min.Y + W0), FVector2D(Box.Min.X + A1, Box.Min.Y + W1))
+									: FBox2D(FVector2D(Box.Min.X + W0, Box.Min.Y + A0), FVector2D(Box.Min.X + W1, Box.Min.Y + A1));
+								// The piece with its curbs and the frames under it.
+								const FBox Space(FVector(Piece.Min.X - T, Piece.Min.Y - T, Z - FT - TipDepth), FVector(Piece.Max.X + T, Piece.Max.Y + T, Z + G.CurbHeight));
+								bool bBlocked = InForbidden(Space);
+								for (int32 M = 0; M < Masses.Num() && !bBlocked; ++M)
+								{
+									bBlocked = Overlaps(Space, Masses[M].ExpandBy(FVector(G.DecorModuleDepth)));
+								}
+								if (bBlocked)
+								{
+									++Rec.PiecesCut;
+									++Cut;
+									continue;
+								}
+								Kept.Add({ Piece, bAlongX, J, NA, Kc, NC, P.bPlatform });
+							}
+						}
+					}
+					TMap<FIntPoint, TArray<FVector2D>> CurbLines;  // (side, line in cm) -> free spans along it
+					for (const FPiece& P : Kept)
+					{
+						const FVector2D PC = P.Box.GetCenter();
+						const double SX = P.Box.Max.X - P.Box.Min.X;
+						const double SY = P.Box.Max.Y - P.Box.Min.Y;
+						Rec.Bounds += P.Box;
+						for (const FVector2D& Q : { P.Box.Min, P.Box.Max, FVector2D(P.Box.Min.X, P.Box.Max.Y), FVector2D(P.Box.Max.X, P.Box.Min.Y) })
+						{
+							Rec.Reach = FMath::Max(Rec.Reach, FVector2D::Distance(Q, C));
+						}
+						// The deck: one plate over the piece (its long side along the piece's).
+						const double PL = P.bAlongX ? SX : SY;
+						const double PW = P.bAlongX ? SY : SX;
+						Out.Arrays[AAreaGenerator::DecorLayerPlate].Add(FTransform(FRotator(0.0, P.bAlongX ? 0.0 : 90.0, 0.0), FVector(PC.X, PC.Y, Z - FT),
+							FVector(PL / PlateSize.X, PW / PlateSize.Y, FT / PlateSize.Z)));
+						LayerDecks.Add(FBox(FVector(P.Box.Min, Z - FT), FVector(P.Box.Max, Z)));
+						++Rec.Plates;
+						// The frames: under every other piece along its part (and under the last), one line across the piece at its
+						// middle, out to the curbs, in pieces of at most x1.9 (the budget: Brief 28's reduction).
+						if (P.J % 2 == 0 || P.J == P.NA - 1)
+						{
+							const double Across0 = (P.bAlongX ? P.Box.Min.Y : P.Box.Min.X) - T;
+							const double Across1 = (P.bAlongX ? P.Box.Max.Y : P.Box.Max.X) + T;
+							const int32 FP = FMath::Max(1, FMath::CeilToInt((Across1 - Across0) / (FrameSpan * FrameMaxFactor) - 1e-6));
+							const double FL = (Across1 - Across0) / FP;
+							const int32 Line = (P.J + 1) / 2;
+							const int32 Lines = (P.NA + 1) / 2 + (P.NA % 2 == 0 ? 1 : 0);
+							for (int32 Q = 0; Q < FP; ++Q)
+							{
+								const double Mid = Across0 + (Q + 0.5) * FL;
+								const FVector2D FC = P.bAlongX ? FVector2D(PC.X, Mid) : FVector2D(Mid, PC.Y);
+								Out.Arrays[AAreaGenerator::DecorLayerFrame].Add(FitPiece(FC, Z - FT, P.bAlongX ? 0 : 1, 1.0, FL, 1.0, FVector(1.0, FrameSpan, 1.0)));
+								LayerTips.Add({ FVector(FC.X, FC.Y, Z - FT - TipDepth), Line, Lines, P.K * FP + Q, P.NC * FP, P.bPlatform, P.bAlongX });
+								++Rec.Frames;
+							}
+						}
+						// The curbs: along each edge, where no other piece of the level meets it; gathered by line and merged
+						// below, so that a curb runs on across the pieces' joints.
+						for (int32 D = 0; D < 4; ++D)
+						{
+							const bool bEdgeAlongY = D == 0 || D == 2;  // the edge runs along Y on the +X and -X sides
+							const double Line = D == 0 ? P.Box.Max.X : D == 1 ? P.Box.Max.Y : D == 2 ? P.Box.Min.X : P.Box.Min.Y;
+							const double E0 = bEdgeAlongY ? P.Box.Min.Y : P.Box.Min.X;
+							const double E1 = bEdgeAlongY ? P.Box.Max.Y : P.Box.Max.X;
+							TArray<FVector2D> Free = { FVector2D(E0, E1) };
+							for (const FPiece& O : Kept)
+							{
+								const double OLine = D == 0 ? O.Box.Min.X : D == 1 ? O.Box.Min.Y : D == 2 ? O.Box.Max.X : O.Box.Max.Y;
+								if (&O == &P || FMath::Abs(OLine - Line) > 1.0)
+								{
+									continue;
+								}
+								const double O0 = bEdgeAlongY ? O.Box.Min.Y : O.Box.Min.X;
+								const double O1 = bEdgeAlongY ? O.Box.Max.Y : O.Box.Max.X;
+								TArray<FVector2D> Next;
+								for (const FVector2D& F : Free)
+								{
+									if (O1 <= F.X || O0 >= F.Y) { Next.Add(F); continue; }
+									if (O0 > F.X) { Next.Add(FVector2D(F.X, O0)); }
+									if (O1 < F.Y) { Next.Add(FVector2D(O1, F.Y)); }
+								}
+								Free = MoveTemp(Next);
+							}
+							TArray<FVector2D>& Runs = CurbLines.FindOrAdd(FIntPoint(D, FMath::RoundToInt(Line)));
+							for (const FVector2D& F : Free)
+							{
+								if (F.Y - F.X >= 1.0) { Runs.Add(F); }
+							}
+						}
+					}
+					// The curbs: each line's free spans merged where they meet, then pieces of about twice the deck's (Brief
+					// 28's reduction: a curb is the costliest piece of the kit).
+					TArray<FIntPoint> CurbKeys;
+					CurbLines.GetKeys(CurbKeys);
+					CurbKeys.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+					for (const FIntPoint& Key : CurbKeys)
+					{
+						TArray<FVector2D> Runs = CurbLines[Key];
+						Runs.Sort([](const FVector2D& A, const FVector2D& B) { return A.X < B.X; });
+						TArray<FVector2D> Merged;
+						for (const FVector2D& F : Runs)
+						{
+							if (Merged.Num() > 0 && F.X <= Merged.Last().Y + 1.0) { Merged.Last().Y = FMath::Max(Merged.Last().Y, F.Y); }
+							else { Merged.Add(F); }
+						}
+						const int32 D = Key.X;
+						const bool bEdgeAlongY = D == 0 || D == 2;
+						const double Line = Key.Y;
+						const FVector2D Outward = DirV(D);
+						for (const FVector2D& F : Merged)
+						{
+							const double Len = F.Y - F.X;
+							if (Len < 10.0)
+							{
+								continue;
+							}
+							const int32 NCurb = FMath::Max(1, FMath::RoundToInt(Len / (2.0 * PieceLen)));
+							for (int32 Q = 0; Q < NCurb; ++Q)
+							{
+								const double S0 = F.X + (Q + 0.5) * Len / NCurb;
+								const FVector2D OnLine = bEdgeAlongY ? FVector2D(Line, S0) : FVector2D(S0, Line);
+								Out.Arrays[AAreaGenerator::DecorLayerCurb].Add(FitPiece(OnLine + Outward * (0.5 * T), Z + G.CurbHeight - CurbSize.Z, Opposite(D), T, Len / NCurb, CurbSize.Z, CurbSize));
+								++Rec.Curbs;
+							}
+						}
+					}
+					Totals[AAreaGenerator::DecorLayerPlate] += Rec.Plates;
+					Totals[AAreaGenerator::DecorLayerCurb] += Rec.Curbs;
+					Totals[AAreaGenerator::DecorLayerFrame] += Rec.Frames;
+					Out.Levels.Add(Rec);
+				}
+			}
+			LayerReport = FString::Printf(TEXT("layers: %d open segments, %d above and %d below, %.1f m apart, x%.2f, pieces of %.1f m: %d levels, plates %d, curbs %d, frames %d, pieces cut %d"),
+				Segments.Num(), Above, Below, Spacing / 100.0, Scale, PieceLen / 100.0, Out.Levels.Num(), Totals[AAreaGenerator::DecorLayerPlate],
+				Totals[AAreaGenerator::DecorLayerCurb], Totals[AAreaGenerator::DecorLayerFrame], Cut);
+		}
+
+		// --- Part C: pillars from frames' lowest points down to the first geometry below ---
+		if (R.bPillars)
+		{
+			const int32 Nth = FMath::Clamp(R.PillarEveryNthFrame, 1, 20);
+			const double MaxLen = FMath::Max(100.0, R.PillarMaxLengthM * 100.0);
+			const double Half = 0.5 * FMath::Max(PostSize.X, PostSize.Y);
+			int32 ByFoot[3] = {}, Dropped = 0, WalkedCount = 0;
+			auto Place = [&](const FVector& Tip, int32 Line, int32 Lines, int32 Piece, int32 Pieces, bool bPlatform, bool bAlongX, bool bWalked)
+			{
+				const bool bCorner = bPlatform && (Line == 0 || Line == Lines - 1) && (Piece == 0 || Piece == Pieces - 1);
+				if (Line % Nth != 0 && !bCorner)
+				{
+					return;
+				}
+				const FBox2D Foot2(FVector2D(Tip) - FVector2D(Half, Half), FVector2D(Tip) + FVector2D(Half, Half));
+				if (InExitClearance(Foot2))
+				{
+					++Dropped;
+					return;
+				}
+				// The first geometry under the tip: a mass, a level's deck; for a level's pillar, also the route's clearance (cut there).
+				double FootZ = -TNumericLimits<double>::Max();
+				uint8 Kind = AAreaGenerator::PillarFootMaxLength;
+				auto Under = [&](const FBox& B, uint8 K)
+				{
+					if (B.Min.X < Foot2.Max.X && B.Max.X > Foot2.Min.X && B.Min.Y < Foot2.Max.Y && B.Max.Y > Foot2.Min.Y && B.Max.Z < Tip.Z - 1.0 && B.Max.Z > FootZ)
+					{
+						FootZ = B.Max.Z;
+						Kind = K;
+					}
+				};
+				for (const FBox& B : Masses) { Under(B, AAreaGenerator::PillarFootGeometry); }
+				for (const FBox& B : LayerDecks) { Under(B, AAreaGenerator::PillarFootGeometry); }
+				for (const FBox& B : Walk) { Under(B, AAreaGenerator::PillarFootGeometry); }
+				if (!bWalked)
+				{
+					for (const FBox& B : Out.Forbidden) { Under(B, AAreaGenerator::PillarFootCut); }
+				}
+				double Len = Tip.Z - FootZ;
+				if (Len > MaxLen)
+				{
+					Len = MaxLen;
+					Kind = AAreaGenerator::PillarFootMaxLength;
+				}
+				if (Kind == AAreaGenerator::PillarFootCut && Len < 200.0)
+				{
+					++Dropped;
+					return;
+				}
+				Out.Arrays[AAreaGenerator::DecorPillar].Add(FTransform(FRotator(0.0, bAlongX ? 0.0 : 90.0, 0.0), FVector(Tip.X, Tip.Y, Tip.Z - Len),
+					FVector(1.0, 1.0, Len / PostSize.Z)));
+				Out.Pillars.Add({ Tip, static_cast<float>(Len), Kind, bWalked });
+				++ByFoot[Kind];
+				WalkedCount += bWalked ? 1 : 0;
+				if (bWalked && Len >= 1000.0 && Out.PillarPick.Family.IsEmpty())
+				{
+					Out.PillarPick.Family = TEXT("Pillar");
+					Out.PillarPick.At = Tip;
+					Out.PillarPick.Normal = bAlongX ? FVector(1.0, 0.0, 0.0) : FVector(0.0, 1.0, 0.0);
+				}
+			};
+			for (const FDressing::FFrameTip& F : Dressing.FrameTips) { Place(F.Tip, F.Line, F.Lines, F.Piece, F.Pieces, F.bPlatform, F.bAlongX, true); }
+			for (const FDecorTip& F : LayerTips) { Place(F.Tip, F.Line, F.Lines, F.Piece, F.Pieces, F.bPlatform, F.bAlongX, false); }
+			Totals[AAreaGenerator::DecorPillar] = Out.Arrays[AAreaGenerator::DecorPillar].Num();
+			PillarReport = FString::Printf(TEXT("pillars every %d frames and under platforms' corners: %d (%d under the walked level, %d under the levels): on geometry %d, at the length %.0f m %d, cut at the route's clearance %d; dropped %d (exit clearance, or cut under 2 m)"),
+				Nth, Out.Pillars.Num(), WalkedCount, Out.Pillars.Num() - WalkedCount, ByFoot[AAreaGenerator::PillarFootGeometry], MaxLen / 100.0,
+				ByFoot[AAreaGenerator::PillarFootMaxLength], ByFoot[AAreaGenerator::PillarFootCut], Dropped);
+		}
+		Out.Report = MassReport + TEXT("; ") + LayerReport + TEXT("; ") + PillarReport;
 	}
 }
 
@@ -3024,6 +3969,59 @@ int32 AAreaGenerator::GetDressingInstanceCount() const
 		{
 			Count += Component->GetInstanceCount();
 		}
+	}
+	return Count;
+}
+
+const TCHAR* AAreaGenerator::GetDecorArrayName(int32 Mesh)
+{
+	static const TCHAR* Names[DecorMeshCount] = { TEXT("DecorMassHullRib"), TEXT("DecorMassHullPlate"), TEXT("DecorMassHullFrame"),
+		TEXT("DecorMassServerStack"), TEXT("DecorMassServerBays"), TEXT("DecorMassServerRiser"), TEXT("DecorMassMachColumn"),
+		TEXT("DecorMassMachPipes"), TEXT("DecorMassMachRing"), TEXT("DecorLayerPlates"), TEXT("DecorLayerCurbs"), TEXT("DecorLayerFrames"), TEXT("DecorPillars") };
+	return Mesh >= 0 && Mesh < DecorMeshCount ? Names[Mesh] : TEXT("");
+}
+
+TArray<FTransform>* AAreaGenerator::MutableDecorArray(int32 Mesh)
+{
+	TArray<FTransform>* Arrays[DecorMeshCount] = { &DecorMassHullRib, &DecorMassHullPlate, &DecorMassHullFrame, &DecorMassServerStack, &DecorMassServerBays,
+		&DecorMassServerRiser, &DecorMassMachColumn, &DecorMassMachPipes, &DecorMassMachRing, &DecorLayerPlates, &DecorLayerCurbs, &DecorLayerFrames, &DecorPillars };
+	return Arrays[FMath::Clamp(Mesh, 0, DecorMeshCount - 1)];
+}
+
+const TArray<FTransform>& AAreaGenerator::GetDecorArray(int32 Mesh) const
+{
+	return *const_cast<AAreaGenerator*>(this)->MutableDecorArray(Mesh);
+}
+
+int32 AAreaGenerator::GetDecorPart(int32 Mesh)
+{
+	return Mesh <= DecorMachRing ? 0 : (Mesh == DecorPillar ? 2 : 1);
+}
+
+TArray<UInstancedStaticMeshComponent*> AAreaGenerator::GetDecorComponents(int32 Mesh) const
+{
+	// Every instanced component of the backdrop's dressing carries "AreaDecor" and "Area<its array>".
+	static const FName All(TEXT("AreaDecor"));
+	const FName Tag = Mesh < 0 ? All : FName(*FString::Printf(TEXT("Area%s"), GetDecorArrayName(Mesh)));
+	TArray<UInstancedStaticMeshComponent*> Components;
+	GetComponents(Components);
+	TArray<UInstancedStaticMeshComponent*> Out;
+	for (UInstancedStaticMeshComponent* Component : Components)
+	{
+		if (Component && Component->ComponentHasTag(Tag))
+		{
+			Out.Add(Component);
+		}
+	}
+	return Out;
+}
+
+int32 AAreaGenerator::GetDecorInstanceCount() const
+{
+	int32 Count = 0;
+	for (const UInstancedStaticMeshComponent* Component : GetDecorComponents(-1))
+	{
+		Count += Component->GetInstanceCount();
 	}
 	return Count;
 }
@@ -3219,12 +4217,28 @@ int32 AAreaGenerator::ClearArea()
 	PublishedPieces.Reset();
 	for (TArray<FTransform>* Plan : { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop,
 		&PlanFloorsCollision, &PlanWallsCollision, &PlanCurbsCollision, &PlanPillarsCollision, &PlanCeilingsCollision,
-		&DressWallPanels, &DressFloorPlates, &DressCeilingPlates, &DressCornerPosts, &DressCeilingBeams, &DressConduits, &DressCurbs, &DressCatwalkFrames, &DressGateFrames })
+		&DressWallPanels, &DressFloorPlates, &DressCeilingPlates, &DressCornerPosts, &DressCeilingBeams, &DressConduits, &DressCurbs, &DressCatwalkFrames, &DressGateFrames,
+		&DressTwinConduits, &DressTwinBends, &DressTwinCables })
 	{
 		Plan->Reset();
 	}
+	for (int32 Mesh = 0; Mesh < DecorMeshCount; ++Mesh)
+	{
+		MutableDecorArray(Mesh)->Reset();
+	}
+	DecorFaces.Reset();
+	DecorLevels.Reset();
+	DecorPillarRecords.Reset();
+	DecorMassPicks.Reset();
+	DecorPillarPick = FDecorShotPick();
+	DecorForbidden.Reset();
+	DecorExitClearance.Reset();
+	LastBackdropReport.Reset();
+	DressFloorStripsFrom = 0;
+	OpenEndBoxes.Reset();
 	NavigationBounds = FBox(ForceInit);
 	RouteLength = 0.f;
+	RouteLengthBeforeWayOut = 0.f;
 	return ToRemove.Num();
 }
 
@@ -3571,6 +4585,7 @@ void AAreaGenerator::BecomeReady()
 		GetPCGInstanceCount(), bLastPCGMatchedPlan ? TEXT("matched") : TEXT("NOT MATCHED"), LastGenerationSeconds, LastPCGSeconds, LastNavigationSeconds,
 		LastValidationSeconds, TimeToReadySeconds, GetDressingInstanceCount());
 	UE_LOG(LogArea, Display, TEXT("%s: DRESSING act %d seed %d: %s."), *GetName(), Act, Seed, *LastDressingReport);
+	UE_LOG(LogArea, Display, TEXT("%s: BACKDROP act %d seed %d: %s; instances built %d."), *GetName(), Act, Seed, *LastBackdropReport, GetDecorInstanceCount());
 	if (URunSubsystem* Run = URunSubsystem::Get(this))
 	{
 		Run->NotifyAreaReady(World);
@@ -3746,6 +4761,11 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		{
 			Why = FString::Printf(TEXT("route centreline %.0f m outside %.0f-%.0f m"), Builder->Plan.RouteLength() / 100.f, MinCentreline / 100.f, Recipe->RouteLengthMax * 0.98f / 100.f);
 		}
+		// The way out (Brief 26), on top of the chosen layout: the length above is the recipe's route, as before.
+		else if (!Builder->PlaceWayOut(IsAreaWayOutOn()))
+		{
+			Why = Builder->WayOutError;
+		}
 		if (Why.IsEmpty())
 		{
 			Built = MoveTemp(Builder);
@@ -3806,6 +4826,17 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		{
 			UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d: %s; the validator fails this seed."), *GetName(), Act, Seed, *Builder.WallError);
 		}
+		// Brief 26: in the twin AI's room the terminal shows its own body (SM_TwinTerminal), set into the far wall.
+		if (TwinDefaults && Builder.WayOut.RoomSegment >= 0)
+		{
+			const UStaticMesh* TwinMesh = TerminalDefaults->bModelledBody ? TwinDefaults->GetModelledBodyMesh() : nullptr;
+			const FBox Body = TwinMesh ? TwinMesh->GetBoundingBox() : TwinDefaults->GetLocalBodyBox();
+			if (!Builder.PlaceTwinInRoom(Body.IsValid ? static_cast<float>(Body.Min.X) : -20.f, Body.IsValid ? static_cast<float>(Body.Max.X) : 20.f, Stand,
+				TwinDefaults->GetInteractRadius(), WallThickness))
+			{
+				UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d: %s; the validator fails this seed."), *GetName(), Act, Seed, *Builder.WallError);
+			}
+		}
 		// Beacons last, on top of everything (no random draw, nothing else moves).
 		if (!Builder.PlaceBeacons(TerminalDefaults->GetInteractRadius(), Log.Reach, Twin.Reach))
 		{
@@ -3855,6 +4886,8 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 			}
 		}
 		DressWallPanels = MoveTemp(Dressing.Panels);
+		DressFloorStripsFrom = Dressing.Plates.Num();
+		Dressing.Plates.Append(Dressing.FloorStrips);
 		DressFloorPlates = MoveTemp(Dressing.Plates);
 		DressCeilingPlates = MoveTemp(Dressing.CeilingPlates);
 		DressCornerPosts = MoveTemp(Dressing.Posts);
@@ -3867,8 +4900,48 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		DressMostSqueezedPanel = Dressing.Squeezed;
 		DressMostStretchedPanel = Dressing.Stretched;
 		DressFirstConduitMouth = Dressing.FirstMouth;
+		OpenEndBoxes.Reset();
+		for (int32 I = 0; I < Geometry.Walls.Num(); ++I)
+		{
+			if (Geometry.WallOpen.IsValidIndex(I) && Geometry.WallOpen[I])
+			{
+				OpenEndBoxes.Add(Geometry.Walls[I]);
+			}
+		}
+		// The twin AI's room's conduits and cables (Brief 26), from its terminal's placement.
+		if (Builder.WayOut.RoomSegment >= 0 && Builder.TwinPlacements.Num() > 0)
+		{
+			const ATwinAITerminal* TwinDefaults = TwinAITerminalClass ? TwinAITerminalClass->GetDefaultObject<ATwinAITerminal>() : nullptr;
+			const UStaticMesh* TwinMesh = TwinDefaults && TerminalDefaults->bModelledBody ? TwinDefaults->GetModelledBodyMesh() : nullptr;
+			if (TwinMesh)
+			{
+				FString TwinReport;
+				BuildTwinDressing(*this, Builder.TwinPlacements[0].Pos, Builder.TwinPlacements[0].Facing, TwinMesh->GetBoundingBox(), Builder.WayOut.RoomRect,
+					DressTwinConduits, DressTwinBends, DressTwinCables, TwinReport);
+				LastDressingReport += TEXT("; ") + TwinReport;
+			}
+		}
+		// The backdrop's dressing (Brief 28): the masses' modules, the levels of walkways, the pillars. Look only, from the
+		// finished plan with no random draw; each part has its switch and its values in the recipe (FAreaRecipe::Backdrop).
+		{
+			FDecorOut Decor;
+			BuildDecor(*this, Plan, Geometry, Dressing, Recipe->Backdrop, Decor);
+			for (int32 Mesh = 0; Mesh < DecorMeshCount; ++Mesh)
+			{
+				*MutableDecorArray(Mesh) = MoveTemp(Decor.Arrays[Mesh]);
+			}
+			DecorFaces = MoveTemp(Decor.Faces);
+			DecorLevels = MoveTemp(Decor.Levels);
+			DecorPillarRecords = MoveTemp(Decor.Pillars);
+			DecorMassPicks = MoveTemp(Decor.MassPicks);
+			DecorPillarPick = Decor.PillarPick;
+			DecorForbidden = MoveTemp(Decor.Forbidden);
+			DecorExitClearance = MoveTemp(Decor.ExitClearance);
+			LastBackdropReport = MoveTemp(Decor.Report);
+		}
 	}
 	RouteLength = Plan.RouteLength();
+	RouteLengthBeforeWayOut = Plan.LengthBeforeWayOut;
 
 	// --- Spawn the gameplay actors ---
 	ULevel* Level = GetLevel();
@@ -3929,6 +5002,15 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		Record.RouteEnd = S.RouteEnd;
 		Record.SpursPlaced = S.Spurs;
 		Record.NichesPlaced = S.Niches;
+		Record.bExitCorridor = S.bExitCorridor;
+		Record.bTwinAIRoom = S.bTwinRoom;
+		if (S.bExitCorridor || S.bTwinRoom)
+		{
+			const FVector2D D = DirV(S.EnterDir);
+			Record.Direction = FVector(D.X, D.Y, 0.0);
+			Record.Mouth = At(S.Mouth, 0.f);
+			Record.Width = S.Width;
+		}
 		Info->Segments.Add(Record);
 	}
 
@@ -3936,7 +5018,8 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	const FVector2D StartDir = Plan.Route.Num() > 1 ? (Plan.Route[1] - Plan.Route[0]).GetSafeNormal() : FVector2D(1.0, 0.0);
 	PlannedStart = At(Plan.Route[0] + StartDir * 150.0, 100.f);
 	PlannedStartRotation = YawOf(StartDir);
-	PlannedEntity = At(Plan.PointAt(Plan.RouteLength() * 0.5f), 0.f);
+	// Halfway along the recipe's route: the way out (Brief 26) does not move the entity.
+	PlannedEntity = At(Plan.PointAt(Plan.LengthBeforeWayOut * 0.5f), 0.f);
 	if (bGame)
 	{
 		for (TActorIterator<APlayerStart> It(World); It; ++It)
@@ -3951,12 +5034,27 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 			break;
 		}
 	}
-	const FVector2D EndDir = (Plan.Route.Last() - Plan.Route[Plan.Route.Num() - 2]).GetSafeNormal();
-	AAreaExit* Exit = Cast<AAreaExit>(Spawn(AAreaExit::StaticClass(), At(Plan.Route.Last() - EndDir * 150.0, 150.f), YawOf(EndDir), TEXT("Area_Exit"), TEXT("Flow")));
-	if (Exit)
+	if (Builder.WayOut.CorridorSegment >= 0)
 	{
-		const float HalfWidth = FMath::Max(100.f, Plan.Segs.Last().Width * 0.5f - 10.f);
-		Exit->GetVolume()->SetBoxExtent(FVector(150.f, HalfWidth, 150.f));
+		// Brief 26: inside the exit corridor, the recipe's depth in from its mouth, across its whole section (wall to wall,
+		// floor to ceiling), so the player cannot walk past it.
+		AAreaExit* Exit = Cast<AAreaExit>(Spawn(AAreaExit::StaticClass(), At(Builder.WayOut.ExitPos, WallHeight * 0.5f), YawOf(Builder.WayOut.ExitDir), TEXT("Area_Exit"), TEXT("Flow")));
+		if (Exit)
+		{
+			Exit->GetVolume()->SetBoxExtent(FVector(150.f, Builder.WayOut.HalfWidth, WallHeight * 0.5f));
+			// The rest of the corridor past the exit: back in Normal time a player there travels at once.
+			Exit->RunPastExit = FMath::Max(0.f, Builder.WayOut.Length - static_cast<float>(FVector2D::Distance(Builder.WayOut.ExitPos, Plan.Segs[Builder.WayOut.CorridorSegment].Mouth)) - 150.f);
+		}
+	}
+	else
+	{
+		const FVector2D EndDir = (Plan.Route.Last() - Plan.Route[Plan.Route.Num() - 2]).GetSafeNormal();
+		AAreaExit* Exit = Cast<AAreaExit>(Spawn(AAreaExit::StaticClass(), At(Plan.Route.Last() - EndDir * 150.0, 150.f), YawOf(EndDir), TEXT("Area_Exit"), TEXT("Flow")));
+		if (Exit)
+		{
+			const float HalfWidth = FMath::Max(100.f, Plan.Segs.Last().Width * 0.5f - 10.f);
+			Exit->GetVolume()->SetBoxExtent(FVector(150.f, HalfWidth, 150.f));
+		}
 	}
 
 	// Gates
@@ -4153,5 +5251,15 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		Geometry.Floors.Num(), Geometry.Walls.Num(), Geometry.Curbs.Num(), Geometry.Pillars.Num(), Geometry.Ceilings.Num(), Geometry.Backdrop.Num(),
 		Builder.NormalResidues.Num() + Builder.GatePlacements.Num(), Builder.GatePlacements.Num(), Builder.LightPlacements.Num(),
 		Builder.LogPlacements.Num(), Builder.TwinPlacements.Num(), Builder.BeaconPlacements.Num());
+	if (Builder.WayOut.CorridorSegment >= 0)
+	{
+		const FSeg& Corridor = Plan.Segs[Builder.WayOut.CorridorSegment];
+		UE_LOG(LogArea, Log, TEXT("%s: WAY OUT act %d seed %d: route %.1f m before it, %.1f m with it; %sexit corridor segment %d from (%.0f, %.0f) heading yaw %.0f, %.0f m long (exit %.0f m in, %.0f m past it), %.0f cm wide."),
+			*GetName(), Act, Seed, Plan.LengthBeforeWayOut / 100.f, Plan.RouteLength() / 100.f,
+			Builder.WayOut.RoomSegment >= 0 ? *FString::Printf(TEXT("twin AI's room segment %d (%.0f m a side) entered at (%.0f, %.0f); "), Builder.WayOut.RoomSegment,
+				Plan.Segs[Builder.WayOut.RoomSegment].Width / 100.f, Plan.Segs[Builder.WayOut.RoomSegment].Mouth.X, Plan.Segs[Builder.WayOut.RoomSegment].Mouth.Y) : TEXT(""),
+			Builder.WayOut.CorridorSegment, Corridor.Mouth.X, Corridor.Mouth.Y, YawOf(Builder.WayOut.ExitDir).Yaw, Builder.WayOut.Length / 100.f,
+			FVector2D::Distance(Builder.WayOut.ExitPos, Corridor.Mouth) / 100.f, (Builder.WayOut.Length - FVector2D::Distance(Builder.WayOut.ExitPos, Corridor.Mouth)) / 100.f, Corridor.Width);
+	}
 	return true;
 }

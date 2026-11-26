@@ -56,7 +56,8 @@ void AAreaExit::TryTravel()
 	}
 	const APlayerController* Controller = World->GetFirstPlayerController();
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
-	if (!Pawn || !Volume->IsOverlappingActor(Pawn))
+	// Inside the box, or past it in the exit corridor (a player who walked past it while Stopped).
+	if (!Pawn || (!Volume->IsOverlappingActor(Pawn) && !IsAtOrPastExit(Pawn)))
 	{
 		return;
 	}
@@ -71,9 +72,30 @@ void AAreaExit::TryTravel()
 		return;
 	}
 	URunSubsystem* Run = URunSubsystem::Get(this);
-	UE_LOG(LogArea, Log, TEXT("%s: player pawn %s inside in Normal time: travel to the next area."), *GetName(), *Pawn->GetName());
+	UE_LOG(LogArea, Log, TEXT("%s: player pawn %s inside or past it in Normal time: travel to the next area."), *GetName(), *Pawn->GetName());
+#if !UE_BUILD_SHIPPING
+	if (bTestHoldTravel)
+	{
+		++TestTravelRequests;
+		UE_LOG(LogArea, Log, TEXT("%s: the travel is held by a test (%d requests)."), *GetName(), TestTravelRequests);
+		return;
+	}
+#endif
 	OnPlayerEntered.Broadcast(Pawn);
 	bTriggered = Run && Run->TravelToNextArea();
+}
+
+bool AAreaExit::IsAtOrPastExit(const APawn* Pawn) const
+{
+	if (!Pawn || !Volume)
+	{
+		return false;
+	}
+	// In the exit's own space: from its near face to RunPastExit beyond its far face, inside its section.
+	const FVector Local = GetActorTransform().InverseTransformPositionNoScale(Pawn->GetActorLocation());
+	const FVector Extent = Volume->GetUnscaledBoxExtent();
+	const float Past = FMath::Clamp(RunPastExit, 0.f, 100000.f);
+	return Local.X >= -Extent.X && Local.X <= Extent.X + Past && FMath::Abs(Local.Y) <= Extent.Y && FMath::Abs(Local.Z) <= Extent.Z;
 }
 
 void AAreaExit::HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason)

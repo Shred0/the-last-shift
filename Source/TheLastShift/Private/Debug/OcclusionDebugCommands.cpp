@@ -695,7 +695,8 @@ namespace OcclusionDebug
 	}
 
 	/**
-	 * IsolatedAllowed > 0 (tls.Occlusion.ShipCheck only, Brief 18): a differing pixel whose 8 neighbours all match within
+	 * IsolatedAllowed > 0 (tls.Occlusion.ShipCheck let 3 from Brief 18 to Brief 22; since Brief 23, which removed the tie,
+	 * nothing passes it any more and it is kept for diagnostics): a differing pixel whose 8 neighbours all match within
 	 * the same 3 levels is isolated: a single pixel where the two point renderers' complementary depth tests disagree at a
 	 * tie (a sprite cut by the surface its point lies on). Up to IsolatedAllowed of them pass, each logged; a differing
 	 * pixel with a differing neighbour (a point is at least PointPixelSize wide, so a wrongly hidden or shown point is never
@@ -1446,7 +1447,8 @@ namespace OcclusionDebug
 			SetOcclusion(1.f);
 			return 0.4f;
 		}));
-		AddHiddenCompare(S, Label + TEXT("_At1"), EHue::Any, true, 3);
+		// Brief 23: the two point renderers no longer disagree at a depth tie, so no isolated pixel is let pass (Brief 18 let 3).
+		AddHiddenCompare(S, Label + TEXT("_At1"), EHue::Any, true, 0);
 		// The margin of the attenuated path (values below 1), for the cause of the gap the developer saw at 1 before.
 		S.Add(Do(Label + TEXT(": 0.99, the attenuated path"), []() { SetOcclusion(0.99f); return 0.4f; }));
 		AddHiddenCompare(S, Label + TEXT("_At099"), EHue::Any, false);

@@ -4,6 +4,7 @@
 
 #include "Blueprint/WidgetTree.h"
 #include "Brushes/SlateRoundedBoxBrush.h"
+#include "UI/StdUIStyle.h"
 #include "Components/Border.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
@@ -110,7 +111,8 @@ void UInteractPromptWidget::ApplyStyle()
 	}
 	if (Border_Prompt)
 	{
-		Border_Prompt->SetBrush(FSlateRoundedBoxBrush(BackdropColor, 4.f));
+		// The panel's frame line and cut corner (StdCore's style) around the prompt's own fill.
+		Border_Prompt->SetBrush(StdUIStyle::MakeBoxBrush(BackdropColor));
 	}
 	if (UCanvasPanelSlot* CanvasSlot = Border_Prompt ? Cast<UCanvasPanelSlot>(Border_Prompt->Slot) : nullptr)
 	{

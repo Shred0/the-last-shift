@@ -4,6 +4,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "InputCoreTypes.h"
 #include "Templates/SubclassOf.h"
+#include "UI/StdUIStyle.h"
 #include "StdProjectSettings.generated.h"
 
 class UInputMappingContext;
@@ -185,6 +186,14 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions", meta = (AllowedClasses = "/Script/Engine.Texture,/Script/Engine.MaterialInterface", EditCondition = "bTransitionMarker"))
 	FSoftObjectPath TransitionMarkerImage;
 
+	/**
+	 * With the style on (bUseStyle), the label and the progress bar of the covered screen take the style's accent
+	 * (StdUIStyle::GetAccentColor) instead of TransitionLabelColor and TransitionProgressBarColor; the label always takes
+	 * the style's font. The marker keeps its own colour.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Transitions")
+	bool bTransitionUsesStyleAccent = false;
+
 	// Audio
 
 	/** Sound Mix with one adjuster per Sound Class below. The volume sliders override its adjusters. */
@@ -256,6 +265,17 @@ public:
 	/** Colors, fonts and shapes of every menu. Empty: the Widget Blueprints keep the style set in their designer. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "UI")
 	TSoftObjectPtr<UStdUITheme> Theme;
+
+	/**
+	 * Use Style (below) instead of the Theme asset for every menu, and its font and frame for the key prompts, the text
+	 * scenes, the barcode text and the covered screen's label. Off: everything as before.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "UI|Style")
+	bool bUseStyle = false;
+
+	/** The look as values set as text in the project's config (see FStdUIStyle). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "UI|Style", meta = (EditCondition = "bUseStyle"))
+	FStdUIStyle Style;
 };
 
 /**

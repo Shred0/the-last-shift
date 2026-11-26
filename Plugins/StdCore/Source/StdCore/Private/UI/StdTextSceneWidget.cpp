@@ -9,6 +9,7 @@
 #include "Components/ButtonSlot.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
+#include "Components/Image.h"
 #include "Components/Overlay.h"
 #include "Components/OverlaySlot.h"
 #include "Components/SizeBox.h"
@@ -20,7 +21,10 @@
 #include "Rendering/SlateRenderer.h"
 #include "StdLog.h"
 #include "Styling/CoreStyle.h"
+#include "Engine/Texture2D.h"
+#include "Kismet/GameplayStatics.h"
 #include "UI/StdKeyPromptWidget.h"
+#include "UI/StdUIStyle.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(StdTextSceneWidget)
 
@@ -126,6 +130,28 @@ void UStdTextSceneWidget::BuildDefaultTree()
 	{
 		RootSlot->SetHorizontalAlignment(HAlign_Fill);
 		RootSlot->SetVerticalAlignment(VAlign_Fill);
+	}
+
+	// The background effect over the whole screen, then the clear patch behind the text, then the text.
+	Image_Effect = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("Image_Effect"));
+	Image_Effect->SetVisibility(ESlateVisibility::Collapsed);
+	if (UOverlaySlot* EffectSlot = Root->AddChildToOverlay(Image_Effect))
+	{
+		EffectSlot->SetHorizontalAlignment(HAlign_Fill);
+		EffectSlot->SetVerticalAlignment(VAlign_Fill);
+	}
+	SizeBox_Patch = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("SizeBox_Patch"));
+	SizeBox_Patch->SetVisibility(ESlateVisibility::Collapsed);
+	if (UOverlaySlot* PatchSlot = Root->AddChildToOverlay(SizeBox_Patch))
+	{
+		PatchSlot->SetHorizontalAlignment(HAlign_Center);
+		PatchSlot->SetVerticalAlignment(VAlign_Center);
+	}
+	Image_Patch = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("Image_Patch"));
+	if (USizeBoxSlot* PatchImageSlot = Cast<USizeBoxSlot>(SizeBox_Patch->AddChild(Image_Patch)))
+	{
+		PatchImageSlot->SetHorizontalAlignment(HAlign_Fill);
+		PatchImageSlot->SetVerticalAlignment(VAlign_Fill);
 	}
 
 	SizeBox_Line = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("SizeBox_Line"));
@@ -268,7 +294,137 @@ void UStdTextSceneWidget::HandleSkipClicked()
 
 FSlateFontInfo UStdTextSceneWidget::GetFont() const
 {
+	// The style's font while the style is on, else the engine's (the scene has no theme of its own).
+	if (StdUIStyle::IsEnabled())
+	{
+		return StdUIStyle::MakeFont(FMath::Clamp(FontSize, 8, 96));
+	}
 	return FCoreStyle::GetDefaultFontStyle("Regular", FMath::Clamp(FontSize, 8, 96));
+}
+
+EStdTextSceneEffect UStdTextSceneWidget::GetCurrentEffect() const
+{
+	return !bFinished && Entries.IsValidIndex(CurrentIndex) ? Entries[CurrentIndex].BackgroundEffect : EStdTextSceneEffect::None;
+}
+
+float UStdTextSceneWidget::GetEffectOpacity() const
+{
+	if (GetCurrentEffect() == EStdTextSceneEffect::None)
+	{
+		return 0.f;
+	}
+	const FStdTextSceneEntry& Entry = Entries[CurrentIndex];
+	const double Hold = FMath::Clamp(Entry.EffectSeconds, 0.f, 60.f);
+	const double Fade = FMath::Clamp(Entry.EffectFadeSeconds, 0.f, 30.f);
+	if (EffectElapsed < Hold)
+	{
+		return 1.f;
+	}
+	if (Fade <= 0.0)
+	{
+		return 0.f;
+	}
+	return static_cast<float>(FMath::Clamp(1.0 - (EffectElapsed - Hold) / Fade, 0.0, 1.0));
+}
+
+bool UStdTextSceneWidget::IsEffectShown() const
+{
+	return GetEffectOpacity() > 0.f;
+}
+
+FVector2D UStdTextSceneWidget::GetEffectPatchSize() const
+{
+	const float Edge = FMath::Clamp(EffectPatchMargin, 0.f, 400.f) + FMath::Clamp(EffectPatchFeather, 1.f, 400.f);
+	return FVector2D(FMath::Max(BlockSize.X, 1.0) + 2.0 * Edge, FMath::Max(BlockSize.Y, 1.0) + 2.0 * Edge);
+}
+
+void UStdTextSceneWidget::StartEffect()
+{
+	EffectElapsed = 0.0;
+	if (Image_Effect && GetCurrentEffect() == EStdTextSceneEffect::Noise)
+	{
+		FSlateBrush Noise;
+		Noise.SetResourceObject(StdUIStyle::GetNoiseTexture());
+		Noise.DrawAs = ESlateBrushDrawType::Image;
+		Noise.Tiling = ESlateBrushTileType::NoTile;
+		Image_Effect->SetBrush(Noise);
+	}
+	if (Image_Patch)
+	{
+		const float Feather = FMath::Clamp(EffectPatchFeather, 1.f, 400.f);
+		FSlateBrush Patch;
+		Patch.SetResourceObject(StdUIStyle::GetSoftPatchTexture());
+		Patch.DrawAs = ESlateBrushDrawType::Box;
+		// Each corner of the texture holds one soft edge: drawn at the feather's width whatever the patch's size.
+		Patch.ImageSize = FVector2D(2.f * Feather, 2.f * Feather);
+		Patch.Margin = FMargin(0.5f);
+		Image_Patch->SetBrush(Patch);
+	}
+	if (SizeBox_Patch)
+	{
+		const FVector2D PatchSize = GetEffectPatchSize();
+		SizeBox_Patch->SetWidthOverride(PatchSize.X);
+		SizeBox_Patch->SetHeightOverride(PatchSize.Y);
+	}
+	UpdateEffect(0.f, nullptr);
+}
+
+void UStdTextSceneWidget::UpdateEffect(float DeltaSeconds, const FGeometry* Geometry)
+{
+	const EStdTextSceneEffect Effect = GetCurrentEffect();
+	// The effect's own clock stands still while the game is paused (a menu over the scene): the noise holds its frame.
+	const bool bPaused = UGameplayStatics::IsGamePaused(this);
+	if (Effect != EStdTextSceneEffect::None && !bPaused)
+	{
+		EffectElapsed += FMath::Max(DeltaSeconds, 0.f);
+	}
+	const float Opacity = GetEffectOpacity();
+	const bool bShown = Opacity > 0.f;
+	if (Image_Effect)
+	{
+		Image_Effect->SetVisibility(bShown ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		Image_Effect->SetColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, Opacity));
+	}
+	if (SizeBox_Patch && Image_Patch)
+	{
+		SizeBox_Patch->SetVisibility(bShown ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		const FLinearColor Background = Entries.IsValidIndex(CurrentIndex) ? Entries[CurrentIndex].BackgroundColor : FLinearColor::Black;
+		Image_Patch->SetColorAndOpacity(FLinearColor(Background.R, Background.G, Background.B, Background.A * Opacity));
+	}
+	if (!bShown || bPaused || !Image_Effect || DeltaSeconds <= 0.f)
+	{
+		return;
+	}
+	// A new frame of grain: a region of the noise texture as many texels across as the screen has grains, taken at a new
+	// random place every frame.
+	UTexture2D* Noise = StdUIStyle::GetNoiseTexture();
+	if (!Noise || Noise->GetSizeX() <= 0 || Noise->GetSizeY() <= 0)
+	{
+		return;
+	}
+	FVector2D Pixels(1920.0, 1080.0);
+	if (Geometry)
+	{
+		Pixels = Geometry->GetLocalSize() * Geometry->GetAccumulatedLayoutTransform().GetScale();
+	}
+	const double TexW = Noise->GetSizeX();
+	const double TexH = Noise->GetSizeY();
+	const double Grain = FMath::Max(1.0, static_cast<double>(FMath::Clamp(NoiseGrainPixels, 1.f, 16.f)));
+	const double RegionW = FMath::Min(1.0, FMath::Max(Pixels.X, 1.0) / Grain / TexW);
+	const double RegionH = FMath::Min(1.0, FMath::Max(Pixels.Y, 1.0) / Grain / TexH);
+	const auto Next = [this]()
+	{
+		NoiseState ^= NoiseState << 13;
+		NoiseState ^= NoiseState >> 17;
+		NoiseState ^= NoiseState << 5;
+		return static_cast<double>(NoiseState) / static_cast<double>(MAX_uint32);
+	};
+	// Whole texels, so a grain never straddles two.
+	const double U = FMath::FloorToDouble(Next() * (1.0 - RegionW) * TexW) / TexW;
+	const double V = FMath::FloorToDouble(Next() * (1.0 - RegionH) * TexH) / TexH;
+	FSlateBrush Brush = Image_Effect->GetBrush();
+	Brush.SetUVRegion(FBox2f(FVector2f(static_cast<float>(U), static_cast<float>(V)), FVector2f(static_cast<float>(U + RegionW), static_cast<float>(V + RegionH))));
+	Image_Effect->SetBrush(Brush);
 }
 
 void UStdTextSceneWidget::SetEntries(const TArray<FStdTextSceneEntry>& InEntries)
@@ -338,6 +494,7 @@ void UStdTextSceneWidget::ShowEntry(int32 Index)
 	{
 		Border_Background->SetBrushColor(Entry.BackgroundColor);
 	}
+	StartEffect();
 	RefreshText();
 	RefreshControls();
 	UE_LOG(LogStdCore, Log, TEXT("%s: entry %d of %d started (%d characters, %d lines)."), *GetName(), Index + 1, Entries.Num(), LaidOut.Len(), GetLineCount());
@@ -378,6 +535,7 @@ void UStdTextSceneWidget::Finish(bool bInSkipped)
 {
 	bFinished = true;
 	bSkipped = bInSkipped;
+	UpdateEffect(0.f, nullptr);
 	RefreshText();
 	RefreshControls();
 	UE_LOG(LogStdCore, Log, TEXT("%s: scene %s at entry %d of %d."), *GetName(), bSkipped ? TEXT("skipped") : TEXT("finished"), CurrentIndex + 1, Entries.Num());
@@ -445,6 +603,10 @@ void UStdTextSceneWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaT
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 	AdvanceSeconds(FMath::Clamp(InDeltaTime, 0.f, StdTextScene::MaxStep));
+	if (GetCurrentEffect() != EStdTextSceneEffect::None || (Image_Effect && Image_Effect->GetVisibility() != ESlateVisibility::Collapsed))
+	{
+		UpdateEffect(FMath::Clamp(InDeltaTime, 0.f, StdTextScene::MaxStep), &MyGeometry);
+	}
 }
 
 FReply UStdTextSceneWidget::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)

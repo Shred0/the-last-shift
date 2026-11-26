@@ -12,7 +12,8 @@ class UWorld;
  * The home map's terminal by the hangar's entry door: a free terminal ("Power", no cost) that works only after the home
  * AI's briefing, the rows of BriefingGroup (Hologram, said on entering the monitor room), has been said: its last row
  * typed out to its last character in the pawn's text channel (UTextChannelComponent::IsTypedOut while that row is the
- * channel's message, or once it has left it). With no row in the group it works as soon as the group is asked for,
+ * channel's message, or once it has left it, shown or dropped). The engineer's lines before the group's rows are rows
+ * of the briefing: they come before its last row, so it waits for them. With no row in the group it works as soon as the group is asked for,
  * that is as soon as the player has entered the monitor room.
  *
  * Before that it takes no payment and offers none: no Interact prompt, and an Interact does nothing. It shows in scans
@@ -41,7 +42,8 @@ public:
 
 	/**
 	 * The share of the briefing typed, 0 to 1: 0 until its first row starts to be typed, then the share of its text typed
-	 * out, each row weighted by its length, whatever the number or the length of the rows; 1 once the briefing has been
+	 * out, each row weighted by its length, whatever the number or the length of the rows, the engineer's lines before its
+	 * rows (DT_EngineerLines) counted as rows of the briefing, by their length too; 1 once the briefing has been
 	 * said (at once when the group has no row). It never goes back (a row restarted by a Stop does not undo it). The
 	 * hologram draws its route by it.
 	 */

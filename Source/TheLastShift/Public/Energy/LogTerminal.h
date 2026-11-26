@@ -6,9 +6,12 @@
 #include "Energy/PowerTerminal.h"
 #include "LogTerminal.generated.h"
 
+class ALogTerminal;
 class ULogDisplayWidget;
 class UStaticMesh;
 class UWidgetComponent;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLogTerminalRead, ALogTerminal*, Terminal);
 
 /**
  * A terminal of the twin structure that holds the other humanity's logs. Paid once (Cost, Normal time, like any
@@ -37,6 +40,17 @@ public:
 	virtual bool AcceptsPayment() const override { return !bUnlocked; }
 	virtual bool OffersPayment() const override { return !bUnlocked; }
 	virtual bool OffersRead() const override { return bUnlocked && Entries.Num() > 0; }
+	virtual EPaymentKind GetPaymentKind() const override { return EPaymentKind::Log; }
+
+	/** Brief 27: the console's screen (SM_LogConsole: 90 x 65 cm inside its frame); none on the plain slab. */
+	virtual bool GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const override;
+
+	/** Brief 27: blank while its surface shows no entry (before it is paid, and whenever it has nothing to show). */
+	virtual bool IsScreenBlank() const override;
+
+	/** An Interact at the unlocked terminal showed its next entry, for free (a payment fires OnActivated instead). */
+	UPROPERTY(BlueprintAssignable, Category = "Terminal|Events")
+	FOnLogTerminalRead OnRead;
 
 	UFUNCTION(BlueprintPure, Category = "Terminal|Logs")
 	bool IsUnlocked() const { return bUnlocked; }

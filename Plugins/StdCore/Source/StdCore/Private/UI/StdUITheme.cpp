@@ -4,13 +4,24 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
 #include "Components/Button.h"
+#include "Components/ButtonSlot.h"
+#include "Components/Image.h"
+#include "Components/VerticalBox.h"
+#include "Components/VerticalBoxSlot.h"
 #include "Components/InputKeySelector.h"
+#include "Components/SizeBox.h"
 #include "Components/Slider.h"
+#include "Fonts/FontMeasure.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Rendering/SlateRenderer.h"
 #include "Components/TextBlock.h"
 #include "Engine/Font.h"
 #include "Settings/StdProjectSettings.h"
 #include "Sound/SoundBase.h"
+#include "UI/StdUIStyle.h"
 #include "UObject/ConstructorHelpers.h"
+#include "UObject/StrongObjectPtr.h"
+#include "UObject/Package.h"
 
 namespace StdUIThemeDetail
 {
@@ -54,19 +65,93 @@ UStdUITheme::UStdUITheme()
 	}
 }
 
+void UStdUITheme::InitFromStyle(const FStdUIStyle& Style, const FLinearColor& Accent)
+{
+	Shape = EStdUIShape::Framed;
+	AccentColor = Accent;
+	PanelColor = Style.PanelColor;
+	BackdropColor = Style.BackdropColor;
+	// No fill at rest: the button colour is the panel's, used only where a rounded theme would fill.
+	ButtonColor = Style.PanelColor;
+	TextColor = Style.TextColor;
+	MutedTextColor = Style.MutedTextColor;
+	// The label on an accent fill in the panel's dark colour, opaque.
+	TextOnAccentColor = FLinearColor(Style.PanelColor.R, Style.PanelColor.G, Style.PanelColor.B, 1.f);
+	FrameColor = Style.FrameColor;
+	FrameThickness = FMath::Clamp(Style.FrameThickness, 0.5f, 8.f);
+	CornerCut = FMath::Clamp(Style.CornerCut, 0.f, 64.f);
+	TitleRuleThickness = FMath::Clamp(Style.TitleRuleThickness, 0.f, 8.f);
+	CornerRadius = 0.f;
+	ButtonPadding = Style.ButtonPadding;
+	bUpperCaseLabels = Style.bUpperCaseLabels;
+	const int32 Spacing = FMath::Clamp(Style.LabelLetterSpacing, 0, 1000);
+	TitleFont = StdUIStyle::MakeFont(Style.TitleSize, Spacing);
+	HeadingFont = StdUIStyle::MakeFont(Style.HeadingSize, Spacing);
+	BodyFont = StdUIStyle::MakeFont(Style.BodySize, 0);
+	ButtonFont = StdUIStyle::MakeFont(Style.ButtonSize, Spacing);
+}
+
 FSlateBrush UStdUITheme::MakeRoundedBrush(const FLinearColor& Color, float Radius) const
 {
 	FSlateBrush Brush;
 	Brush.DrawAs = ESlateBrushDrawType::RoundedBox;
 	Brush.TintColor = FSlateColor(Color);
-	Brush.OutlineSettings = FSlateBrushOutlineSettings(Radius);
+	Brush.OutlineSettings = FSlateBrushOutlineSettings(IsFramed() ? 0.f : Radius);
 	Brush.OutlineSettings.RoundingType = ESlateBrushRoundingType::FixedRadius;
 	return Brush;
+}
+
+FSlateBrush UStdUITheme::MakePanelBrush(const FLinearColor& Fill) const
+{
+	if (IsFramed())
+	{
+		return StdUIStyle::MakeFrameBrush(Fill, FrameColor, FrameThickness, CornerCut);
+	}
+	return MakeRoundedBrush(Fill, CornerRadius * 2.f);
+}
+
+namespace StdUIThemeDetail
+{
+	FButtonStyle MakeFramedButtonStyle(const UStdUITheme& Theme)
+	{
+		const FLinearColor Clear = FLinearColor::Transparent;
+		const FLinearColor Pressed = Darken(Theme.AccentColor, 0.78f);
+		const FLinearColor Marker = Theme.TextOnAccentColor;
+		const float T = Theme.FrameThickness;
+		const float C = Theme.CornerCut;
+
+		FButtonStyle Style;
+		Style.SetNormal(StdUIStyle::MakeFrameBrush(Clear, Theme.FrameColor, T, C));
+		Style.SetHovered(StdUIStyle::MakeFrameBrush(Theme.AccentColor, Theme.AccentColor, T, C, true, Marker));
+		Style.SetPressed(StdUIStyle::MakeFrameBrush(Pressed, Pressed, T, C, true, Marker));
+		Style.SetDisabled(StdUIStyle::MakeFrameBrush(Clear, WithAlpha(Theme.FrameColor, Theme.FrameColor.A / 3.f), T, C));
+		Style.SetNormalForeground(FSlateColor(Theme.TextColor));
+		Style.SetHoveredForeground(FSlateColor(Theme.TextOnAccentColor));
+		Style.SetPressedForeground(FSlateColor(Theme.TextOnAccentColor));
+		Style.SetDisabledForeground(FSlateColor(WithAlpha(Theme.TextColor, Theme.TextColor.A / 3.f)));
+		Style.SetNormalPadding(Theme.ButtonPadding);
+		Style.SetPressedPadding(Theme.ButtonPadding);
+		return Style;
+	}
 }
 
 FButtonStyle UStdUITheme::MakeButtonStyle() const
 {
 	using namespace StdUIThemeDetail;
+
+	if (IsFramed())
+	{
+		FButtonStyle Framed = MakeFramedButtonStyle(*this);
+		if (HoverSound)
+		{
+			Framed.SetHoveredSound(MakeSound(HoverSound));
+		}
+		if (PressSound)
+		{
+			Framed.SetPressedSound(MakeSound(PressSound));
+		}
+		return Framed;
+	}
 
 	FButtonStyle Style;
 	Style.SetNormal(MakeRoundedBrush(ButtonColor, CornerRadius));
@@ -97,6 +182,21 @@ FButtonStyle UStdUITheme::MakeTabStyle(bool bSelected) const
 	// Selected: filled like a button. Not selected: no fill, muted label. Focus and hover use the accent, so the
 	// three states stay distinct.
 	FButtonStyle Style = MakeButtonStyle();
+	if (IsFramed())
+	{
+		// Selected: the frame in the accent. Not selected: no frame, muted label. Focus and hover fill with the accent.
+		if (bSelected)
+		{
+			Style.SetNormal(StdUIStyle::MakeFrameBrush(FLinearColor::Transparent, AccentColor, FrameThickness, CornerCut));
+			Style.SetNormalForeground(FSlateColor(TextColor));
+		}
+		else
+		{
+			Style.SetNormal(StdUIStyle::MakeFrameBrush(FLinearColor::Transparent, FLinearColor::Transparent, FrameThickness, CornerCut));
+			Style.SetNormalForeground(FSlateColor(MutedTextColor));
+		}
+		return Style;
+	}
 	if (bSelected)
 	{
 		Style.SetNormal(MakeRoundedBrush(ButtonColor, CornerRadius));
@@ -142,6 +242,23 @@ FTextBlockStyle UStdUITheme::MakeTextStyle(const FSlateFontInfo& Font, const FLi
 const UStdUITheme* StdUITheme::Get()
 {
 	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
+	if (Settings->bUseStyle)
+	{
+		// Built from the style's values, kept for the life of the process, rebuilt when the accent changes.
+		static UStdUITheme* StyleTheme = nullptr;
+		static uint32 BuiltVersion = 0;
+		if (!StyleTheme)
+		{
+			StyleTheme = NewObject<UStdUITheme>(GetTransientPackage(), TEXT("StdUIStyleTheme"));
+			StyleTheme->AddToRoot();
+		}
+		if (BuiltVersion != StdUIStyle::GetVersion())
+		{
+			StyleTheme->InitFromStyle(Settings->Style, StdUIStyle::GetAccentColor());
+			BuiltVersion = StdUIStyle::GetVersion();
+		}
+		return StyleTheme;
+	}
 	if (Settings->Theme.IsNull())
 	{
 		return nullptr;
@@ -149,8 +266,88 @@ const UStdUITheme* StdUITheme::Get()
 	return StdSettings::LoadAsset(Settings->Theme, TEXT("Theme"), StdCoreDefaults::UITheme);
 }
 
+namespace StdUIThemeDetail
+{
+	/**
+	 * A framed button's label in a box of fixed width (a size box around the button): when it does not fit there with
+	 * the button font, it drops its letter spacing, then takes a smaller size, until it fits.
+	 */
+	void FitLabel(const UStdUITheme& Theme, UTextBlock& Text)
+	{
+		const UButton* Button = Cast<UButton>(Text.GetParent());
+		const USizeBox* Box = Button ? Cast<USizeBox>(Button->GetParent()) : nullptr;
+		if (!Box || Box->GetWidthOverride() <= 0.f || !FSlateApplication::IsInitialized() || !FSlateApplication::Get().GetRenderer())
+		{
+			return;
+		}
+		const float Available = Box->GetWidthOverride() - Theme.ButtonPadding.Left - Theme.ButtonPadding.Right - 2.f * Theme.FrameThickness;
+		const TSharedRef<FSlateFontMeasure> Measure = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
+		FString Label = Text.GetText().ToString();
+		if (Theme.bUpperCaseLabels)
+		{
+			Label = Label.ToUpper();
+		}
+		FSlateFontInfo Font = Theme.ButtonFont;
+		if (Available <= 0.f || Label.IsEmpty() || Measure->Measure(Label, Font).X <= Available)
+		{
+			return;
+		}
+		Font.LetterSpacing = 0;
+		const float Width = static_cast<float>(Measure->Measure(Label, Font).X);
+		if (Width > Available)
+		{
+			Font.Size = FMath::Max(8.f, FMath::FloorToFloat(Font.Size * Available / Width));
+		}
+		Text.SetFont(Font);
+	}
+
+	/** The rule's colour and height, shown while the title is. */
+	void StyleTitleRule(const UStdUITheme& Theme, UImage& Rule, const UTextBlock& Title)
+	{
+		FSlateBrush Brush;
+		Brush.DrawAs = ESlateBrushDrawType::Image;
+		Brush.TintColor = FSlateColor(Theme.FrameColor);
+		Brush.ImageSize = FVector2D(1.f, FMath::Max(Theme.TitleRuleThickness, 0.5f));
+		Rule.SetBrush(Brush);
+		Rule.SetVisibility(Title.GetVisibility() == ESlateVisibility::Collapsed ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+
+	/**
+	 * A thin rule under a title that sits in a vertical box: inserted once after it, with the title's gap below moved under
+	 * the rule. Before the Slate tree is built only: a live vertical box would add it at its end.
+	 */
+	void InsertTitleRule(const UStdUITheme& Theme, UUserWidget& Widget, UTextBlock& Title)
+	{
+		UVerticalBox* Box = Cast<UVerticalBox>(Title.GetParent());
+		if (!Box || !Widget.WidgetTree)
+		{
+			return;
+		}
+		UImage* Rule = Cast<UImage>(Widget.WidgetTree->FindWidget(StdUITheme::TitleRuleName));
+		if (!Rule)
+		{
+			Rule = Widget.WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), StdUITheme::TitleRuleName);
+			const int32 Index = Box->GetChildIndex(&Title);
+			Box->InsertChildAt(Index + 1, Rule);
+			UVerticalBoxSlot* TitleSlot = Cast<UVerticalBoxSlot>(Title.Slot);
+			UVerticalBoxSlot* RuleSlot = Cast<UVerticalBoxSlot>(Rule->Slot);
+			if (TitleSlot && RuleSlot)
+			{
+				constexpr float Gap = 10.f;
+				const FMargin TitlePadding = TitleSlot->GetPadding();
+				RuleSlot->SetPadding(FMargin(TitlePadding.Left, 0.f, TitlePadding.Right, FMath::Max(TitlePadding.Bottom - Gap, 0.f)));
+				RuleSlot->SetHorizontalAlignment(HAlign_Fill);
+				TitleSlot->SetPadding(FMargin(TitlePadding.Left, TitlePadding.Top, TitlePadding.Right, Gap));
+			}
+		}
+		StyleTitleRule(Theme, *Rule, Title);
+	}
+}
+
 void StdUITheme::ApplyToWidget(const UStdUITheme& Theme, UUserWidget& Widget)
 {
+	using namespace StdUIThemeDetail;
+
 	if (!Widget.WidgetTree)
 	{
 		return;
@@ -160,6 +357,7 @@ void StdUITheme::ApplyToWidget(const UStdUITheme& Theme, UUserWidget& Widget)
 	const FButtonStyle TabStyle = Theme.MakeTabStyle(false);
 	const FSliderStyle SliderStyle = Theme.MakeSliderStyle();
 	const FTextBlockStyle KeyTextStyle = Theme.MakeTextStyle(Theme.ButtonFont, Theme.TextColor);
+	TArray<UTextBlock*> Titles;
 
 	Widget.WidgetTree->ForEachWidget([&](UWidget* Child)
 	{
@@ -176,16 +374,33 @@ void StdUITheme::ApplyToWidget(const UStdUITheme& Theme, UUserWidget& Widget)
 				// A button label: its color follows the button state (normal, hovered, pressed).
 				Text->SetFont(Theme.ButtonFont);
 				Text->SetColorAndOpacity(FSlateColor::UseForeground());
+				Text->SetTextTransformPolicy(Theme.bUpperCaseLabels ? ETextTransformPolicy::ToUpper : ETextTransformPolicy::None);
+				if (Theme.IsFramed())
+				{
+					// Framed buttons: the label at the left, after the room the focus marker takes.
+					Text->SetJustification(ETextJustify::Left);
+					if (UButtonSlot* LabelSlot = Cast<UButtonSlot>(Text->Slot))
+					{
+						LabelSlot->SetHorizontalAlignment(HAlign_Left);
+					}
+					FitLabel(Theme, *Text);
+				}
 			}
 			else if (Name == TEXT("Text_Title"))
 			{
 				Text->SetFont(Theme.TitleFont);
 				Text->SetColorAndOpacity(FSlateColor(Theme.TextColor));
+				Text->SetTextTransformPolicy(Theme.bUpperCaseLabels ? ETextTransformPolicy::ToUpper : ETextTransformPolicy::None);
+				if (Theme.IsFramed() && Theme.TitleRuleThickness > 0.f && !Widget.IsDesignTime())
+				{
+					Titles.Add(Text);
+				}
 			}
 			else if (Name.StartsWith(TEXT("Text_Heading")))
 			{
 				Text->SetFont(Theme.HeadingFont);
 				Text->SetColorAndOpacity(FSlateColor(Theme.TextColor));
+				Text->SetTextTransformPolicy(Theme.bUpperCaseLabels ? ETextTransformPolicy::ToUpper : ETextTransformPolicy::None);
 			}
 			else
 			{
@@ -215,11 +430,32 @@ void StdUITheme::ApplyToWidget(const UStdUITheme& Theme, UUserWidget& Widget)
 			}
 			else if (Name == TEXT("Border_Panel"))
 			{
-				Border->SetBrush(Theme.MakeRoundedBrush(Theme.PanelColor, Theme.CornerRadius * 2.f));
+				Border->SetBrush(Theme.MakePanelBrush(Theme.PanelColor));
 				Border->SetBrushColor(FLinearColor::White);
 			}
 		}
 	});
+
+	// The rule AddTitleRule put under the title, if any, takes the theme's colour and the title's visibility.
+	for (UTextBlock* Title : Titles)
+	{
+		if (UImage* Rule = Cast<UImage>(Widget.WidgetTree->FindWidget(TitleRuleName)))
+		{
+			StyleTitleRule(Theme, *Rule, *Title);
+		}
+	}
+}
+
+void StdUITheme::AddTitleRule(const UStdUITheme& Theme, UUserWidget& Widget)
+{
+	if (!Theme.IsFramed() || Theme.TitleRuleThickness <= 0.f || Widget.IsDesignTime() || !Widget.WidgetTree)
+	{
+		return;
+	}
+	if (UTextBlock* Title = Cast<UTextBlock>(Widget.WidgetTree->FindWidget(TEXT("Text_Title"))))
+	{
+		StdUIThemeDetail::InsertTitleRule(Theme, Widget, *Title);
+	}
 }
 
 void StdUITheme::SetTabSelected(UButton* TabButton, bool bSelected)

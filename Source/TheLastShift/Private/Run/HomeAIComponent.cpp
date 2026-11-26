@@ -57,6 +57,7 @@ void UHomeAIComponent::BeginPlay()
 	}
 	Text->SetMessageTable(UTheLastShiftSettings::Get()->LoadAIMessagesTable());
 	Text->SetTwinTable(UTheLastShiftSettings::Get()->LoadTwinAITable());
+	Text->SetEngineerTable(UTheLastShiftSettings::Get()->LoadEngineerLinesTable());
 
 	if (UTimeStateSubsystem* TimeState = World->GetSubsystem<UTimeStateSubsystem>())
 	{
@@ -82,8 +83,8 @@ void UHomeAIComponent::BeginPlay()
 
 	UpdateSuspension();
 	const int32 PrologueStage = URunSubsystem::GetPrologueStageOf(World);
-	UE_LOG(LogTextChannel, Log, TEXT("%s: home AI on %s, act %d, table %s, twin table %s%s."), *GetName(), *GetNameSafe(Owner), GetAct(),
-		*GetNameSafe(Text->GetMessageTable()), *GetNameSafe(Text->GetTwinTable()),
+	UE_LOG(LogTextChannel, Log, TEXT("%s: home AI on %s, act %d, table %s, twin table %s, engineer lines %s%s."), *GetName(), *GetNameSafe(Owner), GetAct(),
+		*GetNameSafe(Text->GetMessageTable()), *GetNameSafe(Text->GetTwinTable()), *GetNameSafe(Text->GetEngineerTable()),
 		PrologueStage > 0 ? *FString::Printf(TEXT(", prologue map %d, prologue table %s"), PrologueStage, *GetNameSafe(UTheLastShiftSettings::Get()->LoadPrologueTable())) : TEXT(""));
 
 	// Waking in the print room: the home map's first lines (said when the travel screen has gone, the channel's rule).
@@ -299,13 +300,35 @@ void UHomeAIComponent::HandleTerminalActivated(APowerTerminal* Terminal, int32 C
 		UE_LOG(LogTextChannel, Log, TEXT("%s: %s used for free: no spending comment."), *GetName(), *Terminal->GetName());
 		return;
 	}
-	Text->PushTrigger(ETextTrigger::Spend, GetAct(), MakeContext());
+	// The comment of the payment's kind when the act has rows of it (each kind counts on its own), else Spend as before.
+	const int32 Act = GetAct();
+	const EPaymentKind Kind = Terminal->GetPaymentKind();
+	const ETextTrigger KindTrigger = GetSpendTrigger(Kind);
+	const bool bKindRows = KindTrigger != ETextTrigger::Spend && !UTextChannelComponent::FindRows(Text->GetMessageTable(), KindTrigger, Act).IsEmpty();
+	const ETextTrigger Trigger = bKindRows ? KindTrigger : ETextTrigger::Spend;
+	const bool bSaid = Text->PushTrigger(Trigger, Act, MakeContext());
+	UE_LOG(LogTextChannel, Log, TEXT("%s: payment at %s (kind %s) in act %d: %s %s."), *GetName(), *Terminal->GetName(), LexToString(Kind), Act, LexToString(Trigger),
+		bSaid ? TEXT("queued") : TEXT("has no row"));
 	// The twin AI speaks after the home AI's comment on the same payment, in the same queue.
 	if (const ATwinAITerminal* Twin = Cast<ATwinAITerminal>(Terminal))
 	{
 		const int32 Part = Twin->GetLastPlayedPart();
 		const int32 Queued = Part > 0 ? Text->PushTwinPart(Part) : 0;
 		UE_LOG(LogTextChannel, Log, TEXT("%s: twin AI part %d at %s: %d messages queued."), *GetName(), Part, *Terminal->GetName(), Queued);
+	}
+}
+
+ETextTrigger UHomeAIComponent::GetSpendTrigger(EPaymentKind Kind)
+{
+	switch (Kind)
+	{
+	case EPaymentKind::Door: return ETextTrigger::SpendDoor;
+	case EPaymentKind::Lights: return ETextTrigger::SpendLights;
+	case EPaymentKind::Beacon: return ETextTrigger::SpendBeacon;
+	case EPaymentKind::Log: return ETextTrigger::SpendLog;
+	case EPaymentKind::Twin: return ETextTrigger::SpendTwin;
+	case EPaymentKind::Other:
+	default: return ETextTrigger::Spend;
 	}
 }
 

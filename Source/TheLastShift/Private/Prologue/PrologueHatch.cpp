@@ -181,7 +181,8 @@ void APrologueHatch::UpdateLightLines(double Now)
 		return;
 	}
 	bLightRowSeen |= Channel->GetCurrentRowName() == LastLightRow;
-	if (bLightRowSeen && Channel->IsTypedOut())
+	// The last Light row shown, or gone from the queue without being shown (dropped at Silent, its engineer lines said).
+	if ((bLightRowSeen || !Channel->IsQueued(LastLightRow)) && Channel->IsTypedOut())
 	{
 		FinishLightLines(Now, *FString::Printf(TEXT("%s typed out"), *LastLightRow.ToString()));
 	}
@@ -204,11 +205,20 @@ void APrologueHatch::SetState(EPrologueHatchState NewState)
 	{
 		return;
 	}
+	const EPrologueHatchState OldState = State;
 	State = NewState;
 	UE_LOG(LogTheLastShift, Log, TEXT("%s: %s (closing %.2f s, door delay %.2f s of Normal time)."), *GetName(), PrologueHatchImpl::LexToString(NewState), ClosingSeconds,
 		DoorDelaySeconds);
 	ApplyPanel();
 	ReceiveHatchStateChanged(NewState);
+	if (OldState == EPrologueHatchState::Open && NewState == EPrologueHatchState::Closing)
+	{
+		OnMotionStarted.Broadcast(this, false, true);
+	}
+	else if (OldState == EPrologueHatchState::Closing && NewState == EPrologueHatchState::Closed)
+	{
+		OnMotionEnded.Broadcast(this);
+	}
 }
 
 void APrologueHatch::Tick(float DeltaSeconds)

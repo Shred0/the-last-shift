@@ -8,6 +8,7 @@
 #include "Rendering/DrawElements.h"
 #include "Rendering/SlateRenderer.h"
 #include "Styling/CoreStyle.h"
+#include "UI/StdUIStyle.h"
 
 namespace StdBarcode
 {
@@ -191,8 +192,8 @@ int32 SStdBarcodeText::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 	const FLinearColor TextTint = Params.TextColor * InWidgetStyle.GetColorAndOpacityTint();
 	const ESlateDrawEffect Effect = ShouldBeEnabled(bParentEnabled) ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
 
-	// The engine's own font, sized from the cell height.
-	const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Regular", FMath::Max(1, FMath::RoundToInt(Cell.Y * Params.FontScale)));
+	// The style's font (the engine's own when the style is off), sized from the cell height.
+	const FSlateFontInfo Font = StdUIStyle::MakeFont(FMath::Max(1, FMath::RoundToInt(Cell.Y * Params.FontScale)));
 	const TSharedRef<FSlateFontMeasure> Measure = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
 
 	const int32 BarLayer = LayerId;

@@ -14,6 +14,7 @@
 #include "Run/RunSceneSubsystem.h"
 #include "Run/RunActListWidget.h"
 #include "Run/TheLastShiftSettings.h"
+#include "UI/StdUIStyle.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "Time/HomeStateSubsystem.h"
 #include "Time/TimeStateSubsystem.h"
@@ -32,6 +33,8 @@ URunSubsystem* URunSubsystem::Get(const UObject* WorldContext)
 void URunSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+	// Brief 27: the menus' accent is home's tint, the hue of the scan's points; its one owner is SurfaceLook.Home.Tint.
+	StdUIStyle::SetAccentColor(UTheLastShiftSettings::Get()->GetSurfaceVariant(true).Tint);
 	if (UStdFlowSubsystem* Flow = Collection.InitializeDependency<UStdFlowSubsystem>())
 	{
 		Flow->OnStateChanged.AddUniqueDynamic(this, &URunSubsystem::HandleFlowStateChanged);

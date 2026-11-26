@@ -6,10 +6,16 @@
 
 /**
  * Neighbour search of one scan, run on a worker thread on the samples the point system spawned, read back from the GPU
- * (the sample target, layout in the contract of LidarScanComponent.cpp). Each live sample keeps its Neighbours nearest
- * live samples of the same channel within MaxDistance and within the normal angle limit, looked for among the samples
- * whose texels are close in the capture image; a link joins two samples when each is among the other's nearest (mutual
- * nearest neighbours), so no sample has more than Neighbours links.
+ * (the sample target, layout in the contract of LidarScanComponent.cpp). Two ways to find the links:
+ *  - nearest (bGrid false): each live sample keeps its Neighbours nearest live samples of the same channel within
+ *    MaxDistance and within the normal angle limit, looked for among the samples whose texels are close in the capture
+ *    image; a link joins two samples when each is among the other's nearest (mutual nearest neighbours), so no sample
+ *    has more than Neighbours links;
+ *  - grid (bGrid true): each live sample is linked to the next live sample to its right in its row of the capture and
+ *    to the next live sample below it in its column, looked for over at most GridReach texels, when that sample is of
+ *    the same channel, within MaxDistance and within the normal angle limit; Neighbours only says that lines are on.
+ *    No sample has more than 4 links.
+ * In both, each link is listed once, from its lower texel, in texel order, and the cap keeps the first MaxLinks.
  */
 struct FLidarLinkSearchInput
 {
@@ -25,6 +31,8 @@ struct FLidarLinkSearchInput
 	float NearThinningDistance = 0.f;
 
 	int32 Neighbours = 0;
+	/** The search on the capture's grid instead of the mutual nearest neighbours. */
+	bool bGrid = false;
 	float MaxDistance = 0.f;
 	/** Cosine of the largest angle between the two points' normals; below -1 = no limit. */
 	float MinNormalDot = -2.f;
@@ -53,6 +61,8 @@ struct FLidarLinkSearchOutput
 	/** Links found, kept and dropped over the cap. */
 	int32 Found = 0;
 	int32 Dropped = 0;
+	/** Texel of the first point whose link the cap dropped (the lower texel of that link), -1 when none was dropped. */
+	int32 FirstDroppedTexel = INDEX_NONE;
 	int32 MaxDegree = 0;
 	float Longest = 0.f;
 	double Milliseconds = 0.0;
@@ -62,6 +72,16 @@ namespace LidarScanLinks
 {
 	/** The value the sample target is cleared to before each scan: a W below every channel and below "no point" (-1). */
 	inline constexpr float UnwrittenW = -2.f;
+
+	/** Most texels the grid search looks along a row or a column for the next live sample. */
+	inline constexpr int32 MaxGridReach = 64;
+
+	/**
+	 * Texels the grid search looks along a row or a column from a sample at SampleDepth: 1 (the next texel only, a missing
+	 * sample there is a hole) where the near thinning keeps every sample, and 1 + 3 (Thin^2 - 1) nearer, Thin =
+	 * NearThinningDistance / SampleDepth, since the thinning keeps one sample in Thin^2 there; at most MaxGridReach.
+	 */
+	int32 GridReach(float SampleDepth, float NearThinningDistance);
 
 	/** Runs the search. Thread safe: reads only Input, writes only Output. */
 	void Find(const FLidarLinkSearchInput& Input, FLidarLinkSearchOutput& Output);

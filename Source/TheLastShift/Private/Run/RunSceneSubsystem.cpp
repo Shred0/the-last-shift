@@ -15,6 +15,27 @@
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunSceneSubsystem)
 
+bool RunScenes::IsOnWhite(ESceneVoice Voice)
+{
+	return Voice == ESceneVoice::Paradise || Voice == ESceneVoice::EngineerParadise;
+}
+
+bool RunScenes::IsInterruptionLine(const TArray<ESceneVoice>& Voices, int32 Index)
+{
+	if (!Voices.IsValidIndex(Index) || Index == 0)
+	{
+		return false;
+	}
+	for (int32 I = 1; I <= Index; ++I)
+	{
+		if (IsOnWhite(Voices[I - 1]) && !IsOnWhite(Voices[I]))
+		{
+			return I == Index;
+		}
+	}
+	return false;
+}
+
 DEFINE_LOG_CATEGORY(LogScenes);
 
 URunSceneSubsystem* URunSceneSubsystem::Get(const UObject* WorldContext)
@@ -126,6 +147,7 @@ bool URunSceneSubsystem::OpenPrologue(UStdScreenWidget* Parent)
 		return false;
 	}
 	Screen->Play(ERunSceneKind::Prologue, PrologueScene(), Lines);
+	TrackScreen(Screen, PrologueScene());
 	return true;
 }
 
@@ -159,8 +181,48 @@ URunEndingWidget* URunSceneSubsystem::OpenEnding(UStdScreenWidget* Parent)
 	if (Screen)
 	{
 		Screen->Configure();
+		TrackScreen(Screen, EndingScene());
 	}
 	return Screen;
+}
+
+void URunSceneSubsystem::TrackScreen(UStdScreenWidget* Screen, FName Scene)
+{
+	for (auto It = OpenScreens.CreateIterator(); It; ++It)
+	{
+		if (!It->Key.IsValid())
+		{
+			It.RemoveCurrent();
+		}
+	}
+	OpenScreens.Add(Screen, Scene);
+	Screen->OnScreenClosed.AddUniqueDynamic(this, &URunSceneSubsystem::HandleSceneScreenClosed);
+	UE_LOG(LogScenes, Log, TEXT("Scene %s: its screen opened."), *Scene.ToString());
+	OnSceneScreenChanged.Broadcast(Scene, true);
+}
+
+void URunSceneSubsystem::HandleSceneScreenClosed(UStdScreenWidget* Screen)
+{
+	FName Scene;
+	if (!OpenScreens.RemoveAndCopyValue(Screen, Scene))
+	{
+		return;
+	}
+	UE_LOG(LogScenes, Log, TEXT("Scene %s: its screen closed."), *Scene.ToString());
+	OnSceneScreenChanged.Broadcast(Scene, false);
+}
+
+bool URunSceneSubsystem::IsSceneScreenOpen() const
+{
+	for (const TPair<TWeakObjectPtr<UStdScreenWidget>, FName>& Pair : OpenScreens)
+	{
+		const UStdScreenWidget* Screen = Pair.Key.Get();
+		if (Screen && Screen->IsInViewport())
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 TArray<FRunSceneLine> URunSceneSubsystem::BuildEndingText(FName Ending) const

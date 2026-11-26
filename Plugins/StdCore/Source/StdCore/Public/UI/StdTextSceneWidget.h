@@ -11,10 +11,25 @@ class FSlateFontMeasure;
 class UBorder;
 class UButton;
 class UHorizontalBox;
+class UImage;
 class USizeBox;
 class UStdKeyPromptWidget;
 class UStdTextSceneWidget;
 class UTextBlock;
+
+/** What fills an entry's background for a time, under its text. */
+UENUM(BlueprintType)
+enum class EStdTextSceneEffect : uint8
+{
+	/** The background colour alone. */
+	None,
+	/**
+	 * Fine animated grey noise over the whole screen, like a screen with no signal, with a patch of the entry's own
+	 * background colour behind its text whose edge fades into the noise. The noise is fine grain: the screen's mean level
+	 * stays steady from frame to frame.
+	 */
+	Noise
+};
 
 /** One entry of a text scene: what it says and how it looks. */
 USTRUCT(BlueprintType)
@@ -31,6 +46,20 @@ struct STDCORE_API FStdTextSceneEntry
 	/** The whole screen behind the text while this entry is shown. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI")
 	FLinearColor BackgroundColor = FLinearColor::Black;
+
+	/**
+	 * A background effect from the moment the entry starts: at full strength for EffectSeconds, then fading to the plain
+	 * background over EffectFadeSeconds. It runs on the widget's own clock, which stands still while the game is paused,
+	 * and ends with the entry (going on, skipping, the scene's end).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI")
+	EStdTextSceneEffect BackgroundEffect = EStdTextSceneEffect::None;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI", meta = (ClampMin = "0.0", ClampMax = "60.0", Units = "s"))
+	float EffectSeconds = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float EffectFadeSeconds = 0.f;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FStdOnTextSceneEntryStarted, UStdTextSceneWidget*, Screen, int32, Index);
@@ -59,9 +88,11 @@ namespace StdTextScene
  * face button) finishes it at once as skipped. OnEntryStarted reports every entry as it starts, OnSceneFinished how the
  * scene ended. A finished scene shows no text over the background it ended on and ignores input; the owner closes it.
  *
- * Each entry is laid out once, when it starts: its words are wrapped to ColumnWidth with the engine font at FontSize
+ * Each entry is laid out once, when it starts: its words are wrapped to ColumnWidth in the font at FontSize (the style's
+ * font while UStdProjectSettings::bUseStyle is on, else the engine's)
  * and the block is centred on screen, so typing never moves a line or a word. The tree is built in C++ (Border_Background,
- * SizeBox_Line, Text_Line), with no texture and without the menu theme (each entry sets its colours). Typing runs on
+ * Image_Effect, SizeBox_Patch, Image_Patch, SizeBox_Line, Text_Line), without the menu theme (each entry sets its colours);
+ * an entry may ask for a background effect (FStdTextSceneEntry::BackgroundEffect). Typing runs on
  * the widget's own tick (real time); AdvanceSeconds drives it directly (tests).
  *
  * On-screen controls (bShowControls, off by default): while an entry is on screen, two controls in the bottom right
@@ -136,6 +167,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Std Core|UI")
 	bool IsFinished() const { return bFinished; }
 
+	/** The current entry's background effect is on screen (at any strength above zero). */
+	UFUNCTION(BlueprintPure, Category = "Std Core|UI|Effect")
+	bool IsEffectShown() const;
+
+	/** Seconds of the current entry's effect so far (its own clock: still while the game is paused). */
+	UFUNCTION(BlueprintPure, Category = "Std Core|UI|Effect")
+	float GetEffectElapsed() const { return static_cast<float>(EffectElapsed); }
+
+	/** Strength of the effect now: 1 for its EffectSeconds, then down to 0 over its EffectFadeSeconds. */
+	UFUNCTION(BlueprintPure, Category = "Std Core|UI|Effect")
+	float GetEffectOpacity() const;
+
+	/** Size of the clear patch behind the text, slate units (its soft edge included). */
+	UFUNCTION(BlueprintPure, Category = "Std Core|UI|Effect")
+	FVector2D GetEffectPatchSize() const;
+
 	UFUNCTION(BlueprintPure, Category = "Std Core|UI")
 	bool WasSkipped() const { return bSkipped; }
 
@@ -147,9 +194,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI", meta = (ClampMin = "100.0", ClampMax = "3000.0"))
 	float ColumnWidth = 960.f;
 
-	/** Size of the engine font the entries are drawn with. */
+	/** Size of the font the entries are drawn with. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI", meta = (ClampMin = "8", ClampMax = "96"))
 	int32 FontSize = 26;
+
+	/** Room between the text's block and the start of the patch's soft edge, slate units. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI|Effect", meta = (ClampMin = "0.0", ClampMax = "400.0"))
+	float EffectPatchMargin = 24.f;
+
+	/** Width of the patch's soft edge, over which it fades into the effect, slate units. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI|Effect", meta = (ClampMin = "1.0", ClampMax = "400.0"))
+	float EffectPatchFeather = 80.f;
+
+	/** Size of one grain of the noise on screen, pixels. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI|Effect", meta = (ClampMin = "1.0", ClampMax = "16.0"))
+	float NoiseGrainPixels = 2.f;
 
 	/** A left click confirms like a confirm key. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI")
@@ -213,6 +272,17 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
 	TObjectPtr<USizeBox> SizeBox_Line;
 
+	/** The background effect over the whole screen (collapsed without one). */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI|Effect")
+	TObjectPtr<UImage> Image_Effect;
+
+	/** The clear patch behind the text while an effect runs. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI|Effect")
+	TObjectPtr<USizeBox> SizeBox_Patch;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI|Effect")
+	TObjectPtr<UImage> Image_Patch;
+
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
 	TObjectPtr<UTextBlock> Text_Line;
 
@@ -244,6 +314,9 @@ private:
 	void Finish(bool bInSkipped);
 	void RefreshText();
 	FSlateFontInfo GetFont() const;
+	void StartEffect();
+	void UpdateEffect(float DeltaSeconds, const FGeometry* Geometry);
+	EStdTextSceneEffect GetCurrentEffect() const;
 
 	TArray<FStdTextSceneEntry> Entries;
 	int32 CurrentIndex = INDEX_NONE;
@@ -253,4 +326,6 @@ private:
 	int32 ShownChars = 0;
 	bool bFinished = false;
 	bool bSkipped = false;
+	double EffectElapsed = 0.0;
+	uint32 NoiseState = 0x2545F491u;
 };

@@ -12,6 +12,7 @@
 class ULidarScanComponent;
 class UTimeStateSubsystem;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDirectedScanStarted, int32, ScanIndex, float, Timestamp);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDirectedScanCompleted, int32, ScanIndex, float, Timestamp);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDirectedScanReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDirectedBeat, int32, BeatIndex);
@@ -160,11 +161,18 @@ public:
 	void ApplyScanOcclusion();
 
 	/**
-	 * Pushes ScanLinks of the project settings (its one owner) to the lidar: neighbours, distance and angle from the next
-	 * scan, width and intensity at once. Also done at BeginPlay and before every scan.
+	 * Pushes ScanLinks of the project settings (its one owner) to the lidar: mode, neighbours, the longest link of that mode
+	 * and angle from the next scan, width and intensity at once. Also done at BeginPlay and before every scan.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Scan")
 	void ApplyScanLinks();
+
+	/**
+	 * Pushes ScanMemory of the project settings (its one owner: ratio and tolerance) to the lidar, from the next scan. Also
+	 * done at BeginPlay and before every scan.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Scan")
+	void ApplyScanMemory();
 
 	/** Owner transform recorded at the last Stop (identity before the first Stop). */
 	UFUNCTION(BlueprintPure, Category = "Scan|State")
@@ -183,6 +191,10 @@ public:
 	TArray<FLidarScanContext> GetRecentScanOrigins() const;
 
 	// --- Events ---
+
+	/** Re-broadcast of the lidar component's OnScanStarted (every scan, automatic or requested), the frame it is issued. */
+	UPROPERTY(BlueprintAssignable, Category = "Scan|Events")
+	FOnDirectedScanStarted OnScanStarted;
 
 	/** Re-broadcast of the lidar component's OnScanCompleted (every scan, automatic or requested). */
 	UPROPERTY(BlueprintAssignable, Category = "Scan|Events")
@@ -217,6 +229,9 @@ private:
 	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
 
 	UFUNCTION()
+	void HandleLidarScanStarted(int32 ScanIndex, float Timestamp);
+
+	UFUNCTION()
 	void HandleLidarScanCompleted(int32 ScanIndex, float Timestamp);
 
 	ULidarScanComponent* ResolveLidarScan();
@@ -231,7 +246,8 @@ private:
 	/**
 	 * Pushes the scan colour (ScanColors.Scan of the project settings, its one owner) to the lidar, turns its colour
 	 * channels on and gives ScanColors.Interactable to channel InteractableScanChannel (the stencil value of terminals
-	 * and doors), then the occlusion values (ApplyScanOcclusion) and the line values (ApplyScanLinks).
+	 * and doors), then the occlusion values (ApplyScanOcclusion), the line values (ApplyScanLinks) and the memory values
+	 * (ApplyScanMemory).
 	 */
 	void ApplyScanColor();
 

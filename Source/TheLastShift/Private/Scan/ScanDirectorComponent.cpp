@@ -51,6 +51,7 @@ void UScanDirectorComponent::BeginPlay()
 		UE_LOG(LogTheLastShift, Warning, TEXT("%s: owner has no LidarScanComponent, scans disabled."), *GetPathName());
 		return;
 	}
+	LidarScan->OnScanStarted.AddDynamic(this, &UScanDirectorComponent::HandleLidarScanStarted);
 	LidarScan->OnScanCompleted.AddDynamic(this, &UScanDirectorComponent::HandleLidarScanCompleted);
 	ApplyScanColor();
 	// Channels were just switched on: idle scan slots get their channel targets now, not at their first scan.
@@ -210,6 +211,7 @@ void UScanDirectorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	if (LidarScan)
 	{
+		LidarScan->OnScanStarted.RemoveDynamic(this, &UScanDirectorComponent::HandleLidarScanStarted);
 		LidarScan->OnScanCompleted.RemoveDynamic(this, &UScanDirectorComponent::HandleLidarScanCompleted);
 	}
 
@@ -431,6 +433,16 @@ void UScanDirectorComponent::ApplyScanColor()
 	}
 	ApplyScanOcclusion();
 	ApplyScanLinks();
+	ApplyScanMemory();
+}
+
+void UScanDirectorComponent::ApplyScanMemory()
+{
+	if (ULidarScanComponent* Lidar = ResolveLidarScan())
+	{
+		const FScanMemory& Memory = UTheLastShiftSettings::GetScanMemory();
+		Lidar->SetMemory(Memory.Ratio, Memory.ToleranceCm);
+	}
 }
 
 void UScanDirectorComponent::ApplyScanLinks()
@@ -439,7 +451,9 @@ void UScanDirectorComponent::ApplyScanLinks()
 	{
 		const FScanLinks& Links = UTheLastShiftSettings::GetScanLinks();
 		Lidar->MaxLinksPerScan = FMath::Clamp(Links.MaxLinksPerScan, 0, 262144);
-		Lidar->SetLinks(Links.Neighbours, Links.MaxDistanceCm, Links.PixelWidth, Links.Intensity, Links.MaxNormalAngle);
+		// The mode and the longest link of that mode (each mode owns its own maximum distance).
+		Lidar->SetLinkMode(Links.Mode);
+		Lidar->SetLinks(Links.Neighbours, Links.ActiveMaxDistanceCm(), Links.PixelWidth, Links.Intensity, Links.MaxNormalAngle);
 		Lidar->SetLineLift(Links.LiftTexels, Links.LiftMaxCm);
 	}
 }
@@ -498,6 +512,11 @@ void UScanDirectorComponent::SetTimerAt(FTimerHandle& Handle, void (UScanDirecto
 		const float Delay = FMath::Max(static_cast<float>(TargetTime - GetNow()), ScanDirector::MinTimerDelay);
 		World->GetTimerManager().SetTimer(Handle, this, Callback, Delay, false);
 	}
+}
+
+void UScanDirectorComponent::HandleLidarScanStarted(int32 ScanIndex, float Timestamp)
+{
+	OnScanStarted.Broadcast(ScanIndex, Timestamp);
 }
 
 void UScanDirectorComponent::HandleLidarScanCompleted(int32 ScanIndex, float Timestamp)

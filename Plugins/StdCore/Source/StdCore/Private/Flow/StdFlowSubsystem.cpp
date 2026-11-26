@@ -432,7 +432,7 @@ TSharedRef<SWidget> UStdFlowSubsystem::MakeLabelWidget(const TAttribute<FText>& 
 		.MaxDesiredWidth(MaxWidth > 0.f ? FOptionalSize(MaxWidth + 96.f) : FOptionalSize())
 		[
 			SNew(STextBlock)
-			.Font(FCoreStyle::GetDefaultFontStyle("Regular", Settings->TransitionLabelFontSize))
+			.Font(StdUIStyle::MakeFont(Settings->TransitionLabelFontSize))
 			.Text(InText)
 			.ColorAndOpacity(InColor)
 			.Justification(ETextJustify::Center)
@@ -476,7 +476,14 @@ void UStdFlowSubsystem::SetInputBlocked(bool bBlocked)
 
 FSlateColor UStdFlowSubsystem::GetLabelColor() const
 {
-	FLinearColor Color = UStdProjectSettings::Get()->TransitionLabelColor;
+	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
+	FLinearColor Color = Settings->TransitionLabelColor;
+	if (Settings->bUseStyle && Settings->bTransitionUsesStyleAccent)
+	{
+		// The style's accent, at the alpha the label colour sets.
+		const FLinearColor Accent = StdUIStyle::GetAccentColor();
+		Color = FLinearColor(Accent.R, Accent.G, Accent.B, Color.A);
+	}
 	// The label is shown on the covered screen only, and goes before the fade in starts.
 	Color.A *= (Alpha >= 1.f && State != EStdFlowState::FadingIn) ? 1.f : 0.f;
 	return FSlateColor(Color);

@@ -23,6 +23,8 @@
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/GameInstance.h"
+#include "HAL/FileManager.h"
+#include "ImageUtils.h"
 #include "Engine/World.h"
 #include "Flow/StdFlowSubsystem.h"
 #include "Framework/Application/SlateApplication.h"
@@ -49,6 +51,7 @@
 #include "UI/StdMainMenuWidget.h"
 #include "UnrealClient.h"
 #include "UObject/StrongObjectPtr.h"
+#include "Widgets/SWindow.h"
 
 #if !UE_BUILD_SHIPPING
 
@@ -478,6 +481,294 @@ namespace SceneDebug
 		S.Add(WaitFor(Label + TEXT(": in the main menu"), []() { return InMenu(); }, 60.f, []() { return 0.5f; }));
 	}
 
+	// --- Brief 22: the EngineerParadise voice, on the fixture's scene Voices (Paradise, EngineerParadise, HomeAI, Engineer) ---
+
+	static FName VoicesScene() { return TEXT("Voices"); }
+
+	/** The EngineerParadise colour before part G changed it for the session. */
+	static FLinearColor GVoicesOldColor = FLinearColor::Black;
+
+	/** Opens the fixture's scene Voices over the main menu, built at the run's battery now. Null when there is no main menu or no Voices row. */
+	static URunTextSceneWidget* OpenVoices()
+	{
+		UStdMainMenuWidget* Menu = MainMenu();
+		const TArray<FRunSceneLine> Lines = Scenes() ? Scenes()->BuildScene(VoicesScene(), Scenes()->MakeRunContext()) : TArray<FRunSceneLine>();
+		URunTextSceneWidget* Screen = Menu && Lines.Num() > 0 ? Cast<URunTextSceneWidget>(Menu->OpenChildScreen(URunTextSceneWidget::StaticClass())) : nullptr;
+		if (Screen)
+		{
+			// An ending's text closes itself when it ends: back to the main menu.
+			Screen->Play(ERunSceneKind::EndingText, VoicesScene(), Lines);
+		}
+		return Screen;
+	}
+
+	/** A shot of the game's window with the pixels kept; the scene's line box and background in the shot's pixels. */
+	struct FPixelShot
+	{
+		FString Label;
+		int32 Width = 0;
+		int32 Height = 0;
+		TArray<FColor> Pixels;
+		bool bReady = false;
+		FBox2D Line = FBox2D(ForceInit);
+		FBox2D Screen = FBox2D(ForceInit);
+	};
+	static FPixelShot GPixels;
+	static FDelegateHandle GPixelsHandle;
+
+	static void HandlePixels(int32 Width, int32 Height, const TArray<FColor>& Pixels)
+	{
+		// Unbound at once: while the delegate is bound the engine saves no other screenshot to its file.
+		UGameViewportClient::OnScreenshotCaptured().Remove(GPixelsHandle);
+		GPixelsHandle.Reset();
+		GPixels.Width = Width;
+		GPixels.Height = Height;
+		GPixels.Pixels = Pixels;
+		TArray64<uint8> Png;
+		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief22"), GPixels.Label + TEXT(".png")));
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+		FFileHelper::SaveArrayToFile(Png, *Path);
+		Note(FString::Printf(TEXT("shot %s saved (%d x %d): %s"), *GPixels.Label, Width, Height, *Path));
+		GPixels.bReady = true;
+	}
+
+	static void RequestPixels(const FString& Label)
+	{
+		GPixels = FPixelShot();
+		GPixels.Label = Label;
+		const URunTextSceneWidget* Scene = TopScene();
+		FBox2D Line = WidgetRect(SceneWidget(Scene, TEXT("SizeBox_Line")));
+		FBox2D Screen = WidgetRect(SceneWidget(Scene, TEXT("Border_Background")));
+		if (GEngine && GEngine->GameViewport)
+		{
+			if (const TSharedPtr<SWindow> Window = GEngine->GameViewport->GetWindow())
+			{
+				Line = Line.bIsValid ? Line.ShiftBy(-Window->GetPositionInScreen()) : Line;
+				Screen = Screen.bIsValid ? Screen.ShiftBy(-Window->GetPositionInScreen()) : Screen;
+			}
+		}
+		GPixels.Line = Line;
+		GPixels.Screen = Screen;
+		if (!GPixelsHandle.IsValid())
+		{
+			GPixelsHandle = UGameViewportClient::OnScreenshotCaptured().AddStatic(&HandlePixels);
+		}
+		FScreenshotRequest::RequestScreenshot(FString(), true, false);
+	}
+
+	/**
+	 * The background: the mean of a strip 12 to 24 pixels above the line's box (inside the screen); the glyphs' cores: the
+	 * mean of the pixels of the line's box farthest from that background (within 92% of the farthest). False when the shot or
+	 * the boxes are missing.
+	 */
+	static bool MeasureScene(FColor& OutBack, FColor& OutGlyph, int32& OutCount)
+	{
+		const FPixelShot& Shot = GPixels;
+		OutCount = 0;
+		if (!Shot.Line.bIsValid || Shot.Pixels.Num() < Shot.Width * Shot.Height)
+		{
+			return false;
+		}
+		const int32 X0 = FMath::Clamp(FMath::FloorToInt32(Shot.Line.Min.X), 0, Shot.Width);
+		const int32 X1 = FMath::Clamp(FMath::CeilToInt32(Shot.Line.Max.X), 0, Shot.Width);
+		const int32 Y0 = FMath::Clamp(FMath::FloorToInt32(Shot.Line.Min.Y), 0, Shot.Height);
+		const int32 Y1 = FMath::Clamp(FMath::CeilToInt32(Shot.Line.Max.Y), 0, Shot.Height);
+		int64 R = 0, G = 0, B = 0, N = 0;
+		for (int32 Y = FMath::Max(0, Y0 - 24); Y < FMath::Max(0, Y0 - 12); ++Y)
+		{
+			for (int32 X = X0; X < X1; ++X)
+			{
+				const FColor& C = Shot.Pixels[Y * Shot.Width + X];
+				R += C.R; G += C.G; B += C.B; ++N;
+			}
+		}
+		if (N == 0)
+		{
+			return false;
+		}
+		OutBack = FColor(static_cast<uint8>(R / N), static_cast<uint8>(G / N), static_cast<uint8>(B / N));
+		auto Dist = [&OutBack](const FColor& C) { return FMath::Abs(C.R - OutBack.R) + FMath::Abs(C.G - OutBack.G) + FMath::Abs(C.B - OutBack.B); };
+		int32 MaxDist = 0;
+		for (int32 Y = Y0; Y < Y1; ++Y)
+		{
+			for (int32 X = X0; X < X1; ++X)
+			{
+				MaxDist = FMath::Max(MaxDist, Dist(Shot.Pixels[Y * Shot.Width + X]));
+			}
+		}
+		R = G = B = 0;
+		for (int32 Y = Y0; Y < Y1; ++Y)
+		{
+			for (int32 X = X0; X < X1; ++X)
+			{
+				const FColor& C = Shot.Pixels[Y * Shot.Width + X];
+				if (MaxDist > 0 && Dist(C) * 100 >= MaxDist * 92)
+				{
+					R += C.R; G += C.G; B += C.B; ++OutCount;
+				}
+			}
+		}
+		if (OutCount == 0)
+		{
+			return false;
+		}
+		OutGlyph = FColor(static_cast<uint8>(R / OutCount), static_cast<uint8>(G / OutCount), static_cast<uint8>(B / OutCount));
+		return true;
+	}
+
+	/** Where Text, drawn at its alpha over Back, lands on screen (sRGB). */
+	static FColor OverBack(const FLinearColor& Text, const FLinearColor& Back)
+	{
+		return FLinearColor(FMath::Lerp(Back.R, Text.R, Text.A), FMath::Lerp(Back.G, Text.G, Text.A), FMath::Lerp(Back.B, Text.B, Text.A), 1.f).ToFColor(true);
+	}
+
+	static bool NearPx(const FColor& A, const FColor& B, int32 Tolerance)
+	{
+		return FMath::Abs(A.R - B.R) <= Tolerance && FMath::Abs(A.G - B.G) <= Tolerance && FMath::Abs(A.B - B.B) <= Tolerance;
+	}
+
+	static FString PxText(const FColor& C) { return FString::Printf(TEXT("(%d, %d, %d)"), C.R, C.G, C.B); }
+
+	/** Checks the Voices line on screen: its index, the report of its start and its voice's colours. */
+	static void CheckVoiceLine(const FString& Label, int32 Index, ESceneVoice Voice)
+	{
+		const URunTextSceneWidget* Scene = TopScene();
+		FLinearColor Text, Back;
+		UTheLastShiftSettings::Get()->GetSceneVoiceColors(Voice, Text, Back);
+		const UTlsSceneTestListener::FLine* Last = LastLine();
+		Check(Scene && Scene->GetSceneName() == VoicesScene() && Scene->GetCurrentIndex() == Index && Last && Last->Scene == VoicesScene() && Last->Index == Index && Last->Voice == Voice,
+			FString::Printf(TEXT("%s: line %d on screen, reported as it starts, voice %s"), *Label, Index + 1, LexToString(Voice)));
+		Check(Scene && Near(Scene->GetShownTextColor(), Text) && Near(Scene->GetShownBackgroundColor(), Back),
+			FString::Printf(TEXT("%s: line %d in the %s colours of TextColors: text %s on %s (shown %s on %s)"), *Label, Index + 1, LexToString(Voice), *Text.ToString(), *Back.ToString(),
+				Scene ? *Scene->GetShownTextColor().ToString() : TEXT("-"), Scene ? *Scene->GetShownBackgroundColor().ToString() : TEXT("-")));
+	}
+
+	/** A shot of the line typed out: its background and its glyphs measured against Voice's colours (and, for EngineerParadise, not the Paradise text's). */
+	static void AddVoiceShot(TArray<FStep>& S, const FString& Label, const FString& ShotName, ESceneVoice Voice)
+	{
+		S.Add(WaitFor(Label + TEXT(": typed out"), []() { return TopScene() && !TopScene()->IsTyping(); }, 15.f, [ShotName]() { RequestPixels(ShotName); return 0.f; }));
+		S.Add(WaitFor(Label + TEXT(": shot taken"), []() { return GPixels.bReady; }, 5.f, [Label, Voice]()
+		{
+			FLinearColor Text, Back;
+			UTheLastShiftSettings::Get()->GetSceneVoiceColors(Voice, Text, Back);
+			const FSuitTextColors& Colors = UTheLastShiftSettings::GetTextColors();
+			const FColor WantBack = FLinearColor(Back.R, Back.G, Back.B, 1.f).ToFColor(true);
+			const FColor WantGlyph = OverBack(Text, Back);
+			const FColor Paradise = OverBack(Colors.ParadiseText, Colors.ParadiseBackground);
+			FColor GotBack, GotGlyph;
+			int32 Count = 0;
+			const bool bMeasured = MeasureScene(GotBack, GotGlyph, Count);
+			const bool bOther = Voice != ESceneVoice::EngineerParadise || !NearPx(GotGlyph, Paradise, 30);
+			Check(bMeasured && Count >= 20 && NearPx(GotBack, WantBack, 6) && NearPx(GotGlyph, WantGlyph, 20) && bOther,
+				FString::Printf(TEXT("%s: on the shot the background is %s (%s: %s) and the brightest-contrast %d pixels of the glyphs %s (expected %s%s)"), *Label, *PxText(GotBack),
+					LexToString(Voice), *PxText(WantBack), Count, *PxText(GotGlyph), *PxText(WantGlyph),
+					Voice == ESceneVoice::EngineerParadise ? *FString::Printf(TEXT(", and not the Paradise text's %s"), *PxText(Paradise)) : TEXT("")));
+			return 0.f;
+		}));
+	}
+
+	/** Part G of tls.SceneTest: the four voices at battery 0.05, then the EngineerParadise colour changed for the session by tls.Look.Text. */
+	static void AddVoices(TArray<FStep>& S)
+	{
+		S.Add(Do(TEXT("G: the four voices at battery 0.05"), []()
+		{
+			GRun.SavedBattery = Home()->GetBatteryFraction();
+			GRun.SavedHome = Home()->GetHomeSecondsElapsed();
+			Home()->RestoreState(0.05, GRun.SavedHome);
+			URunTextSceneWidget* Scene = OpenVoices();
+			FString Order;
+			for (const FRunSceneLine& Line : Scene ? Scene->GetLines() : TArray<FRunSceneLine>())
+			{
+				Order += FString::Printf(TEXT("%s%s(%s)"), Order.IsEmpty() ? TEXT("") : TEXT(" "), *Line.RowName.ToString(), LexToString(Line.Voice));
+			}
+			Check(Scene && Order == TEXT("Voices_1(Paradise) Voices_2(EngineerParadise) Voices_3(HomeAI) Voices_4(Engineer)"), FString::Printf(TEXT("G: the scene's lines and voices: %s"), *Order));
+			if (!Scene)
+			{
+				return -1.f;
+			}
+			const TArray<FRunSceneLine>& Lines = Scene->GetLines();
+			Check(Lines[1].Level == ETextDegradation::Full && Lines[1].Text == FixtureSceneText(TEXT("Voices_2")),
+				FString::Printf(TEXT("G: at battery 0.05 the EngineerParadise line is never degraded: in full, as written (%s): \"%s\""), LexToString(Lines[1].Level), *Lines[1].Text));
+			Check(Lines[2].Level != ETextDegradation::Full && Lines[2].Text != FixtureSceneText(TEXT("Voices_3")),
+				FString::Printf(TEXT("G: the HomeAI line is degraded as before (%s): \"%s\""), LexToString(Lines[2].Level), *Lines[2].Text));
+			Check(Lines[0].Level == ETextDegradation::Full && Lines[0].Text == FixtureSceneText(TEXT("Voices_1")) && Lines[3].Level == ETextDegradation::Full
+				&& Lines[3].Text == FixtureSceneText(TEXT("Voices_4")), TEXT("G: the Paradise and Engineer lines are in full, as before"));
+			CheckVoiceLine(TEXT("G"), 0, ESceneVoice::Paradise);
+			return 0.f;
+		}));
+		AddVoiceShot(S, TEXT("G: line 1 (Paradise)"), TEXT("Voices_1_Paradise"), ESceneVoice::Paradise);
+		S.Add(Do(TEXT("G: confirm: line 2"), []()
+		{
+			Check(SendKey(EKeys::Enter), TEXT("G: Enter goes on to line 2"));
+			CheckVoiceLine(TEXT("G"), 1, ESceneVoice::EngineerParadise);
+			const FSuitTextColors& C = UTheLastShiftSettings::GetTextColors();
+			const URunTextSceneWidget* Scene = TopScene();
+			Check(Scene && Near(Scene->GetShownBackgroundColor(), C.ParadiseBackground) && Near(Scene->GetShownTextColor(), C.EngineerParadise),
+				FString::Printf(TEXT("G: the engineer in the paradise keeps the paradise's background (no cut to black) and shows TextColors.EngineerParadise %s"), *C.EngineerParadise.ToString()));
+			return 0.f;
+		}));
+		AddVoiceShot(S, TEXT("G: line 2 (EngineerParadise)"), TEXT("Voices_2_EngineerParadise"), ESceneVoice::EngineerParadise);
+		S.Add(Do(TEXT("G: confirm: line 3"), []()
+		{
+			Check(SendKey(EKeys::Enter), TEXT("G: Enter goes on to line 3"));
+			CheckVoiceLine(TEXT("G"), 2, ESceneVoice::HomeAI);
+			return 0.f;
+		}));
+		AddVoiceShot(S, TEXT("G: line 3 (HomeAI)"), TEXT("Voices_3_HomeAI"), ESceneVoice::HomeAI);
+		S.Add(Do(TEXT("G: confirm: line 4"), []()
+		{
+			Check(SendKey(EKeys::Enter), TEXT("G: Enter goes on to line 4"));
+			CheckVoiceLine(TEXT("G"), 3, ESceneVoice::Engineer);
+			return 0.f;
+		}));
+		AddVoiceShot(S, TEXT("G: line 4 (Engineer)"), TEXT("Voices_4_Engineer"), ESceneVoice::Engineer);
+		S.Add(Do(TEXT("G: confirm: the scene ends"), []()
+		{
+			SendKey(EKeys::Enter);
+			return 0.5f;
+		}));
+		S.Add(WaitFor(TEXT("G: back in the main menu"), []() { return !TopScene() && InMenu(); }, 10.f));
+
+		// The colour's one owner, changed for the session by tls.Look.Text, then put back.
+		S.Add(Do(TEXT("G: tls.Look.Text EngineerParadise 0.38 0.12 0.05"), []()
+		{
+			const FLinearColor Old = UTheLastShiftSettings::GetTextColors().EngineerParadise;
+			GVoicesOldColor = Old;
+			GRun.Cleanup = [Cleanup = GRun.Cleanup, Old]()
+			{
+				GetMutableDefault<UTheLastShiftSettings>()->TextColors.EngineerParadise = Old;
+				if (Cleanup)
+				{
+					Cleanup();
+				}
+			};
+			GEngine->Exec(W(), TEXT("tls.Look.Text EngineerParadise 0.38 0.12 0.05"));
+			Check(UTheLastShiftSettings::GetTextColors().EngineerParadise.Equals(FLinearColor(0.38f, 0.12f, 0.05f, Old.A), 1.e-4f),
+				FString::Printf(TEXT("G: tls.Look.Text sets TextColors.EngineerParadise for the session: %s"), *UTheLastShiftSettings::GetTextColors().EngineerParadise.ToString()));
+			return OpenVoices() ? 0.f : -1.f;
+		}));
+		S.Add(WaitFor(TEXT("G: changed: line 1 typed out"), []() { return TopScene() && !TopScene()->IsTyping(); }, 15.f, []()
+		{
+			SendKey(EKeys::Enter);
+			CheckVoiceLine(TEXT("G (changed)"), 1, ESceneVoice::EngineerParadise);
+			return 0.f;
+		}));
+		AddVoiceShot(S, TEXT("G: line 2 in the changed colour"), TEXT("Voices_2_EngineerParadise_Changed"), ESceneVoice::EngineerParadise);
+		S.Add(Do(TEXT("G: put the colour back, skip"), []()
+		{
+			const FLinearColor Old = GVoicesOldColor;
+			const FString Back = FString::Printf(TEXT("tls.Look.Text EngineerParadise %.6f %.6f %.6f %.6f"), Old.R, Old.G, Old.B, Old.A);
+			GEngine->Exec(W(), *Back);
+			Check(UTheLastShiftSettings::GetTextColors().EngineerParadise.Equals(Old, 1.e-4f),
+				FString::Printf(TEXT("G: the colour put back to the value it had: %s"), *UTheLastShiftSettings::GetTextColors().EngineerParadise.ToString()));
+			Check(SendKey(BackKey()), TEXT("G: back skips the scene"));
+			Home()->RestoreState(GRun.SavedBattery, GRun.SavedHome);
+			return 0.5f;
+		}));
+		S.Add(WaitFor(TEXT("G: back in the main menu after the skip"), []() { return !TopScene() && InMenu(); }, 10.f));
+	}
+
 	static TArray<FStep> BuildSceneTest()
 	{
 		TArray<FStep> S;
@@ -764,6 +1055,10 @@ namespace SceneDebug
 			Check(Now == GRun.InputFirst, FString::Printf(TEXT("D: input in area 1 without a prologue (as New game before Brief 9) is the same as after it: %s"), *Now));
 			return 0.f;
 		}));
+
+		// --- G (Brief 22): the EngineerParadise voice next to the other three ---
+		AddBackToMenu(S, TEXT("D"));
+		AddVoices(S);
 		return S;
 	}
 
@@ -1221,7 +1516,7 @@ namespace SceneDebug
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsSceneTestCommand(
 	TEXT("tls.SceneTest"),
-	TEXT("tls.SceneTest [Quit=0]: (fresh PIE or package, MainMenu; clears the save) with fixture rows: New game without a save opens the prologue's six lines, read through with Enter and Space (typing speed, confirm on a line being typed and on a whole one, each line's voice colours, the cut from white to black, the long line's wrap, the cue of line 4, three screenshots to Saved/Screenshots/Brief9), then the travel to area 1 with its entry line; New game with a save, skipped with back on line 3; Continue and Select act without it; the on-screen controls (shown, keys, labels, colour, apart from the text) on lines 1 and 3; E: real clicks on Continue, Enter with the mouse over each control, a click on the scene away from them, back after the clicks; F: a click on Skip; New game without Prologue rows; the input in area 1 the same each time."),
+	TEXT("tls.SceneTest [Quit=0]: (fresh PIE or package, MainMenu; clears the save) with fixture rows: New game without a save opens the prologue's six lines, read through with Enter and Space (typing speed, confirm on a line being typed and on a whole one, each line's voice colours, the cut from white to black, the long line's wrap, the cue of line 4, three screenshots to Saved/Screenshots/Brief9), then the travel to area 1 with its entry line; New game with a save, skipped with back on line 3; Continue and Select act without it; the on-screen controls (shown, keys, labels, colour, apart from the text) on lines 1 and 3; E: real clicks on Continue, Enter with the mouse over each control, a click on the scene away from them, back after the clicks; F: a click on Skip; New game without Prologue rows; the input in area 1 the same each time; G (Brief 22): the fixture scene Voices at battery 0.05, the EngineerParadise line on the paradise's white, in full, measured on a shot, then in the colour tls.Look.Text sets; screenshots of G to Saved/Screenshots/Brief22."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		if (SceneDebug::GRun.bRunning || !SceneDebug::MainMenu())
@@ -1344,3 +1639,20 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsSceneControlsLayoutCommand(
 	}));
 
 #endif // !UE_BUILD_SHIPPING
+
+static FAutoConsoleCommandWithWorldAndArgs GTlsSceneVoicesCommand(
+	TEXT("tls.Scene.Voices"),
+	TEXT("tls.Scene.Voices (MainMenu, PIE or a package; the save is not touched): Brief 22, a fixture scene of four lines shown one after another, one for each voice: Paradise, EngineerParadise (the engineer inside the paradise), HomeAI (degraded by the run's battery) and Engineer. Confirm goes on, back skips; the main menu again at the end."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		if (SceneDebug::GRun.bRunning || !SceneDebug::MainMenu())
+		{
+			UE_LOG(LogTheLastShift, Warning, TEXT("tls.Scene.Voices: needs the main menu, or a test is already running."));
+			return;
+		}
+		// The lines are built from the fixture's scene Voices; the screen keeps them, so the game's tables come back at once.
+		NarrativeFixture::Install(SceneDebug::W());
+		const URunTextSceneWidget* Scene = SceneDebug::OpenVoices();
+		NarrativeFixture::Restore(SceneDebug::W());
+		UE_LOG(LogTheLastShift, Display, TEXT("tls.Scene.Voices: %s."), Scene ? *FString::Printf(TEXT("%d lines over the main menu"), Scene->GetEntryCount()) : TEXT("could not open the scene"));
+	}));

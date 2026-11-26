@@ -23,7 +23,10 @@ enum class ETextTrigger : uint8
 	AreaStart,
 	/** Banked energy rises from zero for the first time in a map. */
 	FirstEnergy,
-	/** A successful payment at a terminal. */
+	/**
+	 * A successful payment at a terminal: the spending comment when the act has no row for the payment's kind (SpendDoor,
+	 * SpendLights, SpendBeacon, SpendLog, SpendTwin), or the terminal powers nothing of those kinds.
+	 */
 	Spend,
 	/**
 	 * Once in a run, on the return to Normal time after the Stop in which the entity was found (after the return message,
@@ -36,7 +39,17 @@ enum class ETextTrigger : uint8
 	 */
 	EntitySeen,
 	/** Once in a run, on the return to Normal time after the first contact with the entity (after the return message): the home AI's lines about it. */
-	EntityContact
+	EntityContact,
+	/** A payment at a gate's door terminal (said instead of Spend when the act has a row of it). */
+	SpendDoor,
+	/** A payment at a terminal of a group of lights (said instead of Spend when the act has a row of it). */
+	SpendLights,
+	/** A payment at a beacon's terminal (said instead of Spend when the act has a row of it). */
+	SpendBeacon,
+	/** A payment at a log terminal (said instead of Spend when the act has a row of it). */
+	SpendLog,
+	/** A payment at the twin AI's terminal, before the part it plays (said instead of Spend when the act has a row of it). */
+	SpendTwin
 };
 
 inline const TCHAR* LexToString(ETextTrigger Trigger)
@@ -51,6 +64,11 @@ inline const TCHAR* LexToString(ETextTrigger Trigger)
 	case ETextTrigger::EntityFound: return TEXT("EntityFound");
 	case ETextTrigger::EntitySeen: return TEXT("EntitySeen");
 	case ETextTrigger::EntityContact: return TEXT("EntityContact");
+	case ETextTrigger::SpendDoor: return TEXT("SpendDoor");
+	case ETextTrigger::SpendLights: return TEXT("SpendLights");
+	case ETextTrigger::SpendBeacon: return TEXT("SpendBeacon");
+	case ETextTrigger::SpendLog: return TEXT("SpendLog");
+	case ETextTrigger::SpendTwin: return TEXT("SpendTwin");
 	}
 	return TEXT("Unknown");
 }
@@ -149,7 +167,12 @@ enum class ESceneVoice : uint8
 	/** The home AI: its colour on black; degraded by the run's battery. */
 	HomeAI,
 	/** The engineer's reply in an ending: its own colour on black. */
-	Engineer
+	Engineer,
+	/**
+	 * The engineer speaking inside the paradise: the Paradise voice's background (no cut to black), its text in a dark tone
+	 * of home's tint, so that it reads as another speaker than the paradise. Never degraded.
+	 */
+	EngineerParadise
 };
 
 inline const TCHAR* LexToString(ESceneVoice Voice)
@@ -159,6 +182,7 @@ inline const TCHAR* LexToString(ESceneVoice Voice)
 	case ESceneVoice::Paradise: return TEXT("Paradise");
 	case ESceneVoice::HomeAI: return TEXT("HomeAI");
 	case ESceneVoice::Engineer: return TEXT("Engineer");
+	case ESceneVoice::EngineerParadise: return TEXT("EngineerParadise");
 	}
 	return TEXT("Unknown");
 }
@@ -209,6 +233,30 @@ struct THELASTSHIFT_API FPrologueRow : public FTableRowBase
 	FName Group;
 
 	/** Position among the lines of the same group (ascending). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (ClampMin = "1", ClampMax = "999"))
+	int32 Order = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (MultiLine = "true"))
+	FText Text;
+};
+
+/**
+ * One line of the engineer on the text channel (DT_EngineerLines, row name E_<Before>_<Order>): said before the row
+ * Before of DT_AIMessages or DT_Prologue, the first time that row is said in the act (in a prologue map: in that map),
+ * then the row. Several lines before the same row are said in ascending Order. The engineer's voice: never shortened,
+ * typed at the full battery's speed, said at Silent too. Never before a row shown as a label (AreaEntry, Flight). Tokens
+ * as the home AI's messages, with the context of the row it comes before.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FEngineerLineRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	/** The key of the row of DT_AIMessages or DT_Prologue the line comes before. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative")
+	FName Before;
+
+	/** Position among the lines before the same row (ascending). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (ClampMin = "1", ClampMax = "999"))
 	int32 Order = 1;
 

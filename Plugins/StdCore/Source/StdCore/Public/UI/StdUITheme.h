@@ -11,6 +11,21 @@ class UButton;
 class UInputKeySelector;
 class USoundBase;
 class UUserWidget;
+struct FStdUIStyle;
+
+/** How panels and buttons are drawn. */
+UENUM(BlueprintType)
+enum class EStdUIShape : uint8
+{
+	/** Filled boxes with rounded corners (CornerRadius). */
+	Rounded,
+	/**
+	 * Flat fills inside a thin frame line (FrameThickness, FrameColor) with the top right corner cut at 45 degrees
+	 * (CornerCut). Buttons have no fill at rest and a left-aligned label; with the focus or the pointer they fill with
+	 * the accent and show a small marker at their left; disabled, their frame and label are at a third of their level.
+	 */
+	Framed
+};
 
 /**
  * The look of every Std Core menu in one asset: a few colors, a corner radius and four fonts. The button, slider and
@@ -63,6 +78,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shape")
 	FMargin ButtonPadding = FMargin(16.f, 10.f);
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shape")
+	EStdUIShape Shape = EStdUIShape::Rounded;
+
+	/** Framed: the frame line of panels and buttons and the rule under a title. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shape")
+	FLinearColor FrameColor = FLinearColor(0.3f, 0.3f, 0.3f, 1.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shape", meta = (ClampMin = "0.5", ClampMax = "8.0"))
+	float FrameThickness = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shape", meta = (ClampMin = "0.0", ClampMax = "64.0"))
+	float CornerCut = 10.f;
+
+	/** Framed: height of a thin rule shown under Text_Title (0: none). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shape", meta = (ClampMin = "0.0", ClampMax = "8.0"))
+	float TitleRuleThickness = 0.f;
+
+	/** Titles, headings and button labels in capitals. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fonts")
+	bool bUpperCaseLabels = false;
+
 	// Fonts
 
 	/** Text_Title. */
@@ -90,7 +126,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sounds")
 	TObjectPtr<USoundBase> PressSound;
 
+	/** Takes every value of Style, with Accent as the accent (Framed shape). */
+	void InitFromStyle(const FStdUIStyle& Style, const FLinearColor& Accent);
+
+	bool IsFramed() const { return Shape == EStdUIShape::Framed; }
+
 	FSlateBrush MakeRoundedBrush(const FLinearColor& Color, float Radius) const;
+
+	/** A panel's brush: Rounded, a rounded box of Fill; Framed, Fill inside the frame line with the cut corner. */
+	FSlateBrush MakePanelBrush(const FLinearColor& Fill) const;
 	FButtonStyle MakeButtonStyle() const;
 	FButtonStyle MakeTabStyle(bool bSelected) const;
 	FSliderStyle MakeSliderStyle() const;
@@ -99,8 +143,22 @@ public:
 
 namespace StdUITheme
 {
-	/** The theme of UStdProjectSettings, or null when the setting is empty or the asset is missing (warned once). */
+	/**
+	 * With the style on (UStdProjectSettings::bUseStyle), a theme built from UStdProjectSettings::Style (kept, rebuilt
+	 * when the style's accent changes); else the theme of UStdProjectSettings, or null when the setting is empty or the
+	 * asset is missing (warned once).
+	 */
 	STDCORE_API const UStdUITheme* Get();
+
+	/** Name of the thin rule AddTitleRule puts under Text_Title (Framed, TitleRuleThickness above 0). */
+	inline const TCHAR* TitleRuleName = TEXT("Image_TitleRule");
+
+	/**
+	 * Puts the thin rule under Widget's Text_Title when it sits in a vertical box (Framed, TitleRuleThickness above 0),
+	 * once, the title's gap below moved under the rule. Call it before the widget's Slate tree is built (a screen does it
+	 * when it is initialized); ApplyToWidget then keeps its colour and shows it with the title.
+	 */
+	STDCORE_API void AddTitleRule(const UStdUITheme& Theme, UUserWidget& Widget);
 
 	/** Applies the theme to every widget of Widget's tree. Nested user widgets apply it themselves. */
 	STDCORE_API void ApplyToWidget(const UStdUITheme& Theme, UUserWidget& Widget);
