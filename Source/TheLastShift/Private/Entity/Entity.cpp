@@ -4,6 +4,7 @@
 
 #include "CollisionQueryParams.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Entity/EntityFigureShape.h"
 #include "GameFramework/Pawn.h"
@@ -18,6 +19,8 @@
 #include UE_INLINE_GENERATED_CPP_BY_NAME(Entity)
 
 DEFINE_LOG_CATEGORY(LogEntity);
+
+TOptional<EEntityForm> AEntity::SessionForm;
 
 namespace EntityTuning
 {
@@ -65,6 +68,8 @@ void AEntity::BeginPlay()
 	Super::BeginPlay();
 	FigureLocation = GetActorLocation();
 	FigureYaw = GetActorRotation().Yaw;
+	// The form's points are computed once, here, behind the travel screen (not at the first scan).
+	RefreshFigureShape();
 
 	EnsureBound();
 	// The player pawn may not be possessed yet on the first frame.
@@ -745,6 +750,7 @@ bool AEntity::Manifest(float TargetDistance, const TCHAR* Why)
 void AEntity::Unmanifest()
 {
 	bManifested = false;
+	bHoldFigure = false;
 	PathPoints.Reset();
 	CachedPathDistanceFrame = MAX_uint64;
 	SetActorTickEnabled(false);
@@ -789,13 +795,17 @@ void AEntity::Tick(float DeltaSeconds)
 		return;
 	}
 
-	AdvanceAlongPath(EntityTuning::Speed(Speed) * DeltaSeconds);
-	SetActorLocation(FigureLocation);
-
-	// Between beats the player can move past the end of the path: chase the new position instead of idling.
-	if (PathPoints.Num() < 2 && GetRunSeconds() - LastPathRefreshTime >= EntityTuning::ExhaustedPathRefreshInterval)
+	// A figure held by PlaceFigure stands still for the rest of the Stop.
+	if (!bHoldFigure)
 	{
-		RefreshPath();
+		AdvanceAlongPath(EntityTuning::Speed(Speed) * DeltaSeconds);
+		SetActorLocation(FigureLocation);
+
+		// Between beats the player can move past the end of the path: chase the new position instead of idling.
+		if (PathPoints.Num() < 2 && GetRunSeconds() - LastPathRefreshTime >= EntityTuning::ExhaustedPathRefreshInterval)
+		{
+			RefreshPath();
+		}
 	}
 
 	CheckContact();
@@ -873,30 +883,15 @@ void AEntity::GatherLidarPoints_Implementation(const FLidarScanContext& Context,
 		return;
 	}
 
-	// Figure.
-	const int32 PointCount = FMath::Clamp(FigurePointCount, 10, 2000);
-	if (FigureShapeCount != PointCount || FigureShapeSeed != FigureSeed)
-	{
-		FEntityFigureShape::Build(PointCount, FigureSeed, FigureShape);
-		FigureShapeCount = PointCount;
-		FigureShapeSeed = FigureSeed;
-	}
-
-	const FVector Ground = GetFigureGround();
-	const FVector Head = FEntityFigureShape::GetHeadPivot();
-	const int32 Copies = FMath::Clamp(RefractionCount, 1, 8);
-	const float Step = FMath::Clamp(RefractionAngleStep, 0.f, 180.f);
-	const float Tilt = FMath::Clamp(RefractionTilt, 0.f, 60.f);
+	// Figure: the act's form (Brief 29), or the procedural figure.
+	RefreshFigureShape();
+	TArray<FVector> Figure;
+	BuildFigurePoints(Figure);
 	const int32 FirstFigure = OutPoints.Num();
-	OutPoints.Reserve(OutPoints.Num() + PointCount * Copies + 64);
-	for (int32 Copy = 0; Copy < Copies; ++Copy)
+	OutPoints.Reserve(OutPoints.Num() + Figure.Num() + 64);
+	for (const FVector& Point : Figure)
 	{
-		// Lean around the head's local lateral axis, then turn around the vertical axis through the head.
-		const FQuat Rotation = FRotator(Tilt, FigureYaw + Copy * Step, 0.f).Quaternion();
-		for (const FVector& Local : FigureShape)
-		{
-			OutPoints.Emplace(Ground + Head + Rotation.RotateVector(Local - Head));
-		}
+		OutPoints.Emplace(Point);
 	}
 	LastGatheredFigurePoints = OutPoints.Num() - FirstFigure;
 
@@ -996,6 +991,175 @@ bool AEntity::KeepsMoreThan(const FLidarScanContext& Context, const TArray<FLida
 		}
 	}
 	return OutKept > Needed;
+}
+
+// --- Form (Brief 29) ---
+
+void AEntity::SetSessionForm(TOptional<EEntityForm> Form)
+{
+	SessionForm = Form;
+}
+
+TOptional<EEntityForm> AEntity::GetSessionForm()
+{
+	return SessionForm;
+}
+
+EEntityForm AEntity::GetRequestedForm() const
+{
+	if (SessionForm.IsSet())
+	{
+		return SessionForm.GetValue();
+	}
+	return UTheLastShiftSettings::Get()->GetEntityFormOfAct(URunSubsystem::GetActIndexOf(GetWorld()));
+}
+
+void AEntity::RefreshFigureShape()
+{
+	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+	const EEntityForm Requested = GetRequestedForm();
+	const bool bModelledOn = Settings->EntityForms.bModelledFigure;
+	const FEntityFormTuning* Tuning = bModelledOn ? Settings->FindEntityForm(Requested) : nullptr;
+	const FSoftObjectPath MeshPath = Tuning ? Tuning->Mesh.ToSoftObjectPath() : FSoftObjectPath();
+	const int32 ModelledCount = Tuning ? FMath::Clamp(Tuning->PointCount, 10, 4000) : 0;
+	const int32 ProceduralCount = FMath::Clamp(FigurePointCount, 10, 2000);
+	if (bShapeBuilt && Requested == ShapeRequestedForm && bModelledOn == bShapeModelledOn && MeshPath == ShapeMeshPath
+		&& ModelledCount == FigureShapeCount && ProceduralCount == FigureShapeProceduralCount && FigureSeed == FigureShapeSeed)
+	{
+		return;
+	}
+
+	bShapeBuilt = true;
+	ShapeRequestedForm = Requested;
+	bShapeModelledOn = bModelledOn;
+	ShapeMeshPath = MeshPath;
+	FigureShapeCount = ModelledCount;
+	FigureShapeProceduralCount = ProceduralCount;
+	FigureShapeSeed = FigureSeed;
+	ShapeMesh = nullptr;
+	ShapeForm = EEntityForm::Procedural;
+
+	if (Tuning)
+	{
+		const double Start = FPlatformTime::Seconds();
+		UStaticMesh* Mesh = MeshPath.IsNull() ? nullptr : Tuning->Mesh.LoadSynchronous();
+		if (Mesh && FEntityFigureShape::BuildFromMesh(Mesh, ModelledCount, FigureSeed, FigureShape))
+		{
+			ShapeMesh = Mesh;
+			ShapeForm = Requested;
+			UE_LOG(LogEntity, Log, TEXT("%s: figure: form %s, %d points spread over %s (seed %d, %.1f ms)."), *GetName(), LexToString(ShapeForm), FigureShape.Num(),
+				*Mesh->GetPathName(), FigureSeed, (FPlatformTime::Seconds() - Start) * 1000.0);
+			return;
+		}
+		UE_LOG(LogEntity, Warning, TEXT("%s: figure: form %s has no mesh that can be read (%s): the procedural figure instead."), *GetName(), LexToString(Requested),
+			MeshPath.IsNull() ? TEXT("none set") : *MeshPath.ToString());
+	}
+	else if (Requested != EEntityForm::Procedural)
+	{
+		UE_LOG(LogEntity, Log, TEXT("%s: figure: %s: the procedural figure."), *GetName(),
+			bModelledOn ? *FString::Printf(TEXT("form %s has no entry in EntityForms"), LexToString(Requested)) : TEXT("modelled figures are off"));
+	}
+	FEntityFigureShape::Build(ProceduralCount, FigureSeed, FigureShape);
+	UE_LOG(LogEntity, Log, TEXT("%s: figure: procedural, %d points x %d copies."), *GetName(), FigureShape.Num(), FMath::Clamp(RefractionCount, 1, 8));
+}
+
+int32 AEntity::GetFigurePointCountNow() const
+{
+	return ShapeForm == EEntityForm::Procedural ? FigureShape.Num() * FMath::Clamp(RefractionCount, 1, 8) : FigureShape.Num();
+}
+
+float AEntity::GetFormYawOffset() const
+{
+	const FEntityFormTuning* Tuning = ShapeForm != EEntityForm::Procedural ? UTheLastShiftSettings::Get()->FindEntityForm(ShapeForm) : nullptr;
+	return Tuning ? FMath::Clamp(Tuning->YawOffsetDeg, -180.f, 180.f) : 0.f;
+}
+
+FTransform AEntity::GetFigureTransform() const
+{
+	return FTransform(FRotator(0.f, FigureYaw + GetFormYawOffset(), 0.f), GetFigureGround());
+}
+
+void AEntity::BuildFigurePoints(TArray<FVector>& OutPoints) const
+{
+	OutPoints.Reset();
+	const FVector Ground = GetFigureGround();
+	if (ShapeForm != EEntityForm::Procedural)
+	{
+		// The form's mesh as it stands: pivot on the ground under the figure, front (+X) along its direction of travel turned
+		// by the form's YawOffsetDeg, upright. Only the points turn: the figure's place and its travel stay as they are.
+		const FQuat Rotation = FRotator(0.f, FigureYaw + GetFormYawOffset(), 0.f).Quaternion();
+		OutPoints.Reserve(FigureShape.Num());
+		for (const FVector& Local : FigureShape)
+		{
+			OutPoints.Add(Ground + Rotation.RotateVector(Local));
+		}
+		return;
+	}
+
+	const FVector Head = FEntityFigureShape::GetHeadPivot();
+	const int32 Copies = FMath::Clamp(RefractionCount, 1, 8);
+	const float Step = FMath::Clamp(RefractionAngleStep, 0.f, 180.f);
+	const float Tilt = FMath::Clamp(RefractionTilt, 0.f, 60.f);
+	OutPoints.Reserve(FigureShape.Num() * Copies);
+	for (int32 Copy = 0; Copy < Copies; ++Copy)
+	{
+		// Lean around the head's local lateral axis, then turn around the vertical axis through the head.
+		const FQuat Rotation = FRotator(Tilt, FigureYaw + Copy * Step, 0.f).Quaternion();
+		for (const FVector& Local : FigureShape)
+		{
+			OutPoints.Add(Ground + Head + Rotation.RotateVector(Local - Head));
+		}
+	}
+}
+
+bool AEntity::MeasureFigureKept(const FLidarScanContext& Context, bool bExact, int32& OutKept, int32& OutTraces, int32& OutPoints) const
+{
+	TArray<FVector> Figure;
+	BuildFigurePoints(Figure);
+	TArray<FLidarInjectedPoint> Points;
+	Points.Reserve(Figure.Num());
+	for (const FVector& Point : Figure)
+	{
+		Points.Emplace(Point);
+	}
+	OutPoints = Points.Num();
+	const int32 Needed = FMath::FloorToInt32(EntityTuning::SightingShare(ClearSightingShare) * OutPoints);
+	return KeepsMoreThan(Context, Points, 0, OutPoints, Needed, bExact, OutKept, OutTraces);
+}
+
+bool AEntity::PlaceFigure(const FVector& Location, bool bHold)
+{
+	if (!bManifested)
+	{
+		UE_LOG(LogEntity, Warning, TEXT("%s: PlaceFigure needs the figure manifested (a Stop with the entity awake)."), *GetName());
+		return false;
+	}
+	FVector At = Location;
+	if (const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
+	{
+		FNavLocation OnNav;
+		if (NavSys->ProjectPointToNavigation(Location, OnNav, FVector(100.f, 100.f, 300.f)))
+		{
+			At = OnNav.Location;
+		}
+	}
+	FigureLocation = At;
+	PathPoints.Reset();
+	PathPoints.Add(At);
+	RefreshPath();
+	FVector Player = At;
+	GetPlayerNavLocation(Player);
+	const FVector Ahead = PathPoints.Num() >= 2 ? PathPoints[1] - PathPoints[0] : Player - At;
+	if (!FVector(Ahead.X, Ahead.Y, 0.f).IsNearlyZero())
+	{
+		FigureYaw = Ahead.Rotation().Yaw;
+	}
+	SetActorLocation(FigureLocation);
+	CachedPathDistanceFrame = MAX_uint64;
+	bHoldFigure = bHold;
+	UE_LOG(LogEntity, Log, TEXT("%s: figure placed at %s (asked %s), yaw %.1f, path distance %.1f cm%s."), *GetName(), *FigureLocation.ToString(), *Location.ToString(),
+		FigureYaw, GetPathDistanceToPlayer(), bHold ? TEXT(", held still for the rest of the Stop") : TEXT(""));
+	return true;
 }
 
 bool AEntity::IsFound() const

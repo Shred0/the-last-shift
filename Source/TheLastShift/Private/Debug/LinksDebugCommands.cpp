@@ -10,6 +10,7 @@
 // overlap and steps scenarios of tls.Links.DistanceCheck. Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
 #include "Area/AreaGenerator.h"
 #include "Area/AreaInfo.h"
 #include "Camera/CameraComponent.h"
@@ -116,6 +117,7 @@ namespace LinksDebug
 			GRun.Cleanup();
 			GRun.Cleanup = nullptr;
 		}
+		EntityFormTest::Restore(*GRun.Name);
 		GRun.bRunning = false;
 		UE_LOG(LogTheLastShift, Log, TEXT("%s summary (%s): %d checks passed, %d failed%s."), *GRun.Name,
 			GRun.Failed == 0 && GRun.Next >= GRun.Steps.Num() ? TEXT("PASS") : TEXT("FAIL"), GRun.Passed, GRun.Failed, Why);
@@ -2960,6 +2962,11 @@ namespace LinksDebug
 	static void StartDistanceCheck(const FString& Scenario, bool bOldLocalExposure, bool bQuit, const FString& Tag)
 	{
 		StartRun(TEXT("LinksDistanceCheck"), bQuit);
+		if (Scenario.Equals(TEXT("injected"), ESearchCase::IgnoreCase))
+		{
+			// Brief 29: the entity's figure in area 1's form for the run (put back in Finish).
+			EntityFormTest::ForceAreaOneForm(TEXT("LinksDistanceCheck"));
+		}
 		GShotFolder = TEXT("Brief13b");
 		GShotTag = Tag;
 		GRun.Cleanup = [bOldLocalExposure]()

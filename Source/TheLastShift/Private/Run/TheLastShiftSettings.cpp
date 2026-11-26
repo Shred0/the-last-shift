@@ -171,7 +171,27 @@ bool UTheLastShiftSettings::GetActTuning(int32 Act, FActTuning& OutTuning) const
 	}
 	OutTuning.JumpHomeSeconds = FMath::Clamp(Tuning->JumpHomeSeconds, 0.0, 1.0e12);
 	OutTuning.JumpBatteryDrop = FMath::Clamp(Tuning->JumpBatteryDrop, 0.0, 1.0);
+	OutTuning.EntityForm = GetEntityFormOfAct(Act);
 	return true;
+}
+
+EEntityForm UTheLastShiftSettings::GetEntityFormOfAct(int32 Act) const
+{
+	// A map outside AreaMaps, and an act with no entry, take act 1's form: the one owner stays ActTuning's first entry.
+	if (ActTuning.IsValidIndex(Act - 1))
+	{
+		return ActTuning[Act - 1].EntityForm;
+	}
+	return ActTuning.Num() > 0 ? ActTuning[0].EntityForm : EEntityForm::Procedural;
+}
+
+const FEntityFormTuning* UTheLastShiftSettings::FindEntityForm(EEntityForm Form) const
+{
+	if (Form == EEntityForm::Procedural)
+	{
+		return nullptr;
+	}
+	return EntityForms.Forms.FindByPredicate([Form](const FEntityFormTuning& Entry) { return Entry.Form == Form; });
 }
 
 UDataTable* UTheLastShiftSettings::LoadAIMessagesTable() const

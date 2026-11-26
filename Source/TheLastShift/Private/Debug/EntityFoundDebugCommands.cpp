@@ -20,6 +20,7 @@
 // the test's fixture rows. Shots go to Saved/Screenshots/Brief20. Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
 #include "Area/AreaGenerator.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -133,6 +134,7 @@ namespace EntityFoundDebug
 		}
 		GRun.PerTick = nullptr;
 		GRun.bRunning = false;
+		EntityFormTest::Restore(*GRun.Name);
 		UE_LOG(LogTheLastShift, Log, TEXT("%s summary (%s): %d checks passed, %d failed%s."), *GRun.Name,
 			GRun.Failed == 0 && GRun.Next >= GRun.Steps.Num() ? TEXT("PASS") : TEXT("FAIL"), GRun.Passed, GRun.Failed, Why);
 		if (GRun.bQuit)
@@ -203,6 +205,12 @@ namespace EntityFoundDebug
 		{
 			FTSTicker::RemoveTicker(GRun.Ticker);
 		}
+		if (GRun.bRunning)
+		{
+			EntityFormTest::Restore(*GRun.Name);
+		}
+		// Brief 29: every test of this file runs with area 1's form (put back in Finish).
+		EntityFormTest::ForceAreaOneForm(*Name);
 		GRun = FRun();
 		GRun.Name = Name;
 		GRun.bQuit = bQuit;

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Entity/EntityForm.h"
 #include "GameFramework/Actor.h"
 #include "LidarPointSource.h"
 #include "Time/TimeState.h"
@@ -10,6 +11,7 @@
 
 class APawn;
 class UScanDirectorComponent;
+class UStaticMesh;
 class UTimeStateSubsystem;
 
 THELASTSHIFT_API DECLARE_LOG_CATEGORY_EXTERN(LogEntity, Log, All);
@@ -128,10 +130,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEntityPathRefreshed, int32, Beat
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityContact);
 
 /**
- * The thing that closes in while time is stopped. No mesh: it exists only as points injected into lidar scans
- * (ILidarPointSource, registered through the player's scan director), in two forms: the figure (a procedural humanoid
- * refracted in RefractionCount copies around the vertical axis through its head) and the trail (the stretch of its
- * navigation path ahead of it, jittered: the tell).
+ * The thing that closes in while time is stopped. Nothing rendered: it exists only as points injected into lidar scans
+ * (ILidarPointSource, registered through the player's scan director), in two forms: the figure and the trail (the stretch
+ * of its navigation path ahead of it, jittered: the tell). Brief 29: the figure is sampled from the act's form, a modelled
+ * mesh (UTheLastShiftSettings: ActTuning's EntityForm, EntityForms' mesh and point count), its pivot at the figure's feet
+ * and its front along the direction of travel, upright; the procedural humanoid refracted in RefractionCount copies around
+ * the vertical axis through its head stays as the fallback (modelled figures off, or the form's mesh missing). Only the
+ * look depends on the form.
  *
  * Dormant until UTimeStateSubsystem's cumulative stopped time reaches AwakenThresholdSeconds; the check runs on the
  * director's beats, so it always awakens (and first appears) on a beat. Once awake it appears on every Stop at a
@@ -275,9 +280,65 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Figure", meta = (ClampMin = "0.0", ClampMax = "60.0", Units = "deg"))
 	float RefractionTilt = 15.f;
 
-	/** Seed of the figure's point set. */
+	/** Seed of the figure's point set (the procedural figure's and a modelled form's sampling). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Figure")
 	int32 FigureSeed = 1977;
+
+	// --- Form (Brief 29) ---
+
+	/**
+	 * Resolves the figure's form now and builds its point set when it changed: the session's form (SetSessionForm) or the
+	 * act's (UTheLastShiftSettings::GetEntityFormOfAct), the procedural figure when modelled figures are off or the form's
+	 * mesh is missing or cannot be read. Runs at BeginPlay and before every scan; the points are computed once a form.
+	 */
+	void RefreshFigureShape();
+
+	/** The form the figure has (after the last RefreshFigureShape): Procedural when it fell back. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	EEntityForm GetForm() const { return ShapeForm; }
+
+	/** The form asked for (the session's or the act's), before any fallback. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	EEntityForm GetRequestedForm() const;
+
+	/** The mesh the figure is sampled from; null for the procedural figure. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	UStaticMesh* GetFormMesh() const { return ShapeMesh; }
+
+	/** Points of the figure in a scan: the form's count, or FigurePointCount x RefractionCount for the procedural figure. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	int32 GetFigurePointCountNow() const;
+
+	/** The figure's point set in its local space (one copy for the procedural figure). */
+	const TArray<FVector>& GetFigureShapePoints() const { return FigureShape; }
+
+	/**
+	 * Where a modelled form's mesh stands now: on the ground under the figure, turned to its direction of travel plus the
+	 * form's YawOffsetDeg, upright.
+	 */
+	FTransform GetFigureTransform() const;
+
+	/** The form's YawOffsetDeg (EntityForms in UTheLastShiftSettings), clamped; 0 for the procedural figure. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	float GetFormYawOffset() const;
+
+	/** Yaw of the figure's direction of travel. */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	float GetFigureYaw() const { return FigureYaw; }
+
+	/** The figure's points in world space now, as the next scan gathers them. */
+	void BuildFigurePoints(TArray<FVector>& OutPoints) const;
+
+	/**
+	 * Tests and tools: the figure's points the lidar keeps for Context, by the found check's own rule (inside the coverage,
+	 * not hidden by geometry by more than OcclusionTolerance), counted on the figure as it stands now. bExact counts them
+	 * all; otherwise it stops as the found check does, once more than ClearSightingShare is certain either way.
+	 */
+	bool MeasureFigureKept(const FLidarScanContext& Context, bool bExact, int32& OutKept, int32& OutTraces, int32& OutPoints) const;
+
+	/** The session's form for every entity (tls.Entity.Form, tests); unset = each act's own. */
+	static void SetSessionForm(TOptional<EEntityForm> Form);
+	static TOptional<EEntityForm> GetSessionForm();
 
 	// --- Found ---
 
@@ -426,6 +487,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Entity")
 	bool SpawnNow(float Distance = 0.f);
 
+	/**
+	 * Tools and tests (tls.Entity.Show, tls.EntityFormCheck): moves the manifested figure to the navmesh point nearest
+	 * Location, its path to the player found again and its front turned along it. With bHold it then stands still for the
+	 * rest of the Stop (its contact check still runs); the next Stop spawns and moves as always.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Entity")
+	bool PlaceFigure(const FVector& Location, bool bHold = true);
+
 	// --- Events ---
 
 	/** Once, when the cumulative stopped time first reaches the threshold. */
@@ -553,10 +622,24 @@ private:
 	bool bHasPreviousSpawn = false;
 	FVector PreviousSpawnLocation = FVector::ZeroVector;
 
-	/** Figure point set and the tunables it was built from. */
+	/** Figure point set and what it was built from (form, mesh, count, seed). */
 	TArray<FVector> FigureShape;
 	int32 FigureShapeCount = -1;
+	int32 FigureShapeProceduralCount = -1;
 	int32 FigureShapeSeed = 0;
+	EEntityForm ShapeForm = EEntityForm::Procedural;
+	EEntityForm ShapeRequestedForm = EEntityForm::Procedural;
+	bool bShapeModelledOn = false;
+	FSoftObjectPath ShapeMeshPath;
+	bool bShapeBuilt = false;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMesh> ShapeMesh;
+
+	/** PlaceFigure(bHold): the figure stands still until the Stop ends. */
+	bool bHoldFigure = false;
+
+	static TOptional<EEntityForm> SessionForm;
 
 	int32 LastGatheredFigurePoints = 0;
 	int32 LastGatheredTrailPoints = 0;

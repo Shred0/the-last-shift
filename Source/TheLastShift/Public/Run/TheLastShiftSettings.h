@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Area/AreaTypes.h"
 #include "Engine/DeveloperSettings.h"
+#include "Entity/EntityForm.h"
 #include "LidarScanComponent.h"
 #include "Narrative/NarrativeRows.h"
 #include "TextChannel/TextDegradation.h"
@@ -17,7 +18,10 @@ class USoundBase;
 class UStaticMesh;
 class UWorld;
 
-/** Per-act size of a full time jump (a contact with response Jump or RewindAndJump). A graze is GrazeJumpFraction of it. */
+/**
+ * Per-act size of a full time jump (a contact with response Jump or RewindAndJump; a graze is GrazeJumpFraction of it), and
+ * the entity's form in the act (Brief 29).
+ */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FActTuning
 {
@@ -30,6 +34,60 @@ struct THELASTSHIFT_API FActTuning
 	/** Home battery fraction lost by a full jump. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	double JumpBatteryDrop = 0.0;
+
+	/**
+	 * Brief 29: the form the entity's figure takes in this act (its mesh and point count: EntityForms). The one owner of the
+	 * act's form; a map outside AreaMaps (act 0) takes act 1's.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act")
+	EEntityForm EntityForm = EEntityForm::Procedural;
+};
+
+/** Brief 29: one modelled form of the entity's figure: the mesh its points are sampled from and how many points it has. */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FEntityFormTuning
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")
+	EEntityForm Form = EEntityForm::Procedural;
+
+	/**
+	 * The surface the figure's points are sampled from (pivot on the ground, front +X, Z up), never placed in a level and
+	 * never rendered: it needs no surface family. Its CPU copy must be kept (bAllowCPUAccess) so that a package can read it.
+	 * None, or a mesh that cannot be read: the procedural figure.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity", meta = (AllowedClasses = "/Script/Engine.StaticMesh"))
+	TSoftObjectPtr<UStaticMesh> Mesh;
+
+	/**
+	 * Points of the figure, spread evenly by area over the mesh's surface. In every area the figure, the trail and the
+	 * area's residues together stay under the lidar's cap on injected points in a scan (4096).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity", meta = (ClampMin = "10", ClampMax = "4000"))
+	int32 PointCount = 1000;
+
+	/**
+	 * Added to the mesh's yaw at the figure's place: only the sampled points turn, about the vertical through the pivot.
+	 * The figure's place, its travel and the distances of ContactRadius and GrazeRadius are measured as without it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity", meta = (ClampMin = "-180.0", ClampMax = "180.0", Units = "deg"))
+	float YawOffsetDeg = 0.f;
+};
+
+/** Brief 29: the modelled forms of the entity's figure. The one owner of the forms' meshes and point counts. */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FEntityForms
+{
+	GENERATED_BODY()
+
+	/** Off: every act shows the procedural figure (FEntityFigureShape), with its own point count. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")
+	bool bModelledFigure = true;
+
+	/** One entry for each modelled form (Procedural has no entry). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")
+	TArray<FEntityFormTuning> Forms;
 };
 
 /**
@@ -779,6 +837,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Test")
 	FActTuning TestActTuning;
 
+	/** Brief 29: the modelled forms of the entity's figure (each act picks its own in ActTuning). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Entity")
+	FEntityForms EntityForms;
+
 	/** A graze (a voluntary Resume with the figure within the entity's GrazeRadius) jumps by this fraction of the act's values. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Home", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float GrazeJumpFraction = 0.25f;
@@ -1105,6 +1167,12 @@ public:
 
 	/** Jump tuning of Act (1-4), or the test tuning for 0, with every value clamped; false when the act has none. */
 	bool GetActTuning(int32 Act, FActTuning& OutTuning) const;
+
+	/** The entity's form in Act (ActTuning's EntityForm); act 0 (a map outside AreaMaps) and an act with no entry take act 1's. */
+	EEntityForm GetEntityFormOfAct(int32 Act) const;
+
+	/** The entry of a modelled form in EntityForms, or null (Procedural, or a form with no entry). */
+	const FEntityFormTuning* FindEntityForm(EEntityForm Form) const;
 
 	/** GrazeJumpFraction, clamped to [0, 1]. */
 	float GetGrazeJumpFraction() const { return FMath::Clamp(GrazeJumpFraction, 0.f, 1.f); }

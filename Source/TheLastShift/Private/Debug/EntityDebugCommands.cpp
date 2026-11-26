@@ -13,6 +13,7 @@
 #include "Debug/EntityTestListener.h"
 #include "Debug/LidarTestSource.h"
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
@@ -422,6 +423,7 @@ namespace EntityDebug
 		if (!TimeState || !Entity || !L)
 		{
 			GEntityTest.bRunning = false;
+			EntityFormTest::Restore(TEXT("EntityTest"));
 			return;
 		}
 		if (!TimeState->IsStopped())
@@ -482,6 +484,7 @@ namespace EntityDebug
 		AEntity* Entity = GEntityTest.Entity.Get();
 		UTlsEntityTestListener* L = GEntityTest.Listener.Get();
 		GEntityTest.bRunning = false;
+		EntityFormTest::Restore(TEXT("EntityTest"));
 		if (!World || !Director || !Entity || !L)
 		{
 			UE_LOG(LogTheLastShift, Warning, TEXT("EntityTest aborted: world, director or entity gone."));
@@ -902,6 +905,7 @@ namespace EntityDebug
 
 	static void LatestScanTestEnd(const TCHAR* Why)
 	{
+		EntityFormTest::Restore(TEXT("LatestScanTest"));
 		UWorld* World = GLatestScanTest.World.Get();
 		if (World)
 		{
@@ -1446,6 +1450,9 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsEntityTestCommand(
 			GEntityTest.Duration, TimeState->GetCumulativeStoppedSeconds(), Entity->GetState() == EEntityState::Awake ? TEXT("Awake") : TEXT("Dormant"),
 			Entity->AwakenThresholdSeconds, Entity->GetSpawnDistanceForNextStop(), Entity->Speed, Entity->ContactRadius,
 			LexToString(Entity->ContactResponse), LexToString(GetExitReasonForContact(Entity->ContactResponse)), Director->BeatInterval);
+		// Brief 29: area 1's form for the run (its 1000 points are the procedural figure's).
+		EntityFormTest::ForceAreaOneForm(TEXT("EntityTest"));
+		Entity->RefreshFigureShape();
 		TimeState->Stop();
 
 		FTimerManager& Timers = World->GetTimerManager();
@@ -1767,6 +1774,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLatestScanTestCommand(
 			}
 		}
 		GLatestScanTest.WaitStart = World->GetRealTimeSeconds();
+		EntityFormTest::ForceAreaOneForm(TEXT("LatestScanTest"));
 		GLatestScanTest.bRunning = true;
 		if (!Entity->IsManifested())
 		{
