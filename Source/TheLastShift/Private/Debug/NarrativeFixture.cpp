@@ -273,6 +273,23 @@ namespace NarrativeFixture
 			bPrologue ? TEXT("with a") : TEXT("no"));
 	}
 
+	void SetEndingRows(bool bEnding)
+	{
+		if (!G.bInstalled)
+		{
+			return;
+		}
+		UDataTable* Table = BuildScenes(true);
+		if (!bEnding)
+		{
+			Table->RemoveRow(TEXT("Ending_1"));
+		}
+		G.Scenes.Reset(Table);
+		GetMutableDefault<UTheLastShiftSettings>()->ScenesTable = TSoftObjectPtr<UDataTable>(G.Scenes.Get());
+		UE_LOG(LogTheLastShift, Log, TEXT("Narrative fixture: scenes now %s (%d rows, %s Ending row)."), *GetNameSafe(G.Scenes.Get()), G.Scenes->GetRowMap().Num(),
+			bEnding ? TEXT("with the") : TEXT("no"));
+	}
+
 	static void SetChannels(UWorld* World, UDataTable* Table, UDataTable* TwinTable, UDataTable* EngineerTable)
 	{
 		if (!World)

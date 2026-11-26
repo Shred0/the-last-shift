@@ -36,6 +36,11 @@ int32 UTheLastShiftSettings::GetPrologueStageOfMap(const FString& PackageName) c
 	return 0;
 }
 
+bool UTheLastShiftSettings::IsChamberMap(const FString& PackageName) const
+{
+	return !ChamberMap.IsNull() && ChamberMap.ToSoftObjectPath().GetLongPackageName() == UWorld::RemovePIEPrefix(PackageName);
+}
+
 bool UTheLastShiftSettings::IsHomeLookMap(const FString& PackageName) const
 {
 	const FString Clean = UWorld::RemovePIEPrefix(PackageName);

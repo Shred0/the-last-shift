@@ -104,8 +104,13 @@ bool URunSubsystem::TravelToNextArea()
 	const int32 Stage = GetPrologueStage();
 	if (Stage == 1 && IsReturnStateOf(GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr))
 	{
-		// Brief 31A: the corridor of the way home opens the ending, exactly as the last area's exit did before.
-		UE_LOG(LogRun, Log, TEXT("The way home's corridor: the ending."));
+		// The corridor of the way home: the battery's chamber when it is on, else the ending, as the last area's exit did before.
+		if (Settings->IsChoiceChamberOn())
+		{
+			UE_LOG(LogRun, Log, TEXT("The way home's corridor: the battery's chamber."));
+			return TravelToChamber();
+		}
+		UE_LOG(LogRun, Log, TEXT("The way home's corridor: the ending (the chamber is off)."));
 		return TravelToEnding();
 	}
 	if (Stage == 1)
@@ -627,6 +632,51 @@ void URunSubsystem::NotifyReturnEntered(UWorld* World)
 		Snapshot.bEntityFound ? TEXT("found") : TEXT("not found"), Snapshot.bFirstContact ? TEXT("happened") : TEXT("not happened"), Snapshots.Num());
 	WriteSave();
 	OnSnapshotsChanged.Broadcast();
+}
+
+// --- The battery's chamber ---
+
+bool URunSubsystem::IsChamberOf(const UWorld* World)
+{
+	return World && UTheLastShiftSettings::Get()->IsChamberMap(World->GetOutermost()->GetName());
+}
+
+bool URunSubsystem::TravelToChamber()
+{
+	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+	if (Settings->ChamberMap.IsNull())
+	{
+		UE_LOG(LogRun, Error, TEXT("TravelToChamber: no ChamberMap in the settings."));
+		return false;
+	}
+	if (!CanTravelNow(TEXT("The battery's chamber")))
+	{
+		return false;
+	}
+	const UGameInstance* GameInstance = GetGameInstance();
+	FText Label;
+	float ReadingSeconds = 0.f;
+	UHomeAIComponent::BuildPassageTravelLabel(GameInstance ? GameInstance->GetWorld() : nullptr, Label, ReadingSeconds);
+	// The run stays on its way home: the chamber is part of the return, with no entry of its own.
+	return TravelToLevel(Settings->ChamberMap, false, Label, ReadingSeconds, TEXT("home -> the battery's chamber"));
+}
+
+bool URunSubsystem::TravelToChosenEnding(FName Ending)
+{
+	if (Ending.IsNone() || !CanTravelNow(*FString::Printf(TEXT("The ending %s"), *Ending.ToString())))
+	{
+		return false;
+	}
+	if (!TravelTo(TSoftObjectPtr<UWorld>(), true, FString::Printf(TEXT("the chamber: the ending %s, in the main menu"), *Ending.ToString())))
+	{
+		return false;
+	}
+	if (URunSceneSubsystem* Scenes = GetGameInstance()->GetSubsystem<URunSceneSubsystem>())
+	{
+		Scenes->SetEndingPending(true);
+		Scenes->SetChosenEnding(Ending);
+	}
+	return true;
 }
 
 bool URunSubsystem::RestartFromReturn()

@@ -71,6 +71,9 @@ namespace NarrativeFixture
 	/** Replaces the installed scenes fixture with one with or without its Prologue rows. No-op when not installed. */
 	void SetPrologueRows(bool bPrologue);
 
+	/** Replaces the installed scenes fixture with one (with its Prologue rows) with or without its Ending_1 row. No-op when not installed. */
+	void SetEndingRows(bool bEnding);
+
 	/** Replaces the installed logs fixture with one of LogCount rows (the settings point at it). No-op when not installed. */
 	void SetLogCount(int32 LogCount);
 

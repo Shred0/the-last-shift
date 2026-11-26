@@ -288,6 +288,26 @@ public:
 	/** Called when the home map begins in its return state: takes the return's snapshot and saves. */
 	void NotifyReturnEntered(UWorld* World);
 
+	/** World is the battery's chamber (UTheLastShiftSettings::ChamberMap). */
+	static bool IsChamberOf(const UWorld* World);
+
+	/**
+	 * The way home's corridor left with the chamber on (UTheLastShiftSettings::IsChoiceChamberOn): travels to the battery's
+	 * chamber behind the travel screen, its label the first Passage row of the epilogue table (no label when it is dropped),
+	 * its marker crossing as on the way into an area. The run stays on its way home; the chamber takes no snapshot and no
+	 * entry: a run left there resumes from the return's entry. Refused while time is Stopped or while a transition runs.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Run|Return")
+	bool TravelToChamber();
+
+	/**
+	 * An ending chosen in the chamber: travels to the main menu, which opens the ending's scene on that ending's text alone
+	 * (Ending: Inject or Open; no last message, no list). The save is not touched. Refused while time is Stopped or while a
+	 * transition runs.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Run|Return")
+	bool TravelToChosenEnding(FName Ending);
+
 	/** The return has been reached and the way home is on: the return's entry is offered (after act 4) and restored by Continue. */
 	UFUNCTION(BlueprintPure, Category = "Run|Return")
 	bool HasReturnEntry() const;

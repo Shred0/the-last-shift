@@ -127,7 +127,8 @@ void URunMainMenuWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 	URunSceneSubsystem* Scenes = URunSceneSubsystem::Get(this);
 	if (Scenes && Scenes->IsEndingPending() && Scenes->ConsumePendingEnding())
 	{
-		Scenes->OpenEnding(this);
+		// The list, or the ending chosen in the battery's chamber alone.
+		Scenes->OpenPendingEnding(this);
 	}
 }
 

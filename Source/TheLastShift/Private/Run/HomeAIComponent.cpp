@@ -14,6 +14,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Narrative/NarrativeRows.h"
 #include "Prologue/PrologueLineTrigger.h"
+#include "Run/RunSceneSubsystem.h"
 #include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "TextChannel/TextChannelComponent.h"
@@ -385,6 +386,52 @@ int32 UHomeAIComponent::SayPrologueGroup(FName Group)
 	return Queued;
 }
 
+TArray<FName> UHomeAIComponent::GetChamberRows()
+{
+	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+	TArray<FName> Rows = FindPrologueRows(Settings->LoadGroupTable(EpilogueGroups::Chamber), EpilogueGroups::Chamber);
+	const UDataTable* Scenes = Settings->LoadScenesTable();
+	for (const FName& RowName : URunSceneSubsystem::FindSceneRows(Scenes, URunSceneSubsystem::EndingScene()))
+	{
+		const FSceneRow* Row = Scenes->FindRow<FSceneRow>(RowName, TEXT("Chamber"), false);
+		if (Row && Row->Voice == ESceneVoice::HomeAI)
+		{
+			Rows.Add(RowName);
+		}
+	}
+	return Rows;
+}
+
+int32 UHomeAIComponent::SayChamberLines()
+{
+	UTextChannelComponent* Text = Channel.Get();
+	if (!Text || bChamberLinesDone)
+	{
+		return 0;
+	}
+	bChamberLinesDone = true;
+	// The Chamber rows, then the home AI's last message, said on the channel like its other rows.
+	int32 Queued = SayPrologueGroup(EpilogueGroups::Chamber);
+	const UDataTable* Scenes = UTheLastShiftSettings::Get()->LoadScenesTable();
+	const FTextChannelContext Context = MakeContext();
+	int32 Last = 0;
+	for (const FName& RowName : URunSceneSubsystem::FindSceneRows(Scenes, URunSceneSubsystem::EndingScene()))
+	{
+		const FSceneRow* Row = Scenes->FindRow<FSceneRow>(RowName, TEXT("Chamber"), false);
+		if (!Row || Row->Voice != ESceneVoice::HomeAI)
+		{
+			UE_LOG(LogTextChannel, Log, TEXT("%s: the Ending scene's row %s is not the home AI's: not said in the chamber."), *GetName(), *RowName.ToString());
+			continue;
+		}
+		if (Text->PushText(Row->Text.ToString(), Context, RowName))
+		{
+			++Last;
+		}
+	}
+	UE_LOG(LogTextChannel, Log, TEXT("%s: the chamber: %d lines queued, %d of them the last message (%s)."), *GetName(), Queued + Last, Last, *GetNameSafe(Scenes));
+	return Queued + Last;
+}
+
 void UHomeAIComponent::HandlePrologueLine(UWorld* World, FName Group)
 {
 	if (World == GetWorld())
@@ -481,4 +528,22 @@ bool UHomeAIComponent::BuildReturnTravelLabel(const UObject* WorldContext, FText
 	FAIMessageRow Message;
 	Message.Text = Row->Text;
 	return HomeAIImpl::ComposeTravelLine(WorldContext, Message, Rows[0], TEXT("the flight back"), OutLabel, OutReadingSeconds);
+}
+
+bool UHomeAIComponent::BuildPassageTravelLabel(const UObject* WorldContext, FText& OutLabel, float& OutReadingSeconds)
+{
+	OutLabel = FText::GetEmpty();
+	OutReadingSeconds = 0.f;
+	const UDataTable* Table = UTheLastShiftSettings::Get()->LoadEpilogueTable();
+	const TArray<FName> Rows = FindPrologueRows(Table, EpilogueGroups::Passage);
+	const FPrologueRow* Row = Rows.Num() > 0 ? Table->FindRow<FPrologueRow>(Rows[0], TEXT("TravelLabel"), false) : nullptr;
+	if (!Row)
+	{
+		UE_LOG(LogTextChannel, Log, TEXT("Travel label for the passage to the chamber: no Passage row in %s."), *GetNameSafe(Table));
+		return false;
+	}
+	// Degraded like any home AI message: from its full text, with the channel's tokens.
+	FAIMessageRow Message;
+	Message.Text = Row->Text;
+	return HomeAIImpl::ComposeTravelLine(WorldContext, Message, Rows[0], TEXT("the passage to the chamber"), OutLabel, OutReadingSeconds);
 }

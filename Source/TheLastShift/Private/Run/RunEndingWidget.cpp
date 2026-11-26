@@ -23,7 +23,7 @@ void URunEndingWidget::Configure()
 	TArray<FStdChoiceEntry> NewEntries;
 	EntryEndings.Reset();
 	FStdChoiceEntry Inject;
-	Inject.Label = LOCTEXT("EndingInject", "Inject the harvest");
+	Inject.Label = URunSceneSubsystem::GetEndingLabel(TEXT("Inject"));
 	NewEntries.Add(Inject);
 	EntryEndings.Add(TEXT("Inject"));
 	// Offered only to an engineer who has learnt what the entity is; nothing tells the others it exists.
@@ -31,7 +31,7 @@ void URunEndingWidget::Configure()
 	if (bOpen)
 	{
 		FStdChoiceEntry Open;
-		Open.Label = LOCTEXT("EndingOpen", "Open the structure");
+		Open.Label = URunSceneSubsystem::GetEndingLabel(TEXT("Open"));
 		NewEntries.Add(Open);
 		EntryEndings.Add(TEXT("Open"));
 	}

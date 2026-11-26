@@ -186,6 +186,51 @@ URunEndingWidget* URunSceneSubsystem::OpenEnding(UStdScreenWidget* Parent)
 	return Screen;
 }
 
+UStdScreenWidget* URunSceneSubsystem::OpenPendingEnding(UStdScreenWidget* Parent)
+{
+	const FName Chosen = ChosenEnding;
+	ChosenEnding = NAME_None;
+	if (Chosen.IsNone())
+	{
+		return OpenEnding(Parent);
+	}
+	// Chosen in the battery's chamber: the ending's scene on that ending's text alone.
+	const TArray<FRunSceneLine> Lines = BuildEndingText(Chosen);
+	URunTextSceneWidget* Screen = Parent && !Lines.IsEmpty() ? Cast<URunTextSceneWidget>(Parent->OpenChildScreen(URunTextSceneWidget::StaticClass())) : nullptr;
+	if (!Screen)
+	{
+		UE_LOG(LogScenes, Warning, TEXT("Ending %s chosen in the chamber: no text (%d lines); the main menu shows."), *Chosen.ToString(), Lines.Num());
+		if (URunSubsystem* Run = GetGameInstance() ? GetGameInstance()->GetSubsystem<URunSubsystem>() : nullptr)
+		{
+			Run->SetReturningHome(false, TEXT("the chosen ending has no text"));
+		}
+		return nullptr;
+	}
+	UE_LOG(LogScenes, Log, TEXT("Ending %s chosen in the chamber: its text alone."), *Chosen.ToString());
+	Screen->Play(ERunSceneKind::EndingText, Chosen, Lines);
+	TrackScreen(Screen, EndingScene());
+	return Screen;
+}
+
+FText URunSceneSubsystem::GetEndingLabel(FName Ending)
+{
+	if (Ending == TEXT("Inject"))
+	{
+		return NSLOCTEXT("TheLastShift", "EndingInject", "Inject the harvest");
+	}
+	if (Ending == TEXT("Open"))
+	{
+		return NSLOCTEXT("TheLastShift", "EndingOpen", "Open the structure");
+	}
+	return FText::GetEmpty();
+}
+
+void URunSceneSubsystem::SetChosenEnding(FName Ending)
+{
+	ChosenEnding = Ending;
+	UE_LOG(LogScenes, Log, TEXT("Ending chosen in the chamber: %s."), Ending.IsNone() ? TEXT("none") : *Ending.ToString());
+}
+
 void URunSceneSubsystem::TrackScreen(UStdScreenWidget* Screen, FName Scene)
 {
 	for (auto It = OpenScreens.CreateIterator(); It; ++It)
@@ -255,6 +300,10 @@ void URunSceneSubsystem::SetEndingPending(bool bPending)
 		UE_LOG(LogScenes, Log, TEXT("Ending %s."), bPending ? TEXT("pending: the main menu opens it on arrival") : TEXT("no longer pending"));
 	}
 	bEndingPending = bPending;
+	if (!bPending)
+	{
+		ChosenEnding = NAME_None;
+	}
 }
 
 bool URunSceneSubsystem::ConsumePendingEnding()

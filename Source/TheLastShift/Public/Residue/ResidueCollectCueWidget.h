@@ -6,6 +6,7 @@
 #include "Blueprint/UserWidget.h"
 #include "ResidueCollectCueWidget.generated.h"
 
+class AChoiceTerminal;
 class AResidue;
 class UStdRadialProgress;
 
@@ -25,6 +26,21 @@ public:
 	/** Residue whose hold the ring follows. Null hides it. */
 	UFUNCTION(BlueprintCallable, Category = "Collect Cue")
 	void SetResidue(AResidue* InResidue);
+
+	/**
+	 * A place of the battery's chamber whose hold the ring follows instead (AChoiceTerminal::OnHoldProgress), the same
+	 * ring in the same colour as a residue's collection. Null hides it.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Collect Cue")
+	void SetChoice(AChoiceTerminal* InChoice);
+
+	/** The ring is shown now (a hold in progress). */
+	UFUNCTION(BlueprintPure, Category = "Collect Cue")
+	bool IsRingShown() const;
+
+	/** The ring's fill now (0..1). */
+	UFUNCTION(BlueprintPure, Category = "Collect Cue")
+	float GetRingProgress() const;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collect Cue", meta = (ClampMin = "8.0", ClampMax = "64.0"))
 	float RingRadius = 18.f;
@@ -55,6 +71,12 @@ private:
 	void ApplyStyle();
 	void Show(bool bShow);
 	void UnbindResidue();
+	void UnbindChoice();
+
+	UFUNCTION()
+	void HandleChoiceMade(AChoiceTerminal* InChoice);
 
 	TWeakObjectPtr<AResidue> Residue;
+	TWeakObjectPtr<AChoiceTerminal> Choice;
+	float Progress = 0.f;
 };

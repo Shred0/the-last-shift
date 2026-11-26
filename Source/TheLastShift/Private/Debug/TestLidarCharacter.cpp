@@ -11,6 +11,7 @@
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "Energy/PowerTerminal.h"
+#include "Epilogue/ChoiceTerminal.h"
 #include "LidarScanComponent.h"
 #include "Residue/Residue.h"
 #include "Residue/ResidueCollectCueWidget.h"
@@ -65,7 +66,9 @@ void ATestLidarCharacter::BeginPlay()
 	// it works and starts as bFlashlightOnAtStart says.
 	ApplyFlashlightTuning();
 	bool bOnAtStart = bFlashlightOnAtStart;
-	bFlashlightAvailable = UTheLastShiftSettings::Get()->GetMapFlashlight(URunSubsystem::GetPrologueStageOf(GetWorld()), bOnAtStart);
+	// The battery's chamber is home's: what the pawn can do there is what it can do in the home map.
+	const int32 FlashlightStage = URunSubsystem::IsChamberOf(GetWorld()) ? 1 : URunSubsystem::GetPrologueStageOf(GetWorld());
+	bFlashlightAvailable = UTheLastShiftSettings::Get()->GetMapFlashlight(FlashlightStage, bOnAtStart);
 	Flashlight->SetVisibility(bFlashlightAvailable && bOnAtStart);
 	UE_LOG(LogTheLastShift, Log, TEXT("TestLidarCharacter: flashlight %s, %s."), bFlashlightAvailable ? TEXT("available") : TEXT("unavailable in this map"),
 		Flashlight->IsVisible() ? TEXT("on") : TEXT("off"));
@@ -310,7 +313,21 @@ void ATestLidarCharacter::OnInteractPressed()
 			return;
 		}
 	}
-	if (APowerTerminal* Terminal = APowerTerminal::FindNearestInRange(this))
+	APowerTerminal* Terminal = APowerTerminal::FindNearestInRange(this);
+	// A place of the battery's chamber is held, not pressed; when it offers nothing, nothing happens.
+	if (AChoiceTerminal* Choice = Cast<AChoiceTerminal>(Terminal))
+	{
+		if (Choice->BeginHold(this))
+		{
+			HeldChoice = Choice;
+			if (CollectCue)
+			{
+				CollectCue->SetChoice(Choice);
+			}
+		}
+		return;
+	}
+	if (Terminal)
 	{
 		Terminal->TryActivate(this);
 	}
@@ -328,9 +345,15 @@ void ATestLidarCharacter::OnInteractReleased()
 		Residue->EndCollect();
 	}
 	HeldResidue.Reset();
+	if (AChoiceTerminal* Choice = HeldChoice.Get())
+	{
+		Choice->EndHold();
+	}
+	HeldChoice.Reset();
 	if (CollectCue)
 	{
 		CollectCue->SetResidue(nullptr);
+		CollectCue->SetChoice(nullptr);
 	}
 }
 

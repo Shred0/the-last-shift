@@ -118,6 +118,24 @@ public:
 	/** Opens the ending (the choice, then the chosen text) as a child screen of Parent (the main menu). */
 	URunEndingWidget* OpenEnding(UStdScreenWidget* Parent);
 
+	/**
+	 * What the main menu opens for a pending ending: with an ending chosen in the battery's chamber (SetChosenEnding), that
+	 * ending's text alone (no last message, no list); else the ending's list (OpenEnding). Null when nothing was opened.
+	 */
+	UStdScreenWidget* OpenPendingEnding(UStdScreenWidget* Parent);
+
+	/**
+	 * The label of an ending (Inject: "Inject the harvest", Open: "Open the structure"; empty for any other): the one owner of
+	 * the two labels, read by the ending's list and by the chamber's two places.
+	 */
+	static FText GetEndingLabel(FName Ending);
+
+	/** The ending chosen in the chamber, opened alone by the main menu with the pending ending (None: the list). */
+	void SetChosenEnding(FName Ending);
+
+	UFUNCTION(BlueprintPure, Category = "Scenes")
+	FName GetChosenEnding() const { return ChosenEnding; }
+
 	/** The ending's text for row Ending (Inject, Open) as a one-line Engineer scene; empty when the row has no text. */
 	TArray<FRunSceneLine> BuildEndingText(FName Ending) const;
 
@@ -155,6 +173,9 @@ private:
 	void HandleSceneScreenClosed(UStdScreenWidget* Screen);
 
 	bool bEndingPending = false;
+
+	/** The ending chosen in the chamber, with the pending ending; cleared with it and once opened. */
+	FName ChosenEnding;
 
 	/** The screens OpenPrologue and OpenEnding opened, and their scene, until they close. */
 	TMap<TWeakObjectPtr<UStdScreenWidget>, FName> OpenScreens;

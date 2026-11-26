@@ -10,6 +10,7 @@
 class UCameraComponent;
 class UInputAction;
 class UInputMappingContext;
+class AChoiceTerminal;
 class AResidue;
 class ULidarScanComponent;
 class UResidueCollectCueWidget;
@@ -179,4 +180,7 @@ private:
 
 	/** Residue being held for, between Interact pressed and released. */
 	TWeakObjectPtr<AResidue> HeldResidue;
+
+	/** Place of the battery's chamber being held, between Interact pressed and released. */
+	TWeakObjectPtr<AChoiceTerminal> HeldChoice;
 };

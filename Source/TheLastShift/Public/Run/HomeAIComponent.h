@@ -94,6 +94,23 @@ public:
 	/** Brief 31A: the label of the flight back: the first Return row of the epilogue table, as BuildTravelLabel builds a line. */
 	static bool BuildReturnTravelLabel(const UObject* WorldContext, FText& OutLabel, float& OutReadingSeconds);
 
+	/** The label of the travel into the battery's chamber: the first Passage row of the epilogue table, as BuildTravelLabel builds a line. */
+	static bool BuildPassageTravelLabel(const UObject* WorldContext, FText& OutLabel, float& OutReadingSeconds);
+
+	/**
+	 * The rows said in the battery's chamber, in order: every Chamber row of the epilogue table, then the home AI's last
+	 * message, the HomeAI rows of the scenes table's Ending scene (Ending_1).
+	 */
+	static TArray<FName> GetChamberRows();
+
+	/**
+	 * Queues the chamber's lines, the first time it is asked in this map: the Chamber rows (SayPrologueGroup), then the
+	 * Ending scene's HomeAI rows, each said on the channel like a row of the home AI (degraded by the battery, dropped at
+	 * Silent, tokens written out; the engineer's lines before a row first). Returns how many rows were queued.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "HomeAI")
+	int32 SayChamberLines();
+
 	/** Rows of Group in a prologue table (FPrologueRow), in ascending Order (ties by row name). */
 	static TArray<FName> FindPrologueRows(const UDataTable* Table, FName Group);
 
@@ -149,6 +166,7 @@ private:
 	FDelegateHandle PrologueHandle;
 	TSet<FName> SaidPrologueGroups;
 	bool bAreaStartDone = false;
+	bool bChamberLinesDone = false;
 	bool bFirstEnergyDone = false;
 	bool bEntityFoundPending = false;
 	bool bFirstContactPending = false;

@@ -203,6 +203,7 @@ namespace ReturnDebug
 		double ConditionStartReal = -1.0;
 		bool bSavedReturn = true;
 		bool bSavedMaps = true;
+		bool bSavedChamber = true;
 
 		// Sampled every frame.
 		TArray<FLine> Lines;
@@ -252,6 +253,7 @@ namespace ReturnDebug
 		UTheLastShiftSettings* Mutable = GetMutableDefault<UTheLastShiftSettings>();
 		Mutable->bReturnHome = GRun.bSavedReturn;
 		Mutable->bPrologueMaps = GRun.bSavedMaps;
+		Mutable->bChoiceChamber = GRun.bSavedChamber;
 		NarrativeFixture::Restore(W());
 		if (URunSubsystem* R = Run())
 		{
@@ -1042,6 +1044,11 @@ namespace ReturnDebug
 		GRun.bSavedMaps = Settings()->bPrologueMaps;
 		GetMutableDefault<UTheLastShiftSettings>()->bReturnHome = true;
 		GetMutableDefault<UTheLastShiftSettings>()->bPrologueMaps = true;
+		// The battery's chamber off for this run: it checks the corridor's exit opening the ending's list, as with the way
+		// home alone (tls.ChamberCheck checks the chamber).
+		GRun.bSavedChamber = Settings()->bChoiceChamber;
+		GetMutableDefault<UTheLastShiftSettings>()->bChoiceChamber = false;
+		UE_LOG(LogTheLastShift, Log, TEXT("%s: the battery's chamber switched off for this run (bChoiceChamber was %d)."), Name(), GRun.bSavedChamber ? 1 : 0);
 		GRun.Steps = BuildTest();
 		GRun.bRunning = true;
 		UE_LOG(LogTheLastShift, Log, TEXT("%s: %d steps, in %s."), Name(), GRun.Steps.Num(), *MapName());

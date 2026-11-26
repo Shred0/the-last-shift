@@ -12,6 +12,7 @@
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/TextBlock.h"
 #include "Energy/EnergySubsystem.h"
+#include "Epilogue/ChoiceTerminal.h"
 #include "Energy/PowerTerminal.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
@@ -199,6 +200,19 @@ void UInteractPromptWidget::Refresh()
 	}
 	RefusalUntil = -1.0;
 
+	// A place of the battery's chamber: its ending's label while it offers the choice, nothing otherwise (no refusal).
+	if (const AChoiceTerminal* Choice = Cast<AChoiceTerminal>(Terminal))
+	{
+		if (Choice->OffersChoice() && !Choice->IsHolding())
+		{
+			ShowMode(EInteractPromptMode::Choice, FText::GetEmpty(), Choice->GetChoiceLabel());
+		}
+		else
+		{
+			ShowMode(EInteractPromptMode::Hidden, FText::GetEmpty(), FText::GetEmpty());
+		}
+		return;
+	}
 	if (Terminal && Terminal->OffersRead())
 	{
 		ShowMode(EInteractPromptMode::Read, FText::GetEmpty(), ReadLabel);
@@ -244,7 +258,8 @@ void UInteractPromptWidget::ShowMode(EInteractPromptMode NewMode, const FText& P
 	if (bModeChanged)
 	{
 		Mode = NewMode;
-		const bool bShowKey = NewMode == EInteractPromptMode::Collect || NewMode == EInteractPromptMode::Power || NewMode == EInteractPromptMode::Read;
+		const bool bShowKey = NewMode == EInteractPromptMode::Collect || NewMode == EInteractPromptMode::Power || NewMode == EInteractPromptMode::Read
+			|| NewMode == EInteractPromptMode::Choice;
 		if (KeyPrompt)
 		{
 			KeyPrompt->SetVisibility(bShowKey ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
@@ -263,8 +278,8 @@ void UInteractPromptWidget::ShowMode(EInteractPromptMode NewMode, const FText& P
 
 FKey UInteractPromptWidget::GetShownKey() const
 {
-	return KeyPrompt && (Mode == EInteractPromptMode::Collect || Mode == EInteractPromptMode::Power || Mode == EInteractPromptMode::Read)
-		? KeyPrompt->GetDisplayedKey() : FKey();
+	return KeyPrompt && (Mode == EInteractPromptMode::Collect || Mode == EInteractPromptMode::Power || Mode == EInteractPromptMode::Read
+		|| Mode == EInteractPromptMode::Choice) ? KeyPrompt->GetDisplayedKey() : FKey();
 }
 
 FString UInteractPromptWidget::GetShownText() const
@@ -278,7 +293,7 @@ FString UInteractPromptWidget::GetShownText() const
 	{
 		Parts.Add(ShownPrefix.ToString());
 	}
-	if (Mode == EInteractPromptMode::Collect || Mode == EInteractPromptMode::Power || Mode == EInteractPromptMode::Read)
+	if (Mode == EInteractPromptMode::Collect || Mode == EInteractPromptMode::Power || Mode == EInteractPromptMode::Read || Mode == EInteractPromptMode::Choice)
 	{
 		Parts.Add(FString::Printf(TEXT("[%s]"), KeyPrompt ? *KeyPrompt->GetKeyText().ToString() : TEXT("?")));
 	}
