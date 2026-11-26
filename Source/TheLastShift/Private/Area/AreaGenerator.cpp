@@ -2313,6 +2313,12 @@ namespace AreaGen
 		TArray<FTransform> FloorStrips;
 		FString Report;
 		AAreaGenerator::FDressPanelPick Squeezed, Stretched, FirstMouth;
+		/** Brief 28: the open segments' parts (a hall's own parts, a catwalk's floor boxes), for the backdrop's levels of walkways. */
+		struct FOpenPart { FBox2D Rect; int32 Segment = -1; bool bPlatform = false; };
+		TArray<FOpenPart> OpenParts;
+		/** Brief 28: every catwalk frame's lowest point, with its line along its part and its piece across it, for the pillars. */
+		struct FFrameTip { FVector Tip; int32 Line = 0; int32 Lines = 1; int32 Piece = 0; int32 Pieces = 1; bool bPlatform = false; bool bAlongX = true; };
+		TArray<FFrameTip> FrameTips;
 	};
 
 	/** The floor cell across a run's edge line from RunCell (the other side of the line). */
@@ -3156,7 +3162,8 @@ namespace AreaGen
 		// A web hall's frame across more than this many times SM_KitCatwalkFrame's span is made of several, end to end
 		// (the widest a Catwalk segment uses is its 6 m platforms, x1.88).
 		constexpr double FrameMaxFactor = 1.9;
-		auto FrameBox = [&](const FBox& Box, bool bHall)
+		const double FrameTipDepth = FMath::Max(0.0, static_cast<double>(G.DressFrameTipDepth));
+		auto FrameBox = [&](const FBox& Box, bool bHall, bool bPlatform)
 		{
 			const double SX = Box.Max.X - Box.Min.X;
 			const double SY = Box.Max.Y - Box.Min.Y;
@@ -3185,23 +3192,43 @@ namespace AreaGen
 					const FVector2D C = bAlongX ? FVector2D(S, Mid) : FVector2D(Mid, S);
 					(bHall ? HallFrameF : CatwalkFrameF).Add(Piece / FrameSpan, C);
 					Out.Frames.Add(FitPiece(C, -FT, bAlongX ? 0 : 1, 1.0, Piece, 1.0, FVector(1.0, FrameSpan, 1.0)));
+					// Brief 28: the frame's lowest point (its pivot is the deck's underside, its tip FrameTipDepth under it).
+					Out.FrameTips.Add({ FVector(C.X, C.Y, -FT - FrameTipDepth), K, N, P, Pieces, bPlatform, bAlongX });
 				}
 			}
 		};
-		for (int32 I = 0; I < Geo.FloorRects.Num() && FrameSpacing > 0.0; ++I)
+		// A catwalk's floor box is a platform when the platform at the end of one of its spurs lies in it.
+		auto HoldsSpurPlatform = [&Plan](const FBox& Box, int32 Segment)
+		{
+			for (const FSpot& Spot : Plan.SpurEnds)
+			{
+				if (Spot.Segment == Segment && Spot.Pos.X > Box.Min.X && Spot.Pos.X < Box.Max.X && Spot.Pos.Y > Box.Min.Y && Spot.Pos.Y < Box.Max.Y)
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+		for (int32 I = 0; I < Geo.FloorRects.Num(); ++I)
 		{
 			const FAreaFloorRect& Rect = Geo.FloorRects[I];
 			if (Out.FloorHidden[I] && Plan.Segs.IsValidIndex(Rect.Segment) && Plan.Segs[Rect.Segment].Type == EAreaSegmentType::Catwalk)
 			{
-				FrameBox(Rect.Box, false);
+				const bool bPlatform = HoldsSpurPlatform(Rect.Box, Rect.Segment);
+				Out.OpenParts.Add({ FBox2D(FVector2D(Rect.Box.Min), FVector2D(Rect.Box.Max)), Rect.Segment, bPlatform });
+				if (FrameSpacing > 0.0)
+				{
+					FrameBox(Rect.Box, false, bPlatform);
+				}
 			}
 		}
 		// Web halls: under each of the hall's parts (its platforms and walkways), as under a catwalk. Floor halls have none.
 		for (const FHallPart& Part : HallParts)
 		{
+			Out.OpenParts.Add({ FBox2D(FVector2D(Part.Box.Min), FVector2D(Part.Box.Max)), Part.Segment, Part.bPlatform });
 			if (FrameSpacing > 0.0 && Plan.Segs[Part.Segment].bWeb)
 			{
-				FrameBox(Part.Box, true);
+				FrameBox(Part.Box, true, Part.bPlatform);
 			}
 		}
 
@@ -3302,6 +3329,555 @@ namespace AreaGen
 		}
 		Report = FString::Printf(TEXT("twin AI's room: %d runs, conduits %d, bends %d, cables %d"), Runs, Conduits.Num(), Bends.Num(), Cables.Num());
 	}
+
+	// --- The backdrop's dressing (Brief 28): the masses' modules, the levels of walkways above and below, the pillars ---
+	// Look only (the graphs spawn them with no collision and no navigation), computed from the finished plan with no random
+	// draw: the plan, the layout hash and everything placed stay as they are.
+
+	/** What BuildDecor places, by the generator's array (EDecorMesh order), and what it records for tls.BackdropCheck. */
+	struct FDecorOut
+	{
+		TArray<FTransform> Arrays[AAreaGenerator::DecorMeshCount];
+		TArray<AAreaGenerator::FDecorFaceRecord> Faces;
+		TArray<AAreaGenerator::FDecorLevelRecord> Levels;
+		TArray<AAreaGenerator::FDecorPillarRecord> Pillars;
+		TArray<AAreaGenerator::FDecorShotPick> MassPicks;
+		AAreaGenerator::FDecorShotPick PillarPick;
+		TArray<FBox> Forbidden;
+		TArray<FBox2D> ExitClearance;
+		FString Report;
+	};
+
+	/** The module of a family for the cell (Column, Row) of a face: a fixed pattern, no random draw. */
+	static int32 DecorModuleFor(EAreaBackdropFamily Family, int32 Column, int32 Row)
+	{
+		using M = AAreaGenerator;
+		switch (Family)
+		{
+		case EAreaBackdropFamily::Hull:
+			// Deep ribs every other column, from bottom to top; plating between them, a deep stringer every third row.
+			return Column % 2 == 0 ? M::DecorHullRib : (Row % 3 == 2 ? M::DecorHullFrame : M::DecorHullPlate);
+		case EAreaBackdropFamily::Servers:
+			// Stacks of tiers, a cable riser every fourth column, some tiers of closed bays.
+			return Column % 4 == 3 ? M::DecorServerRiser : (Column % 2 == 1 && Row % 2 == 1 ? M::DecorServerBays : M::DecorServerStack);
+		case EAreaBackdropFamily::Machinery:
+			// Banded columns, pipes, ringed columns, column by column.
+			return Column % 3 == 0 ? M::DecorMachColumn : (Column % 3 == 1 ? M::DecorMachPipes : M::DecorMachRing);
+		default:
+			return -1;
+		}
+	}
+
+	static const TCHAR* LexDecorFamily(EAreaBackdropFamily Family)
+	{
+		switch (Family)
+		{
+		case EAreaBackdropFamily::Hull: return TEXT("Hull");
+		case EAreaBackdropFamily::Servers: return TEXT("Servers");
+		case EAreaBackdropFamily::Machinery: return TEXT("Machinery");
+		case EAreaBackdropFamily::ServersAndMachinery: return TEXT("ServersAndMachinery");
+		default: return TEXT("None");
+		}
+	}
+
+	/** Columns (or rows) of modules across Span and their size: within the factor range, or the nearest count clamped to it (then centred, with a gap). */
+	static void FitModules(double Span, double Module, double MinF, double MaxF, int32& OutCount, double& OutSize)
+	{
+		OutCount = FMath::Max(1, FMath::RoundToInt(Span / Module));
+		double F = Span / (OutCount * Module);
+		if (F > MaxF) { ++OutCount; }
+		else if (F < MinF && OutCount > 1) { --OutCount; }
+		F = FMath::Clamp(Span / (OutCount * Module), MinF, MaxF);
+		OutSize = F * Module;
+		if (OutCount * OutSize > Span + 0.5)
+		{
+			// Too short for even one module at its smallest: none.
+			OutCount = FMath::Max(0, FMath::FloorToInt(Span / OutSize + 1e-6));
+		}
+	}
+
+	static void BuildDecor(const AAreaGenerator& G, const FPlan& Plan, const FGeometryPlan& Geo, const FDressing& Dressing, const FAreaBackdropRecipe& R, FDecorOut& Out)
+	{
+		const double FT = G.FloorThickness;
+		const double T = G.WallThickness;
+		const double Side = FMath::Max(0.0, static_cast<double>(G.DecorSideClearance));
+		const double Vert = FMath::Max(0.0, static_cast<double>(G.DecorVerticalClearance));
+		const double TipDepth = FMath::Max(0.0, static_cast<double>(G.DressFrameTipDepth));
+		const FVector PlateSize = G.DressFloorPlateSize.ComponentMax(FVector(1.0));
+		const FVector CurbSize = G.DressCurbSize.ComponentMax(FVector(1.0));
+		const FVector PostSize = G.DressCornerPostSize.ComponentMax(FVector(1.0));
+		const double FrameSpan = FMath::Max(1.0, static_cast<double>(G.DressFrameSpan));
+		constexpr double FrameMaxFactor = 1.9;
+
+		// The walkable floors and the space kept clear round them: 2 m off their sides, 8 m above and below them.
+		TArray<FBox> Walk;
+		for (const FAreaFloorRect& Rect : Geo.FloorRects)
+		{
+			Walk.Add(Rect.Box);
+			Out.Forbidden.Add(FBox(Rect.Box.Min - FVector(Side, Side, Vert), Rect.Box.Max + FVector(Side, Side, Vert)));
+		}
+		// The exit corridors' clearance (Brief 26): their line past the open end out to the backdrop's reach, grown by the
+		// clearance the masses keep from it. Every height.
+		const double Radius = FMath::Clamp(static_cast<double>(G.BackdropRadius), 0.0, 100000.0);
+		for (const FSeg& S : Plan.Segs)
+		{
+			if (S.bExitCorridor && S.Legs.Num() > 0)
+			{
+				const FLeg& Leg = S.Legs[0];
+				Out.ExitClearance.Add(Grow(MakeRect(Leg.Start, Leg.Dir, Leg.Length, Leg.Length + Radius + G.BackdropClearance, -0.5 * S.Width, 0.5 * S.Width), G.BackdropClearance));
+			}
+		}
+		auto InExitClearance = [&Out](const FBox2D& B)
+		{
+			for (const FBox2D& C : Out.ExitClearance)
+			{
+				if (B.Intersect(C)) { return true; }
+			}
+			return false;
+		};
+		auto Overlaps = [](const FBox& A, const FBox& B)
+		{
+			return A.Min.X < B.Max.X && A.Max.X > B.Min.X && A.Min.Y < B.Max.Y && A.Max.Y > B.Min.Y && A.Min.Z < B.Max.Z && A.Max.Z > B.Min.Z;
+		};
+		auto InForbidden = [&](const FBox& B)
+		{
+			if (InExitClearance(FBox2D(FVector2D(B.Min), FVector2D(B.Max))))
+			{
+				return true;
+			}
+			for (const FBox& F : Out.Forbidden)
+			{
+				if (Overlaps(B, F)) { return true; }
+			}
+			return false;
+		};
+		const TArray<FBox>& Masses = Geo.Backdrop;
+		int32 Totals[AAreaGenerator::DecorMeshCount] = {};
+		FString MassReport = TEXT("masses off");
+		FString LayerReport = TEXT("layers off");
+		FString PillarReport = TEXT("pillars off");
+
+		// --- Part A: the masses' faces seen from the route, dressed with the area's modules ---
+		if (R.bMasses && R.Family != EAreaBackdropFamily::None)
+		{
+			const double Module = FMath::Max(50.0, static_cast<double>(G.DecorModuleSize));
+			const double Depth = FMath::Max(0.0, static_cast<double>(G.DecorModuleDepth));
+			const double MinF = FMath::Clamp(static_cast<double>(G.DecorModuleMinFactor), 0.1, 1.0);
+			const double MaxF = FMath::Clamp(static_cast<double>(G.DecorModuleMaxFactor), 1.0, 4.0);
+			const double Reach = FMath::Max(0.0, R.MassReachM * 100.0);
+			int32 Toward = 0, Dressed = 0, BeyondReach = 0, CellsSkippedMass = 0, CellsSkippedClear = 0;
+			FFactorRange AlongF, UpF;
+			// The walkable volumes the faces are seen from: the floors up to the eye.
+			TArray<FBox> Seen;
+			for (const FBox& W : Walk) { Seen.Add(FBox(W.Min, FVector(W.Max.X, W.Max.Y, W.Max.Z + 200.0))); }
+			double BestPick[3] = { TNumericLimits<double>::Max(), TNumericLimits<double>::Max(), TNumericLimits<double>::Max() };
+			for (int32 M = 0; M < Masses.Num(); ++M)
+			{
+				const FBox& B = Masses[M];
+				const EAreaBackdropFamily Family = R.Family == EAreaBackdropFamily::ServersAndMachinery
+					? (M % 2 == 0 ? EAreaBackdropFamily::Servers : EAreaBackdropFamily::Machinery) : R.Family;
+				for (int32 Face = 0; Face < 6; ++Face)
+				{
+					// Faces 0..5: +X, -X, +Y, -Y, +Z, -Z.
+					const int32 Axis = Face / 2;
+					const double Sign = Face % 2 == 0 ? 1.0 : -1.0;
+					FVector N = FVector::ZeroVector;
+					N[Axis] = Sign;
+					const FVector Up = Axis == 2 ? FVector(1.0, 0.0, 0.0) : FVector(0.0, 0.0, 1.0);
+					const FRotator Rot = FRotationMatrix::MakeFromXZ(N, Up).Rotator();
+					const FVector AxY = FRotationMatrix(Rot).GetScaledAxis(EAxis::Y);
+					const FVector AxZ = FRotationMatrix(Rot).GetScaledAxis(EAxis::Z);
+					const FVector Size = B.GetSize();
+					const double W = FMath::Abs(FVector::DotProduct(Size, AxY));
+					const double H = FMath::Abs(FVector::DotProduct(Size, AxZ));
+					FVector Centre = B.GetCenter();
+					Centre[Axis] = Sign > 0.0 ? B.Max[Axis] : B.Min[Axis];
+					AAreaGenerator::FDecorFaceRecord Rec;
+					Rec.Mass = M;
+					Rec.Face = Face;
+					Rec.Normal = N;
+					Rec.Centre = Centre;
+					Rec.Size = FVector2D(W, H);
+					Rec.Family = Family;
+					// Turned to the route: some walkable volume lies on the face's outer side.
+					for (const FBox& V : Seen)
+					{
+						if (Sign > 0.0 ? V.Max[Axis] > B.Max[Axis] : V.Min[Axis] < B.Min[Axis]) { Rec.bTowardRoute = true; break; }
+					}
+					if (!Rec.bTowardRoute)
+					{
+						Out.Faces.Add(Rec);
+						continue;
+					}
+					++Toward;
+					// The walkable volumes within reach of the face's rectangle (a box round the face, grown by the reach).
+					const FBox FaceBox(Centre - (AxY * W + AxZ * H).GetAbs() * 0.5, Centre + (AxY * W + AxZ * H).GetAbs() * 0.5);
+					TArray<const FBox*> Near;
+					for (const FBox& V : Seen)
+					{
+						if (FMath::Sqrt(FaceBox.ComputeSquaredDistanceToBox(V)) <= Reach) { Near.Add(&V); }
+					}
+					if (Near.Num() == 0)
+					{
+						++BeyondReach;
+						Out.Faces.Add(Rec);
+						continue;
+					}
+					int32 NCols = 0, NRows = 0;
+					double CW = 0.0, CH = 0.0;
+					FitModules(W, Module, MinF, MaxF, NCols, CW);
+					FitModules(H, Module, MinF, MaxF, NRows, CH);
+					const double Y0 = -0.5 * NCols * CW;
+					const double Z0 = -0.5 * NRows * CH;
+					for (int32 Row = 0; Row < NRows; ++Row)
+					{
+						for (int32 Col = 0; Col < NCols; ++Col)
+						{
+							const FVector Base = Centre + AxY * (Y0 + (Col + 0.5) * CW) + AxZ * (Z0 + Row * CH);
+							const FVector Mid = Base + AxZ * (0.5 * CH);
+							double Best = TNumericLimits<double>::Max();
+							for (const FBox* V : Near) { Best = FMath::Min(Best, V->ComputeSquaredDistanceToPoint(Mid)); }
+							if (FMath::Sqrt(Best) > Reach)
+							{
+								continue;
+							}
+							++Rec.CellsInReach;
+							// The module's box: the cell on the face, out to the modules' depth.
+							const FVector C0 = Base - AxY * (0.5 * CW);
+							const FVector C1 = Base + AxY * (0.5 * CW) + AxZ * CH + N * Depth;
+							const FBox Cell3(C0.ComponentMin(C1), C0.ComponentMax(C1));
+							bool bOtherMass = false;
+							for (int32 O = 0; O < Masses.Num() && !bOtherMass; ++O)
+							{
+								bOtherMass = O != M && Overlaps(Cell3, Masses[O]);
+							}
+							if (bOtherMass)
+							{
+								++Rec.SkippedMass;
+								++CellsSkippedMass;
+								continue;
+							}
+							if (InForbidden(Cell3))
+							{
+								++Rec.SkippedClear;
+								++CellsSkippedClear;
+								continue;
+							}
+							const int32 Mesh = DecorModuleFor(Family, Col, Row);
+							if (Mesh < 0)
+							{
+								continue;
+							}
+							Out.Arrays[Mesh].Add(FTransform(Rot, Base, FVector(1.0, CW / Module, CH / Module)));
+							++Totals[Mesh];
+							++Rec.Placed;
+							AlongF.Add(CW / Module, FVector2D(Base));
+							UpF.Add(CH / Module, FVector2D(Base));
+							// The shot of each family: a module on a side face, nearest the route, about the eye's height.
+							const int32 Fam = Mesh / 3;
+							const double Score = FMath::Sqrt(Best) + FMath::Abs(Mid.Z - 300.0) * 2.0;
+							if (Axis != 2 && Score < BestPick[Fam])
+							{
+								BestPick[Fam] = Score;
+								AAreaGenerator::FDecorShotPick Pick;
+								Pick.Family = LexDecorFamily(Fam == 0 ? EAreaBackdropFamily::Hull : Fam == 1 ? EAreaBackdropFamily::Servers : EAreaBackdropFamily::Machinery);
+								Pick.At = Mid;
+								Pick.Normal = N;
+								bool bFound = false;
+								for (AAreaGenerator::FDecorShotPick& P : Out.MassPicks)
+								{
+									if (P.Family == Pick.Family) { P = Pick; bFound = true; }
+								}
+								if (!bFound) { Out.MassPicks.Add(Pick); }
+							}
+						}
+					}
+					Dressed += Rec.Placed > 0 ? 1 : 0;
+					Out.Faces.Add(Rec);
+				}
+			}
+			int32 Modules = 0;
+			for (int32 I = 0; I <= AAreaGenerator::DecorMachRing; ++I) { Modules += Totals[I]; }
+			MassReport = FString::Printf(TEXT("masses %d, family %s: faces turned to the route %d, dressed %d, beyond reach (%.0f m) %d; modules %d (hull rib %d plate %d frame %d, servers stack %d bays %d riser %d, machinery column %d pipes %d ring %d); cells left: against another mass %d, in the route's clearance %d; %s, %s"),
+				Masses.Num(), LexDecorFamily(R.Family), Toward, Dressed, R.MassReachM, BeyondReach, Modules,
+				Totals[0], Totals[1], Totals[2], Totals[3], Totals[4], Totals[5], Totals[6], Totals[7], Totals[8], CellsSkippedMass, CellsSkippedClear,
+				*AlongF.ToString(TEXT("factor along")), *UpF.ToString(TEXT("factor up")));
+		}
+
+		// --- Part B: levels of walkways above and below every open segment ---
+		struct FDecorTip { FVector Tip; int32 Line = 0; int32 Lines = 1; int32 Piece = 0; int32 Pieces = 1; bool bPlatform = false; bool bAlongX = true; };
+		TArray<FDecorTip> LayerTips;
+		TArray<FBox> LayerDecks;
+		if (R.bLayers && (R.LayerCountAbove > 0 || R.LayerCountBelow > 0))
+		{
+			const double Spacing = FMath::Max(100.0, R.LayerSpacingM * 100.0);
+			const double Scale = FMath::Clamp(static_cast<double>(R.LayerScale), 1.0, 4.0);
+			const double PieceLen = FMath::Max(100.0, R.LayerPieceLengthM * 100.0);
+			const int32 Above = FMath::Clamp(R.LayerCountAbove, 0, 4);
+			const int32 Below = FMath::Clamp(R.LayerCountBelow, 0, 4);
+			int32 Cut = 0;
+			TArray<int32> Segments;
+			for (const FDressing::FOpenPart& P : Dressing.OpenParts) { Segments.AddUnique(P.Segment); }
+			Segments.Sort();
+			for (const int32 S : Segments)
+			{
+				const FVector2D C = Plan.Segs[S].Bounds.GetCenter();
+				double WalkedReach = 0.0;
+				for (const FDressing::FOpenPart& P : Dressing.OpenParts)
+				{
+					if (P.Segment != S) { continue; }
+					for (const FVector2D& Q : { P.Rect.Min, P.Rect.Max, FVector2D(P.Rect.Min.X, P.Rect.Max.Y), FVector2D(P.Rect.Max.X, P.Rect.Min.Y) })
+					{
+						WalkedReach = FMath::Max(WalkedReach, FVector2D::Distance(Q, C));
+					}
+				}
+				for (int32 L = 0; L < Above + Below; ++L)
+				{
+					const bool bAbove = L < Above;
+					const int32 K = bAbove ? L + 1 : L - Above + 1;
+					const double Z = (bAbove ? 1.0 : -1.0) * K * Spacing;
+					// A quarter turn more for each level: the levels above first, then those below.
+					const int32 Turns = (L + 1) % 4;
+					AAreaGenerator::FDecorLevelRecord Rec;
+					Rec.Segment = S;
+					Rec.Level = bAbove ? K : -K;
+					Rec.Z = static_cast<float>(Z);
+					Rec.Turns = Turns;
+					Rec.WalkedReach = WalkedReach;
+					Rec.Bounds = FBox2D(ForceInit);
+					// The level's parts: the walked ones turned about the segment's centre and enlarged, cut into pieces.
+					struct FPiece { FBox2D Box; bool bAlongX; int32 J; int32 NA; int32 K; int32 NC; bool bPlatform; };
+					TArray<FPiece> Kept;
+					for (const FDressing::FOpenPart& P : Dressing.OpenParts)
+					{
+						if (P.Segment != S) { continue; }
+						FBox2D Box(ForceInit);
+						for (FVector2D Q : { P.Rect.Min, P.Rect.Max })
+						{
+							FVector2D D = Q - C;
+							for (int32 Tn = 0; Tn < Turns; ++Tn) { D = FVector2D(-D.Y, D.X); }
+							Box += C + D * Scale;
+						}
+						const double SX = Box.Max.X - Box.Min.X;
+						const double SY = Box.Max.Y - Box.Min.Y;
+						const bool bAlongX = SX >= SY;
+						const double Long = bAlongX ? SX : SY;
+						const double Wide = bAlongX ? SY : SX;
+						const int32 NA = FMath::Max(1, FMath::RoundToInt(Long / PieceLen));
+						const int32 NC = FMath::Max(1, FMath::RoundToInt(Wide / PieceLen));
+						for (int32 J = 0; J < NA; ++J)
+						{
+							for (int32 Kc = 0; Kc < NC; ++Kc)
+							{
+								const double A0 = J * Long / NA, A1 = (J + 1) * Long / NA;
+								const double W0 = Kc * Wide / NC, W1 = (Kc + 1) * Wide / NC;
+								const FBox2D Piece = bAlongX ? FBox2D(FVector2D(Box.Min.X + A0, Box.Min.Y + W0), FVector2D(Box.Min.X + A1, Box.Min.Y + W1))
+									: FBox2D(FVector2D(Box.Min.X + W0, Box.Min.Y + A0), FVector2D(Box.Min.X + W1, Box.Min.Y + A1));
+								// The piece with its curbs and the frames under it.
+								const FBox Space(FVector(Piece.Min.X - T, Piece.Min.Y - T, Z - FT - TipDepth), FVector(Piece.Max.X + T, Piece.Max.Y + T, Z + G.CurbHeight));
+								bool bBlocked = InForbidden(Space);
+								for (int32 M = 0; M < Masses.Num() && !bBlocked; ++M)
+								{
+									bBlocked = Overlaps(Space, Masses[M].ExpandBy(FVector(G.DecorModuleDepth)));
+								}
+								if (bBlocked)
+								{
+									++Rec.PiecesCut;
+									++Cut;
+									continue;
+								}
+								Kept.Add({ Piece, bAlongX, J, NA, Kc, NC, P.bPlatform });
+							}
+						}
+					}
+					TMap<FIntPoint, TArray<FVector2D>> CurbLines;  // (side, line in cm) -> free spans along it
+					for (const FPiece& P : Kept)
+					{
+						const FVector2D PC = P.Box.GetCenter();
+						const double SX = P.Box.Max.X - P.Box.Min.X;
+						const double SY = P.Box.Max.Y - P.Box.Min.Y;
+						Rec.Bounds += P.Box;
+						for (const FVector2D& Q : { P.Box.Min, P.Box.Max, FVector2D(P.Box.Min.X, P.Box.Max.Y), FVector2D(P.Box.Max.X, P.Box.Min.Y) })
+						{
+							Rec.Reach = FMath::Max(Rec.Reach, FVector2D::Distance(Q, C));
+						}
+						// The deck: one plate over the piece (its long side along the piece's).
+						const double PL = P.bAlongX ? SX : SY;
+						const double PW = P.bAlongX ? SY : SX;
+						Out.Arrays[AAreaGenerator::DecorLayerPlate].Add(FTransform(FRotator(0.0, P.bAlongX ? 0.0 : 90.0, 0.0), FVector(PC.X, PC.Y, Z - FT),
+							FVector(PL / PlateSize.X, PW / PlateSize.Y, FT / PlateSize.Z)));
+						LayerDecks.Add(FBox(FVector(P.Box.Min, Z - FT), FVector(P.Box.Max, Z)));
+						++Rec.Plates;
+						// The frames: under every other piece along its part (and under the last), one line across the piece at its
+						// middle, out to the curbs, in pieces of at most x1.9 (the budget: Brief 28's reduction).
+						if (P.J % 2 == 0 || P.J == P.NA - 1)
+						{
+							const double Across0 = (P.bAlongX ? P.Box.Min.Y : P.Box.Min.X) - T;
+							const double Across1 = (P.bAlongX ? P.Box.Max.Y : P.Box.Max.X) + T;
+							const int32 FP = FMath::Max(1, FMath::CeilToInt((Across1 - Across0) / (FrameSpan * FrameMaxFactor) - 1e-6));
+							const double FL = (Across1 - Across0) / FP;
+							const int32 Line = (P.J + 1) / 2;
+							const int32 Lines = (P.NA + 1) / 2 + (P.NA % 2 == 0 ? 1 : 0);
+							for (int32 Q = 0; Q < FP; ++Q)
+							{
+								const double Mid = Across0 + (Q + 0.5) * FL;
+								const FVector2D FC = P.bAlongX ? FVector2D(PC.X, Mid) : FVector2D(Mid, PC.Y);
+								Out.Arrays[AAreaGenerator::DecorLayerFrame].Add(FitPiece(FC, Z - FT, P.bAlongX ? 0 : 1, 1.0, FL, 1.0, FVector(1.0, FrameSpan, 1.0)));
+								LayerTips.Add({ FVector(FC.X, FC.Y, Z - FT - TipDepth), Line, Lines, P.K * FP + Q, P.NC * FP, P.bPlatform, P.bAlongX });
+								++Rec.Frames;
+							}
+						}
+						// The curbs: along each edge, where no other piece of the level meets it; gathered by line and merged
+						// below, so that a curb runs on across the pieces' joints.
+						for (int32 D = 0; D < 4; ++D)
+						{
+							const bool bEdgeAlongY = D == 0 || D == 2;  // the edge runs along Y on the +X and -X sides
+							const double Line = D == 0 ? P.Box.Max.X : D == 1 ? P.Box.Max.Y : D == 2 ? P.Box.Min.X : P.Box.Min.Y;
+							const double E0 = bEdgeAlongY ? P.Box.Min.Y : P.Box.Min.X;
+							const double E1 = bEdgeAlongY ? P.Box.Max.Y : P.Box.Max.X;
+							TArray<FVector2D> Free = { FVector2D(E0, E1) };
+							for (const FPiece& O : Kept)
+							{
+								const double OLine = D == 0 ? O.Box.Min.X : D == 1 ? O.Box.Min.Y : D == 2 ? O.Box.Max.X : O.Box.Max.Y;
+								if (&O == &P || FMath::Abs(OLine - Line) > 1.0)
+								{
+									continue;
+								}
+								const double O0 = bEdgeAlongY ? O.Box.Min.Y : O.Box.Min.X;
+								const double O1 = bEdgeAlongY ? O.Box.Max.Y : O.Box.Max.X;
+								TArray<FVector2D> Next;
+								for (const FVector2D& F : Free)
+								{
+									if (O1 <= F.X || O0 >= F.Y) { Next.Add(F); continue; }
+									if (O0 > F.X) { Next.Add(FVector2D(F.X, O0)); }
+									if (O1 < F.Y) { Next.Add(FVector2D(O1, F.Y)); }
+								}
+								Free = MoveTemp(Next);
+							}
+							TArray<FVector2D>& Runs = CurbLines.FindOrAdd(FIntPoint(D, FMath::RoundToInt(Line)));
+							for (const FVector2D& F : Free)
+							{
+								if (F.Y - F.X >= 1.0) { Runs.Add(F); }
+							}
+						}
+					}
+					// The curbs: each line's free spans merged where they meet, then pieces of about twice the deck's (Brief
+					// 28's reduction: a curb is the costliest piece of the kit).
+					TArray<FIntPoint> CurbKeys;
+					CurbLines.GetKeys(CurbKeys);
+					CurbKeys.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+					for (const FIntPoint& Key : CurbKeys)
+					{
+						TArray<FVector2D> Runs = CurbLines[Key];
+						Runs.Sort([](const FVector2D& A, const FVector2D& B) { return A.X < B.X; });
+						TArray<FVector2D> Merged;
+						for (const FVector2D& F : Runs)
+						{
+							if (Merged.Num() > 0 && F.X <= Merged.Last().Y + 1.0) { Merged.Last().Y = FMath::Max(Merged.Last().Y, F.Y); }
+							else { Merged.Add(F); }
+						}
+						const int32 D = Key.X;
+						const bool bEdgeAlongY = D == 0 || D == 2;
+						const double Line = Key.Y;
+						const FVector2D Outward = DirV(D);
+						for (const FVector2D& F : Merged)
+						{
+							const double Len = F.Y - F.X;
+							if (Len < 10.0)
+							{
+								continue;
+							}
+							const int32 NCurb = FMath::Max(1, FMath::RoundToInt(Len / (2.0 * PieceLen)));
+							for (int32 Q = 0; Q < NCurb; ++Q)
+							{
+								const double S0 = F.X + (Q + 0.5) * Len / NCurb;
+								const FVector2D OnLine = bEdgeAlongY ? FVector2D(Line, S0) : FVector2D(S0, Line);
+								Out.Arrays[AAreaGenerator::DecorLayerCurb].Add(FitPiece(OnLine + Outward * (0.5 * T), Z + G.CurbHeight - CurbSize.Z, Opposite(D), T, Len / NCurb, CurbSize.Z, CurbSize));
+								++Rec.Curbs;
+							}
+						}
+					}
+					Totals[AAreaGenerator::DecorLayerPlate] += Rec.Plates;
+					Totals[AAreaGenerator::DecorLayerCurb] += Rec.Curbs;
+					Totals[AAreaGenerator::DecorLayerFrame] += Rec.Frames;
+					Out.Levels.Add(Rec);
+				}
+			}
+			LayerReport = FString::Printf(TEXT("layers: %d open segments, %d above and %d below, %.1f m apart, x%.2f, pieces of %.1f m: %d levels, plates %d, curbs %d, frames %d, pieces cut %d"),
+				Segments.Num(), Above, Below, Spacing / 100.0, Scale, PieceLen / 100.0, Out.Levels.Num(), Totals[AAreaGenerator::DecorLayerPlate],
+				Totals[AAreaGenerator::DecorLayerCurb], Totals[AAreaGenerator::DecorLayerFrame], Cut);
+		}
+
+		// --- Part C: pillars from frames' lowest points down to the first geometry below ---
+		if (R.bPillars)
+		{
+			const int32 Nth = FMath::Clamp(R.PillarEveryNthFrame, 1, 20);
+			const double MaxLen = FMath::Max(100.0, R.PillarMaxLengthM * 100.0);
+			const double Half = 0.5 * FMath::Max(PostSize.X, PostSize.Y);
+			int32 ByFoot[3] = {}, Dropped = 0, WalkedCount = 0;
+			auto Place = [&](const FVector& Tip, int32 Line, int32 Lines, int32 Piece, int32 Pieces, bool bPlatform, bool bAlongX, bool bWalked)
+			{
+				const bool bCorner = bPlatform && (Line == 0 || Line == Lines - 1) && (Piece == 0 || Piece == Pieces - 1);
+				if (Line % Nth != 0 && !bCorner)
+				{
+					return;
+				}
+				const FBox2D Foot2(FVector2D(Tip) - FVector2D(Half, Half), FVector2D(Tip) + FVector2D(Half, Half));
+				if (InExitClearance(Foot2))
+				{
+					++Dropped;
+					return;
+				}
+				// The first geometry under the tip: a mass, a level's deck; for a level's pillar, also the route's clearance (cut there).
+				double FootZ = -TNumericLimits<double>::Max();
+				uint8 Kind = AAreaGenerator::PillarFootMaxLength;
+				auto Under = [&](const FBox& B, uint8 K)
+				{
+					if (B.Min.X < Foot2.Max.X && B.Max.X > Foot2.Min.X && B.Min.Y < Foot2.Max.Y && B.Max.Y > Foot2.Min.Y && B.Max.Z < Tip.Z - 1.0 && B.Max.Z > FootZ)
+					{
+						FootZ = B.Max.Z;
+						Kind = K;
+					}
+				};
+				for (const FBox& B : Masses) { Under(B, AAreaGenerator::PillarFootGeometry); }
+				for (const FBox& B : LayerDecks) { Under(B, AAreaGenerator::PillarFootGeometry); }
+				for (const FBox& B : Walk) { Under(B, AAreaGenerator::PillarFootGeometry); }
+				if (!bWalked)
+				{
+					for (const FBox& B : Out.Forbidden) { Under(B, AAreaGenerator::PillarFootCut); }
+				}
+				double Len = Tip.Z - FootZ;
+				if (Len > MaxLen)
+				{
+					Len = MaxLen;
+					Kind = AAreaGenerator::PillarFootMaxLength;
+				}
+				if (Kind == AAreaGenerator::PillarFootCut && Len < 200.0)
+				{
+					++Dropped;
+					return;
+				}
+				Out.Arrays[AAreaGenerator::DecorPillar].Add(FTransform(FRotator(0.0, bAlongX ? 0.0 : 90.0, 0.0), FVector(Tip.X, Tip.Y, Tip.Z - Len),
+					FVector(1.0, 1.0, Len / PostSize.Z)));
+				Out.Pillars.Add({ Tip, static_cast<float>(Len), Kind, bWalked });
+				++ByFoot[Kind];
+				WalkedCount += bWalked ? 1 : 0;
+				if (bWalked && Len >= 1000.0 && Out.PillarPick.Family.IsEmpty())
+				{
+					Out.PillarPick.Family = TEXT("Pillar");
+					Out.PillarPick.At = Tip;
+					Out.PillarPick.Normal = bAlongX ? FVector(1.0, 0.0, 0.0) : FVector(0.0, 1.0, 0.0);
+				}
+			};
+			for (const FDressing::FFrameTip& F : Dressing.FrameTips) { Place(F.Tip, F.Line, F.Lines, F.Piece, F.Pieces, F.bPlatform, F.bAlongX, true); }
+			for (const FDecorTip& F : LayerTips) { Place(F.Tip, F.Line, F.Lines, F.Piece, F.Pieces, F.bPlatform, F.bAlongX, false); }
+			Totals[AAreaGenerator::DecorPillar] = Out.Arrays[AAreaGenerator::DecorPillar].Num();
+			PillarReport = FString::Printf(TEXT("pillars every %d frames and under platforms' corners: %d (%d under the walked level, %d under the levels): on geometry %d, at the length %.0f m %d, cut at the route's clearance %d; dropped %d (exit clearance, or cut under 2 m)"),
+				Nth, Out.Pillars.Num(), WalkedCount, Out.Pillars.Num() - WalkedCount, ByFoot[AAreaGenerator::PillarFootGeometry], MaxLen / 100.0,
+				ByFoot[AAreaGenerator::PillarFootMaxLength], ByFoot[AAreaGenerator::PillarFootCut], Dropped);
+		}
+		Out.Report = MassReport + TEXT("; ") + LayerReport + TEXT("; ") + PillarReport;
+	}
 }
 
 namespace AreaHash
@@ -3393,6 +3969,59 @@ int32 AAreaGenerator::GetDressingInstanceCount() const
 		{
 			Count += Component->GetInstanceCount();
 		}
+	}
+	return Count;
+}
+
+const TCHAR* AAreaGenerator::GetDecorArrayName(int32 Mesh)
+{
+	static const TCHAR* Names[DecorMeshCount] = { TEXT("DecorMassHullRib"), TEXT("DecorMassHullPlate"), TEXT("DecorMassHullFrame"),
+		TEXT("DecorMassServerStack"), TEXT("DecorMassServerBays"), TEXT("DecorMassServerRiser"), TEXT("DecorMassMachColumn"),
+		TEXT("DecorMassMachPipes"), TEXT("DecorMassMachRing"), TEXT("DecorLayerPlates"), TEXT("DecorLayerCurbs"), TEXT("DecorLayerFrames"), TEXT("DecorPillars") };
+	return Mesh >= 0 && Mesh < DecorMeshCount ? Names[Mesh] : TEXT("");
+}
+
+TArray<FTransform>* AAreaGenerator::MutableDecorArray(int32 Mesh)
+{
+	TArray<FTransform>* Arrays[DecorMeshCount] = { &DecorMassHullRib, &DecorMassHullPlate, &DecorMassHullFrame, &DecorMassServerStack, &DecorMassServerBays,
+		&DecorMassServerRiser, &DecorMassMachColumn, &DecorMassMachPipes, &DecorMassMachRing, &DecorLayerPlates, &DecorLayerCurbs, &DecorLayerFrames, &DecorPillars };
+	return Arrays[FMath::Clamp(Mesh, 0, DecorMeshCount - 1)];
+}
+
+const TArray<FTransform>& AAreaGenerator::GetDecorArray(int32 Mesh) const
+{
+	return *const_cast<AAreaGenerator*>(this)->MutableDecorArray(Mesh);
+}
+
+int32 AAreaGenerator::GetDecorPart(int32 Mesh)
+{
+	return Mesh <= DecorMachRing ? 0 : (Mesh == DecorPillar ? 2 : 1);
+}
+
+TArray<UInstancedStaticMeshComponent*> AAreaGenerator::GetDecorComponents(int32 Mesh) const
+{
+	// Every instanced component of the backdrop's dressing carries "AreaDecor" and "Area<its array>".
+	static const FName All(TEXT("AreaDecor"));
+	const FName Tag = Mesh < 0 ? All : FName(*FString::Printf(TEXT("Area%s"), GetDecorArrayName(Mesh)));
+	TArray<UInstancedStaticMeshComponent*> Components;
+	GetComponents(Components);
+	TArray<UInstancedStaticMeshComponent*> Out;
+	for (UInstancedStaticMeshComponent* Component : Components)
+	{
+		if (Component && Component->ComponentHasTag(Tag))
+		{
+			Out.Add(Component);
+		}
+	}
+	return Out;
+}
+
+int32 AAreaGenerator::GetDecorInstanceCount() const
+{
+	int32 Count = 0;
+	for (const UInstancedStaticMeshComponent* Component : GetDecorComponents(-1))
+	{
+		Count += Component->GetInstanceCount();
 	}
 	return Count;
 }
@@ -3593,6 +4222,18 @@ int32 AAreaGenerator::ClearArea()
 	{
 		Plan->Reset();
 	}
+	for (int32 Mesh = 0; Mesh < DecorMeshCount; ++Mesh)
+	{
+		MutableDecorArray(Mesh)->Reset();
+	}
+	DecorFaces.Reset();
+	DecorLevels.Reset();
+	DecorPillarRecords.Reset();
+	DecorMassPicks.Reset();
+	DecorPillarPick = FDecorShotPick();
+	DecorForbidden.Reset();
+	DecorExitClearance.Reset();
+	LastBackdropReport.Reset();
 	DressFloorStripsFrom = 0;
 	OpenEndBoxes.Reset();
 	NavigationBounds = FBox(ForceInit);
@@ -3944,6 +4585,7 @@ void AAreaGenerator::BecomeReady()
 		GetPCGInstanceCount(), bLastPCGMatchedPlan ? TEXT("matched") : TEXT("NOT MATCHED"), LastGenerationSeconds, LastPCGSeconds, LastNavigationSeconds,
 		LastValidationSeconds, TimeToReadySeconds, GetDressingInstanceCount());
 	UE_LOG(LogArea, Display, TEXT("%s: DRESSING act %d seed %d: %s."), *GetName(), Act, Seed, *LastDressingReport);
+	UE_LOG(LogArea, Display, TEXT("%s: BACKDROP act %d seed %d: %s; instances built %d."), *GetName(), Act, Seed, *LastBackdropReport, GetDecorInstanceCount());
 	if (URunSubsystem* Run = URunSubsystem::Get(this))
 	{
 		Run->NotifyAreaReady(World);
@@ -4278,6 +4920,24 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 					DressTwinConduits, DressTwinBends, DressTwinCables, TwinReport);
 				LastDressingReport += TEXT("; ") + TwinReport;
 			}
+		}
+		// The backdrop's dressing (Brief 28): the masses' modules, the levels of walkways, the pillars. Look only, from the
+		// finished plan with no random draw; each part has its switch and its values in the recipe (FAreaRecipe::Backdrop).
+		{
+			FDecorOut Decor;
+			BuildDecor(*this, Plan, Geometry, Dressing, Recipe->Backdrop, Decor);
+			for (int32 Mesh = 0; Mesh < DecorMeshCount; ++Mesh)
+			{
+				*MutableDecorArray(Mesh) = MoveTemp(Decor.Arrays[Mesh]);
+			}
+			DecorFaces = MoveTemp(Decor.Faces);
+			DecorLevels = MoveTemp(Decor.Levels);
+			DecorPillarRecords = MoveTemp(Decor.Pillars);
+			DecorMassPicks = MoveTemp(Decor.MassPicks);
+			DecorPillarPick = Decor.PillarPick;
+			DecorForbidden = MoveTemp(Decor.Forbidden);
+			DecorExitClearance = MoveTemp(Decor.ExitClearance);
+			LastBackdropReport = MoveTemp(Decor.Report);
 		}
 	}
 	RouteLength = Plan.RouteLength();

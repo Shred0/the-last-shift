@@ -16,6 +16,8 @@
 //  tls.Views <halls|hallbeacons|hallcheck> [Label] [Quit] (Brief 19): the halls' checkpoint views (entrance, a web's walkway
 //    from 20 m further and its second platform from 5 m, a floor hall's edge from 5 m, the joints) and the beacons' views at
 //    today's cone and intensity and at two others (tls.Beacon.Light). Shots to Saved/Screenshots/Brief19.
+//  tls.Views areabackdrop [Label] [Quit] (Brief 28): the backdrop's views (the largest open segment from its entrance
+//    ahead, up and down; a mass of each family from 15 m; a pillar's top from 4 m). Shots to Saved/Screenshots/Brief28.
 
 #include "CoreMinimal.h"
 
@@ -1021,10 +1023,124 @@ namespace RenderStatsDebug
 		}
 	}
 
+	// --- The backdrop's views (Brief 28) ---
+
+	/** The pawn flying, its eye at Eye, looking at Look (views off the walkable floors: a mass from 15 m, a pillar's top from 4 m). */
+	static void HoverAt(const FVector& Eye, const FVector& Look)
+	{
+		APawn* P = Pawn();
+		APlayerController* C = PC();
+		if (!P || !C)
+		{
+			return;
+		}
+		ACharacter* Character = Cast<ACharacter>(P);
+		if (Character)
+		{
+			Character->GetCharacterMovement()->SetMovementMode(MOVE_Flying);
+		}
+		const FVector Offset = P->GetPawnViewLocation() - P->GetActorLocation();
+		P->SetActorLocation(Eye - Offset, false, nullptr, ETeleportType::TeleportPhysics);
+		if (Character)
+		{
+			Character->GetCharacterMovement()->StopMovementImmediately();
+		}
+		C->SetControlRotation((Look - Eye).Rotation());
+	}
+
+	/**
+	 * Brief 28's views: from the entrance of the area's largest open segment looking ahead, up and down; a mass of each
+	 * family the area has from 15 m; a pillar's top under its frame from 4 m. Each with the flashlight and in a scan.
+	 */
+	static void AddBackdropSteps(TArray<FStep>& S, const FString& Label)
+	{
+		const AAreaInfo* Info = AAreaInfo::Find(GameWorld());
+		const AAreaGenerator* Gen = AAreaGenerator::Find(GameWorld());
+		if (!Info || !Gen)
+		{
+			return;
+		}
+		int32 Largest = -1;
+		double Area = 0.0;
+		for (int32 I = 0; I < Info->Segments.Num(); ++I)
+		{
+			const FAreaSegmentRecord& Seg = Info->Segments[I];
+			const double A = Seg.Bounds.GetSize().X * Seg.Bounds.GetSize().Y;
+			if (!Seg.bClosed && A > Area)
+			{
+				Area = A;
+				Largest = I;
+			}
+		}
+		if (Largest >= 0)
+		{
+			const FAreaSegmentRecord& Seg = Info->Segments[Largest];
+			const float S0 = Seg.RouteStart;
+			const float S1 = FMath::Max(Seg.RouteEnd, S0 + 1.f);
+			const FVector2D In = RouteAt(*Info, S0 + 150.f);
+			const FVector2D Ahead = RouteAt(*Info, FMath::Min(S0 + 1500.f, S1));
+			const FString Base = FString::Printf(TEXT("S%d_%s"), Largest, LexToString(Seg.Type));
+			Note(FString::Printf(TEXT("LARGEST open segment %d %s, %.0f x %.0f m, entrance (%.0f, %.0f)"), Largest, LexToString(Seg.Type), Seg.Bounds.GetSize().X / 100.0, Seg.Bounds.GetSize().Y / 100.0, In.X, In.Y));
+			for (const TPair<const TCHAR*, double>& Look : { TPair<const TCHAR*, double>(TEXT("Ahead"), 0.0), TPair<const TCHAR*, double>(TEXT("Up"), 55.0), TPair<const TCHAR*, double>(TEXT("Down"), -55.0) })
+			{
+				const FString Name = Base + TEXT("_Entrance_") + Look.Key;
+				AddStand({ Name, In.X, In.Y, FVector(Ahead.X, Ahead.Y, EyeLevel), 100.0 });
+				const double Pitch = Look.Value;
+				S.Add({ TEXT("pitch"), [Pitch]()
+				{
+					if (APlayerController* C = PC())
+					{
+						FRotator R = C->GetControlRotation();
+						R.Pitch = Pitch;
+						C->SetControlRotation(R);
+					}
+					return 0.3f;
+				} });
+				AddShotPair(S, Label, Name);
+			}
+		}
+		for (const AAreaGenerator::FDecorShotPick& Pick : Gen->DecorMassPicks)
+		{
+			const FVector Eye = Pick.At + Pick.Normal * 1500.0;
+			const FString Name = FString::Printf(TEXT("Mass_%s_15m"), *Pick.Family);
+			Note(FString::Printf(TEXT("MASS %s: module at %s facing %s, seen from 15 m"), *Pick.Family, *Pick.At.ToCompactString(), *Pick.Normal.ToCompactString()));
+			S.Add({ Name, [Eye, Pick]() { HoverAt(Eye, Pick.At); return 0.5f; } });
+			AddShotPair(S, Label, Name);
+		}
+		if (!Gen->DecorPillarPick.Family.IsEmpty())
+		{
+			const FVector Tip = Gen->DecorPillarPick.At;
+			const FVector Along = Gen->DecorPillarPick.Normal;
+			const FVector Across(-Along.Y, Along.X, 0.0);
+			const FVector Eye = Tip + (Along + Across).GetSafeNormal() * 400.0 - FVector(0.0, 0.0, 100.0);
+			Note(FString::Printf(TEXT("PILLAR top at %s, seen from 4 m"), *Tip.ToCompactString()));
+			S.Add({ TEXT("Pillar_Top_4m"), [Eye, Tip]() { HoverAt(Eye, Tip); return 0.5f; } });
+			AddShotPair(S, Label, TEXT("Pillar_Top_4m"));
+		}
+		S.Add({ TEXT("walk again"), []()
+		{
+			if (ACharacter* Character = Cast<ACharacter>(Pawn()))
+			{
+				Character->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+			}
+			if (const AAreaInfo* I = AAreaInfo::Find(GameWorld()))
+			{
+				const FVector2D Start = RouteAt(*I, 150.f);
+				const FVector2D Ahead = RouteAt(*I, 1500.f);
+				if (APawn* P = Pawn())
+				{
+					P->SetActorLocation(FVector(Start.X, Start.Y, 100.0), false, nullptr, ETeleportType::TeleportPhysics);
+				}
+				StandAt(Start.X, Start.Y, FVector(Ahead.X, Ahead.Y, EyeLevel));
+			}
+			return 0.5f;
+		} });
+	}
+
 	/** Waits for the area to be ready (repeating itself), then appends the set's steps. */
 	static void AddAreaSteps(const FString& Set, const FString& Label)
 	{
-		GViews.ShotFolder = Set.StartsWith(TEXT("hall")) ? TEXT("Brief19") : TEXT("Brief16");
+		GViews.ShotFolder = Set == TEXT("areabackdrop") ? TEXT("Brief28") : Set.StartsWith(TEXT("hall")) ? TEXT("Brief19") : TEXT("Brief16");
 		GViews.Steps.Add({ TEXT("wait for the area"), [Set, Label]()
 		{
 			UWorld* World = GameWorld();
@@ -1103,6 +1219,10 @@ namespace RenderStatsDebug
 			else if (Set == TEXT("hallbeacons"))
 			{
 				AddBeaconSteps(GViews.Steps, Label);
+			}
+			else if (Set == TEXT("areabackdrop"))
+			{
+				AddBackdropSteps(GViews.Steps, Label);
 			}
 			else
 			{
@@ -1315,7 +1435,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsStandAtCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsViewsCommand(
 	TEXT("tls.Views"),
-	TEXT("tls.Views <home|arrival|lights|shots|arrivalshots|area|areashots|areacheck|areawalls|areamouth|terminals|halls|hallbeacons|hallcheck> [Label=Run] [Quit=0]: (PIE or a package) fixed views of Prologue_Home (home, lights, shots) or Prologue_Arrival (arrival, arrivalshots), or of the current area computed from its plan (area: two or three views per segment measured like home; areashots: each segment from its entry with the flashlight and in a scan; areacheck: Brief 16's checkpoint views of the first corridor, gate terminal and catwalk; areawalls: the most squeezed and the most stretched wall panel from 2.5 m, with the flashlight and in a scan; areamouth: the first niche or dead-end mouth a conduit run crosses, along the corridor and square on, with the flashlight and in a scan; terminals (any map): every terminal with the modelled body from 1.8 and 2.6 m, in the map's light and with the flashlight; shots to Saved/Screenshots/Brief16); halls (Brief 19, any area): each hall from its entrance with the flashlight and in a scan (a web hall's scan also from 20 m further along the walkway), a web hall's second platform on the route from 5 m, a floor hall's edge from 5 m, and the joints with the segments before and after it; hallbeacons: each beacon powered, from its entrance and from under it with the flashlight and its body and rod in a scan, at today's cone and intensity, at twice the cone and at 0.3 times the intensity, then the values put back; hallcheck: both; shots to Saved/Screenshots/Brief19. shots/arrivalshots: each space's view in normal light and with a scan. home/arrival: each view's draw calls, primitives and GPU time over 240 frames, uncapped; at the heaviest view the same while Stopped with a scan alive, and the frame of 8 scans. lights: Prologue_Home from the entrance of each of its four spaces at eye height, and Brief 13's lit view: mean level and share of pixels under 20 levels. Shots to Saved/Screenshots/Brief15."),
+	TEXT("tls.Views <home|arrival|lights|shots|arrivalshots|area|areashots|areacheck|areawalls|areamouth|terminals|halls|hallbeacons|hallcheck|areabackdrop> [Label=Run] [Quit=0]: (PIE or a package) fixed views of Prologue_Home (home, lights, shots) or Prologue_Arrival (arrival, arrivalshots), or of the current area computed from its plan (area: two or three views per segment measured like home; areashots: each segment from its entry with the flashlight and in a scan; areacheck: Brief 16's checkpoint views of the first corridor, gate terminal and catwalk; areawalls: the most squeezed and the most stretched wall panel from 2.5 m, with the flashlight and in a scan; areamouth: the first niche or dead-end mouth a conduit run crosses, along the corridor and square on, with the flashlight and in a scan; terminals (any map): every terminal with the modelled body from 1.8 and 2.6 m, in the map's light and with the flashlight; shots to Saved/Screenshots/Brief16); halls (Brief 19, any area): each hall from its entrance with the flashlight and in a scan (a web hall's scan also from 20 m further along the walkway), a web hall's second platform on the route from 5 m, a floor hall's edge from 5 m, and the joints with the segments before and after it; hallbeacons: each beacon powered, from its entrance and from under it with the flashlight and its body and rod in a scan, at today's cone and intensity, at twice the cone and at 0.3 times the intensity, then the values put back; hallcheck: both; shots to Saved/Screenshots/Brief19; areabackdrop (Brief 28, any area): the largest open segment from its entrance looking ahead, up and down, a mass of each family from 15 m and a pillar's top under its frame from 4 m (the pawn flying), each with the flashlight and in a scan, shots to Saved/Screenshots/Brief28. shots/arrivalshots: each space's view in normal light and with a scan. home/arrival: each view's draw calls, primitives and GPU time over 240 frames, uncapped; at the heaviest view the same while Stopped with a scan alive, and the frame of 8 scans. lights: Prologue_Home from the entrance of each of its four spaces at eye height, and Brief 13's lit view: mean level and share of pixels under 20 levels. Shots to Saved/Screenshots/Brief15."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		const FString Set = Args.Num() > 0 ? Args[0].ToLower() : TEXT("home");

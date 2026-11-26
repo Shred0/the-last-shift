@@ -92,7 +92,7 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnAreaGenerationFinished, class AAreaGener
  * On BeginPlay: (1) read the recipe and seed; (2) plan the route with the planner; (3) publish the plan as one array
  * of box transforms per kind (the Plan* properties, one engine cube of 100 cm per box) and run the PCG graphs on it
  * with the same seed (StructureGraph: floors, walls, curbs, pillars, ceilings, and the kit's meshes over the modelled
- * segments, whose boxes it spawns hidden: collision only; BackdropGraph: the far masses); (4) spawn the gameplay actors in their slots (residues,
+ * segments, whose boxes it spawns hidden: collision only; BackdropGraph: the far masses and, Brief 28, their modules); (4) spawn the gameplay actors in their slots (residues,
  * gates with door, terminal and regenerating residue, light groups, log and twin AI terminals, beacons, exit, area info) and move the map's PlayerStart
  * and entity to theirs; (5) fit the map's NavMeshBoundsVolume to the route, wait for PCG and for the dynamic navmesh;
  * (6) run the validator; (7) broadcast OnAreaReady. Until then the player pawn cannot move, look or stop time and
@@ -445,6 +445,37 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "10.0", ClampMax = "200.0", Units = "cm"))
 	float DressTwinBendRadius = 40.f;
 
+	/** SM_KitCatwalkFrame: from its pivot (the deck's underside) down to its lowest point, the tip of the triangle it makes (Brief 28: the pillars' tops). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "0.0", ClampMax = "1000.0", Units = "cm"))
+	float DressFrameTipDepth = 165.f;
+
+	// --- The backdrop's dressing (Brief 28): the masses' modules, the levels of walkways above and below, the pillars ---
+	// Each part's switch and values are the recipe's (FAreaRecipe::Backdrop, Config/DefaultGame.ini). Below: the space every
+	// part keeps clear and the modules' sizes. Look only, from the finished plan with no random draw.
+
+	/** Nothing of the backdrop's dressing stands within this distance of a walkable volume's sides. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop Dressing", meta = (ClampMin = "0.0", ClampMax = "2000.0", Units = "cm"))
+	float DecorSideClearance = 200.f;
+
+	/** Nor within this distance above or below a walkable deck or floor (the pillars under the walked level's own frames excepted). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop Dressing", meta = (ClampMin = "0.0", ClampMax = "5000.0", Units = "cm"))
+	float DecorVerticalClearance = 800.f;
+
+	/** The masses' modules: their side, the grid they tile a face on (SM_Backdrop*: 4 m x 4 m, pivot at the bottom middle of their back, +X out of the face). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop Dressing", meta = (ClampMin = "100.0", ClampMax = "2000.0", Units = "cm"))
+	float DecorModuleSize = 400.f;
+
+	/** The deepest module's relief off its face: a cell closer than this to another mass gets none, and the levels keep this far from a mass. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop Dressing", meta = (ClampMin = "0.0", ClampMax = "1000.0", Units = "cm"))
+	float DecorModuleDepth = 230.f;
+
+	/** The range a module is scaled within, along and up, to fit its face. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop Dressing", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float DecorModuleMinFactor = 0.75f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop Dressing", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	float DecorModuleMaxFactor = 1.25f;
+
 	/** Instances of the dressing (all pieces). */
 	UFUNCTION(BlueprintPure, Category = "Area")
 	int32 GetDressingInstanceCount() const;
@@ -649,6 +680,156 @@ public:
 	/** SM_KitTwinCable: the bundles of cables running to the twin AI's terminal. */
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
 	TArray<FTransform> DressTwinCables;
+
+	// The backdrop's dressing (Brief 28), one array per mesh: the masses' modules (read by the backdrop graph), the levels'
+	// deck plates, curbs and frames and the pillars (read by the structure graph). Component tags "AreaDecor" and "Area<array>".
+
+	/** Area 1's modules (SM_BackdropHullRib, SM_BackdropHullPlate, SM_BackdropHullFrame). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassHullRib;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassHullPlate;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassHullFrame;
+
+	/** Area 2's modules (SM_BackdropServerStack, SM_BackdropServerBays, SM_BackdropServerRiser). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassServerStack;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassServerBays;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassServerRiser;
+
+	/** Area 3's modules (SM_BackdropMachColumn, SM_BackdropMachPipes, SM_BackdropMachRing). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassMachColumn;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassMachPipes;
+
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorMassMachRing;
+
+	/** The levels' decks (SM_KitFloorPlate). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorLayerPlates;
+
+	/** The levels' curbs (SM_KitCurb). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorLayerCurbs;
+
+	/** The levels' frames (SM_KitCatwalkFrame). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorLayerFrames;
+
+	/** The pillars (SM_KitCornerPost, scaled along its length). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Backdrop Dressing")
+	TArray<FTransform> DecorPillars;
+
+	/** The decor arrays by index (the order above). */
+	static constexpr int32 DecorHullRib = 0;
+	static constexpr int32 DecorHullPlate = 1;
+	static constexpr int32 DecorHullFrame = 2;
+	static constexpr int32 DecorServerStack = 3;
+	static constexpr int32 DecorServerBays = 4;
+	static constexpr int32 DecorServerRiser = 5;
+	static constexpr int32 DecorMachColumn = 6;
+	static constexpr int32 DecorMachPipes = 7;
+	static constexpr int32 DecorMachRing = 8;
+	static constexpr int32 DecorLayerPlate = 9;
+	static constexpr int32 DecorLayerCurb = 10;
+	static constexpr int32 DecorLayerFrame = 11;
+	static constexpr int32 DecorPillar = 12;
+	static constexpr int32 DecorMeshCount = 13;
+
+	/** What a pillar's foot stands on. */
+	static constexpr uint8 PillarFootGeometry = 0;
+	static constexpr uint8 PillarFootMaxLength = 1;
+	static constexpr uint8 PillarFootCut = 2;
+
+	/** The property name of a decor array ("DecorMassHullRib"...), also its component tag after "Area". */
+	static const TCHAR* GetDecorArrayName(int32 Mesh);
+
+	/** 0 the masses, 1 the levels, 2 the pillars. */
+	static int32 GetDecorPart(int32 Mesh);
+
+	const TArray<FTransform>& GetDecorArray(int32 Mesh) const;
+	TArray<FTransform>* MutableDecorArray(int32 Mesh);
+
+	/** The PCG-built components of one decor array (Mesh < 0: all of them). */
+	TArray<UInstancedStaticMeshComponent*> GetDecorComponents(int32 Mesh) const;
+
+	/** Instances PCG built of the backdrop's dressing. */
+	UFUNCTION(BlueprintPure, Category = "Area")
+	int32 GetDecorInstanceCount() const;
+
+	/** One mass face of the last build: whether it is turned to the route, its cells within reach and what they got. */
+	struct FDecorFaceRecord
+	{
+		int32 Mass = -1;
+		/** 0..5: +X, -X, +Y, -Y, +Z, -Z. */
+		int32 Face = -1;
+		FVector Normal = FVector::ZeroVector;
+		FVector Centre = FVector::ZeroVector;
+		FVector2D Size = FVector2D::ZeroVector;
+		bool bTowardRoute = false;
+		int32 CellsInReach = 0;
+		int32 Placed = 0;
+		int32 SkippedMass = 0;
+		int32 SkippedClear = 0;
+		EAreaBackdropFamily Family = EAreaBackdropFamily::None;
+	};
+
+	/** One level of walkways of the last build. */
+	struct FDecorLevelRecord
+	{
+		int32 Segment = -1;
+		/** +1, +2... above, -1, -2... below. */
+		int32 Level = 0;
+		float Z = 0.f;
+		int32 Turns = 0;
+		int32 Plates = 0;
+		int32 Curbs = 0;
+		int32 Frames = 0;
+		int32 PiecesCut = 0;
+		FBox2D Bounds = FBox2D(ForceInit);
+		/** The farthest corner from the segment's centre: the level's and the walked level's. */
+		double Reach = 0.0;
+		double WalkedReach = 0.0;
+	};
+
+	struct FDecorPillarRecord
+	{
+		FVector Top = FVector::ZeroVector;
+		float Length = 0.f;
+		uint8 Foot = 0;
+		bool bWalked = false;
+	};
+
+	/** A view for tls.Views areabackdrop: a module of a family (or a pillar's top) and the way it faces. */
+	struct FDecorShotPick
+	{
+		FString Family;
+		FVector At = FVector::ZeroVector;
+		FVector Normal = FVector::ZeroVector;
+	};
+
+	TArray<FDecorFaceRecord> DecorFaces;
+	TArray<FDecorLevelRecord> DecorLevels;
+	TArray<FDecorPillarRecord> DecorPillarRecords;
+	TArray<FDecorShotPick> DecorMassPicks;
+	FDecorShotPick DecorPillarPick;
+	/** The space kept clear round the walkable floors, and the exit corridors' line and clearance (2D), as the last build used them. */
+	TArray<FBox> DecorForbidden;
+	TArray<FBox2D> DecorExitClearance;
+
+	/** What the backdrop's dressing placed at the last build (logged at ready, BACKDROP line). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area|State")
+	FString LastBackdropReport;
 
 	/** The floor strips of the last dressing (Brief 26): DressFloorPlates from this index on fill the floor to the wall panels' slab. */
 	int32 DressFloorStripsFrom = 0;

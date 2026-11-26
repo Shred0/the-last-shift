@@ -70,6 +70,79 @@ struct THELASTSHIFT_API FAreaSegmentSpec
 	float PoweredSeconds = 6.f;
 };
 
+/** The module family a recipe dresses its masses' faces with (Brief 28). */
+UENUM(BlueprintType)
+enum class EAreaBackdropFamily : uint8
+{
+	None,
+	/** Area 1, the hull: deep vertical ribs, horizontal stringers, plating between them. */
+	Hull,
+	/** Area 2, the server halls: tiers of shelves holding rows of blade fronts, tier upon tier. */
+	Servers,
+	/** Area 3, the core: banded columns with rings round them and pipes running up their faces. */
+	Machinery,
+	/** Area 4, the return: Servers and Machinery, alternating from mass to mass. */
+	ServersAndMachinery
+};
+
+/**
+ * The backdrop's dressing of an area (Brief 28): look only (no collision, no navigation), computed from the finished plan
+ * with no random draw, so the plan, the layout hash and everything placed stay as they are. Nothing of it stands in the
+ * walkable space, within the generator's DecorSideClearance of a walkable volume's sides or DecorVerticalClearance above or
+ * below a walkable floor (the pillars under the walked level's own frames excepted), or in an exit corridor's line and
+ * clearance. Each part has its own switch; with all three off the area is as before Brief 28.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FAreaBackdropRecipe
+{
+	GENERATED_BODY()
+
+	/** Part A: the masses' faces turned to the route carry the family's modules (the boxes stay, as their cores). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop")
+	bool bMasses = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop")
+	EAreaBackdropFamily Family = EAreaBackdropFamily::None;
+
+	/** A face is dressed where it lies within this distance of a walkable floor (what the route sees; the triangle budget). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "0.0", ClampMax = "300.0", Units = "m"))
+	float MassReachM = 45.f;
+
+	/** Part B: levels of walkways above and below every open segment, drawn from its own walkways and platforms. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop")
+	bool bLayers = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 LayerCountAbove = 2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 LayerCountBelow = 2;
+
+	/** Height between two levels (the walked level's floor at 0). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "4.0", ClampMax = "60.0", Units = "m"))
+	float LayerSpacingM = 12.f;
+
+	/** Each level is the walked one enlarged by this about the segment's centre (and turned a quarter turn more per level). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	float LayerScale = 1.5f;
+
+	/** The levels' pieces (a deck plate, a curb, a frame line) are about this long: fewer, larger pieces than the walked level's. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "1.0", ClampMax = "40.0", Units = "m"))
+	float LayerPieceLengthM = 16.f;
+
+	/** Part C: pillars under the walkways, the walked ones and the levels', from a frame's lowest point down. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop")
+	bool bPillars = true;
+
+	/** One pillar every this many frames along a walkway (and always under each platform's corners). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "1", ClampMax = "20"))
+	int32 PillarEveryNthFrame = 3;
+
+	/** A pillar goes down to the first geometry below it, or this far where there is none. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "1.0", ClampMax = "300.0", Units = "m"))
+	float PillarMaxLengthM = 80.f;
+};
+
 /** What an area is made of: the route's segments in order, what is placed along it, and the route length accepted. */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FAreaRecipe
@@ -134,6 +207,10 @@ struct THELASTSHIFT_API FAreaRecipe
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Way Out")
 	bool bTwinAIRoom = false;
+
+	/** The backdrop's dressing (Brief 28): the masses' modules, the levels of walkways, the pillars. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop")
+	FAreaBackdropRecipe Backdrop;
 
 	/** Number of Gate entries in Segments. */
 	int32 GetGateCount() const;
