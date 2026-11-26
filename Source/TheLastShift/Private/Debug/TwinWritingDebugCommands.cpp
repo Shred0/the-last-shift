@@ -950,8 +950,12 @@ namespace TwinWritingDebug
 				StandBefore(T, 100.f);
 				ResetTwinWatch();
 				G.Banked = Banked();
+				// Brief 26: the first payment wakes the twin AI (TwinAIWakeCost), every later one plays a part (TwinAIPartCost).
+				const int32 Cost = T->GetCost();
+				const int32 Want = Part == 1 ? UTheLastShiftSettings::GetTwinAIWakeCost() : UTheLastShiftSettings::GetTwinAIPartCost();
 				const bool bPaid = T->TryActivate(Pawn());
-				Check(bPaid && Banked() == G.Banked - 1 && T->GetLastPlayedPart() == Part, FString::Printf(TEXT("parts: payment %d plays part %d (banked %d -> %d)"), Part, T->GetLastPlayedPart(), G.Banked, Banked()));
+				Check(bPaid && Cost == Want && Banked() == G.Banked - Cost && T->GetLastPlayedPart() == Part,
+					FString::Printf(TEXT("parts: payment %d costs %d (want %d) and plays part %d (banked %d -> %d)"), Part, Cost, Want, T->GetLastPlayedPart(), G.Banked, Banked()));
 				Check(Run()->GetArchive().TwinPartsPlayed == Part && Channel()->IsBusy(),
 					FString::Printf(TEXT("parts: part %d stored in the archive at the payment, while its messages are still to be typed"), Part));
 				if (Part == 1 && bShots)
@@ -1983,13 +1987,43 @@ namespace TwinWritingDebug
 					StandBefore(T, 100.f);
 					const bool bPaid = T->TryActivate(Pawn());
 					Check(!bPaid && Banked() == 0 && Run()->GetArchive().TwinPartsPlayed == 0, TEXT("twin: with no energy a payment is refused (no part played, banked 0)"));
-					Energy()->RestoreBankedEnergy(3);
+					// Brief 26: waking the twin AI costs TwinAIWakeCost (2): with one less, the first payment is refused.
+					Energy()->RestoreBankedEnergy(FMath::Max(0, UTheLastShiftSettings::GetTwinAIWakeCost() - 1));
+					return 0.3f;
+				}));
+				More.Add(Do(TEXT("twin: the wake cost"), []()
+				{
+					ATwinAITerminal* T = TwinTerminal();
+					const int32 Wake = UTheLastShiftSettings::GetTwinAIWakeCost();
+					const UInteractPromptWidget* P = Prompt();
+					Check(Wake == 2 && UTheLastShiftSettings::GetTwinAIPartCost() == 1, FString::Printf(TEXT("twin: the ini's costs are 2 to wake, 1 a part (%d, %d)"), Wake, UTheLastShiftSettings::GetTwinAIPartCost()));
+					Check(T->GetCost() == Wake && P && P->GetMode() == EInteractPromptMode::Power && P->GetShownText().Contains(FString::Printf(TEXT("Power — %d"), Wake)),
+						FString::Printf(TEXT("twin: before the first payment the prompt offers it at the wake cost (\"%s\")"), P ? *P->GetShownText() : TEXT("-")));
+					G.Banked = Banked();
+					const bool bPaid = T->TryActivate(Pawn());
+					Check(!bPaid && Banked() == G.Banked && Run()->GetArchive().TwinPartsPlayed == 0,
+						FString::Printf(TEXT("twin: with %d energy the first payment is refused (banked %d, no part played)"), G.Banked, Banked()));
+					// The value is the ini's: changed on the settings it changes the cost, then back.
+					MutableSettings()->TwinAIWakeCost = 3;
+					MutableSettings()->TwinAIPartCost = 2;
+					const int32 Changed = T->GetCost();
+					MutableSettings()->TwinAIWakeCost = Wake;
+					MutableSettings()->TwinAIPartCost = 1;
+					Check(Changed == 3 && T->GetCost() == Wake, FString::Printf(TEXT("twin: the wake cost follows the setting (3 -> %d, back %d)"), Changed, T->GetCost()));
+					Energy()->RestoreBankedEnergy(Wake + 2 * UTheLastShiftSettings::GetTwinAIPartCost());
 					return 0.3f;
 				}));
 				AddPartsPhase(More, FString::Printf(TEXT("A%d_Spend_1"), GArea.Act), false);
 				More.Add(Do(TEXT("twin: all energy spent"), []()
 				{
-					Check(Banked() == 0, FString::Printf(TEXT("twin: three payments took 3 (banked %d)"), Banked()));
+					const int32 Total = UTheLastShiftSettings::GetTwinAIWakeCost() + 2 * UTheLastShiftSettings::GetTwinAIPartCost();
+					Check(Banked() == 0, FString::Printf(TEXT("twin: three payments took %d (banked %d)"), Total, Banked()));
+					return 0.f;
+				}));
+				More.Add(Do(TEXT("twin: the part cost after the wake"), []()
+				{
+					// Part 2's prompt was checked by the parts' payments; here: after every part, the cost is the part cost.
+					Check(TwinTerminal()->GetCost() == UTheLastShiftSettings::GetTwinAIPartCost(), FString::Printf(TEXT("twin: once awake the next payment costs the part cost (%d)"), TwinTerminal()->GetCost()));
 					return 0.f;
 				}));
 				AddListCheck(More, TEXT("twin archive"), []() { return ExpectedLabels({}, 3); });

@@ -21,6 +21,7 @@
 #include "Engine/GameInstance.h"
 #include "Engine/PointLight.h"
 #include "Engine/SpotLight.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
@@ -39,6 +40,36 @@
 #include "UObject/ObjectSaveContext.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(AreaGenerator)
+
+#if !UE_BUILD_SHIPPING
+static TAutoConsoleVariable<int32> CVarAreaWayOut(
+	TEXT("tls.Area.WayOut"), 1,
+	TEXT("1: the route ends in the twin AI's room (where the recipe asks for it) and the exit corridor (Brief 26). 0: neither, the exit at the route's end as before Brief 26 (diagnostics: the layout hash is then the one before Brief 26). Read at each generation."),
+	ECVF_Default);
+static TAutoConsoleVariable<int32> CVarAreaFloorStrips(
+	TEXT("tls.Area.FloorStrips"), 1,
+	TEXT("1: a strip of the floor plates' family fills the floor from each wall panel's foot to its slab (Brief 26). 0: none, the gap before Brief 26 (diagnostics). Read at each generation."),
+	ECVF_Default);
+#endif
+
+/** Whether the way out (Brief 26) is built: always, but tls.Area.WayOut 0 turns it off for diagnostics. */
+static bool IsAreaWayOutOn()
+{
+#if !UE_BUILD_SHIPPING
+	return CVarAreaWayOut.GetValueOnGameThread() != 0;
+#else
+	return true;
+#endif
+}
+
+static bool IsAreaFloorStripsOn()
+{
+#if !UE_BUILD_SHIPPING
+	return CVarAreaFloorStrips.GetValueOnGameThread() != 0;
+#else
+	return true;
+#endif
+}
 
 const TCHAR* LexToString(EAreaPieceKind Kind)
 {
@@ -265,6 +296,12 @@ namespace AreaGen
 		FVector2D DoorPos = FVector2D::ZeroVector;
 		int32 DoorDir = 0;
 		float PoweredSeconds = 0.f;
+		// The way out (Brief 26): the exit corridor and the twin AI's room, their mouth (the corridor's) or entrance (the
+		// room's) and the direction they are entered in.
+		bool bExitCorridor = false;
+		bool bTwinRoom = false;
+		FVector2D Mouth = FVector2D::ZeroVector;
+		int32 EnterDir = 0;
 	};
 
 	struct FSpot
@@ -295,6 +332,10 @@ namespace AreaGen
 		TArray<int32> RouteSeg;
 		TArray<float> RouteDist;
 		TArray<FSpot> SpurEnds;
+		/** Cell edges (cell X, cell Y, direction) the exit corridor ends on: open on the dark, their wall collision only (Brief 26). */
+		TSet<FIntVector> OpenEdges;
+		/** Route length before the way out (the recipe's own route): what every placement made before it reads. */
+		float LengthBeforeWayOut = 0.f;
 
 		bool IsFloor(const FIntPoint& C) const { const FCell* E = Cells.Find(C); return E && E->Kind == EKind::Floor; }
 		bool IsPillar(const FIntPoint& C) const { const FCell* E = Cells.Find(C); return E && E->Kind == EKind::Pillar; }
@@ -501,6 +542,166 @@ namespace AreaGen
 		TArray<FLightPlacement> LightPlacements;
 		TArray<FVector2D> NormalResidues;
 		TArray<FVector2D> UsedSideSpots;
+		/** Where the recipe's route ends and the way it heads there. */
+		FVector2D EndHead = FVector2D::ZeroVector;
+		int32 EndDir = 0;
+
+		// --- The way out (Brief 26) ---
+		//
+		// After the layout is chosen and everything of the recipe is placed, from the finished plan, with no random draw:
+		// the twin AI's room (when the recipe asks for it) and the exit corridor after it, so no draw of the stream and no
+		// placement before them changes. The corridor is straight: it goes on in the route's last direction, or, after the
+		// room, from the middle of one of the room's two side walls (toward the route's start line first). A seed whose plan
+		// cannot take them fails this layout.
+
+		struct FWayOut
+		{
+			int32 RoomSegment = -1;
+			int32 CorridorSegment = -1;
+			FBox2D RoomRect = FBox2D(ForceInit);
+			int32 RoomDir = 0;
+			FVector2D ExitPos = FVector2D::ZeroVector;
+			FVector2D ExitDir = FVector2D(1.0, 0.0);
+			float HalfWidth = 0.f;
+			float Length = 0.f;
+		};
+		FWayOut WayOut;
+		FString WayOutError;
+
+		bool PlaceWayOut(bool bEnabled)
+		{
+			Plan.LengthBeforeWayOut = Plan.RouteLength();
+			if (!bEnabled)
+			{
+				return true;
+			}
+			const float W = SnapWidth(FMath::Clamp(G.ExitCorridorWidth, 200.f, 1000.f));
+			const float Depth = SnapLen(FMath::Clamp(R.ExitTriggerDepthM, 2.f, 50.f) * 100.f);
+			const float Run = SnapLen(FMath::Clamp(R.ExitRunLengthM, 10.f, 200.f) * 100.f);
+			const float Len = Depth + Run;
+			const FVector2D Head = EndHead;
+			const int32 Dir = EndDir;
+			const float PrevWidth = Plan.Segs.Num() > 0 ? Plan.Segs.Last().Width : 0.f;
+			auto JointZone = [&](const FVector2D& At, float Width)
+			{
+				const double Reach = (Margin + 2) * Cell + 0.5 * FMath::Max(Width, PrevWidth) + 50.0;
+				return FBox2D(At - FVector2D(Reach, Reach), At + FVector2D(Reach, Reach));
+			};
+
+			TArray<int32> CorridorDirs;
+			FVector2D RoomCentre = FVector2D::ZeroVector;
+			float Side = 0.f;
+			if (R.bTwinAIRoom)
+			{
+				Side = SnapWidth(FMath::Clamp(G.TwinRoomSide, 1000.f, 1400.f));
+				const float Passage = SnapLen(FMath::Clamp(G.TwinRoomPassageLength, 300.f, 1000.f));
+				const FVector2D F = DirV(Dir);
+				FSeg Room;
+				Room.Type = EAreaSegmentType::Room;
+				Room.bClosed = true;
+				Room.bTwinRoom = true;
+				Room.Width = Side;
+				Room.Mouth = Head;
+				Room.EnterDir = Dir;
+				FLeg PassageLeg;
+				PassageLeg.Rect = MakeRect(Head, Dir, 0.0, Passage, -W * 0.5, W * 0.5);
+				PassageLeg.Start = Head;
+				PassageLeg.Dir = Dir;
+				PassageLeg.Length = Passage;
+				FLeg RoomLeg;
+				RoomLeg.Rect = MakeRect(Head + F * Passage, Dir, 0.0, Side, -Side * 0.5, Side * 0.5);
+				RoomLeg.Start = Head + F * Passage;
+				RoomLeg.Dir = Dir;
+				RoomLeg.Length = Side;
+				Room.Legs = { PassageLeg, RoomLeg };
+				TArray<FIntPoint> Cells;
+				CellsIn(PassageLeg.Rect, Cells);
+				CellsIn(RoomLeg.Rect, Cells);
+				const TArray<FIntPoint> Unique = TSet<FIntPoint>(Cells).Array();
+				TArray<FIntPoint> Sorted = Unique;
+				Sorted.Sort([](const FIntPoint& X, const FIntPoint& Y) { return X.Y != Y.Y ? X.Y < Y.Y : X.X < Y.X; });
+				const int32 Index = Plan.Segs.Num();
+				if (!Plan.CanPlace(Sorted, Index, false, { JointZone(Head, W) }, Margin))
+				{
+					WayOutError = FString::Printf(TEXT("the twin AI's room (%.0f m a side) does not fit after the route's end at (%.0f, %.0f) without touching another segment"), Side / 100.f, Head.X, Head.Y);
+					return false;
+				}
+				Plan.Segs.Add(Room);
+				Plan.Commit(Sorted, Index, EKind::Floor);
+				RoomCentre = Head + F * (Passage + Side * 0.5f);
+				Plan.AddRoute(RoomCentre, Index);
+				WayOut.RoomSegment = Index;
+				WayOut.RoomRect = RoomLeg.Rect;
+				WayOut.RoomDir = Dir;
+				if (Dir == 0)
+				{
+					const int32 Toward = Head.Y > 0.0 ? 3 : 1;
+					CorridorDirs = { Toward, Opposite(Toward) };
+				}
+				else
+				{
+					CorridorDirs = { 0 };
+				}
+			}
+			else
+			{
+				CorridorDirs = { Dir };
+			}
+
+			const int32 Index = Plan.Segs.Num();
+			for (const int32 D : CorridorDirs)
+			{
+				const FVector2D Start = R.bTwinAIRoom ? RoomCentre + DirV(D) * (Side * 0.5f) : Head;
+				const FBox2D Rect = MakeRect(Start, D, 0.0, Len, -W * 0.5, W * 0.5);
+				TArray<FIntPoint> Cells;
+				CellsIn(Rect, Cells);
+				// After the room only the room may be near its mouth; else the predecessor around the joint, as any segment.
+				const FBox2D Zone = R.bTwinAIRoom ? Grow(WayOut.RoomRect, Cell) : JointZone(Head, W);
+				if (!Plan.CanPlace(Cells, Index, false, { Zone }, Margin))
+				{
+					continue;
+				}
+				FSeg Corridor;
+				Corridor.Type = EAreaSegmentType::Corridor;
+				Corridor.bClosed = true;
+				Corridor.bExitCorridor = true;
+				Corridor.Width = W;
+				Corridor.Mouth = Start;
+				Corridor.EnterDir = D;
+				FLeg Leg;
+				Leg.Rect = Rect;
+				Leg.Start = Start;
+				Leg.Dir = D;
+				Leg.Length = Len;
+				Corridor.Legs.Add(Leg);
+				Plan.Segs.Add(Corridor);
+				Plan.Commit(Cells, Index, EKind::Floor);
+				if (R.bTwinAIRoom)
+				{
+					Plan.AddRoute(Start, Index - 1);
+				}
+				Plan.AddRoute(Start + DirV(D) * Len, Index);
+				// The far end: open on the dark (its wall box is kept for collision only, never dressed or rendered).
+				const TSet<FIntPoint> Own(Cells);
+				for (const FIntPoint& C : Cells)
+				{
+					if (!Own.Contains(C + Dirs[D]))
+					{
+						Plan.OpenEdges.Add(FIntVector(C.X, C.Y, D));
+					}
+				}
+				Plan.ComputeRouteDistances();
+				WayOut.CorridorSegment = Index;
+				WayOut.ExitPos = Start + DirV(D) * Depth;
+				WayOut.ExitDir = DirV(D);
+				WayOut.HalfWidth = W * 0.5f;
+				WayOut.Length = Len;
+				return true;
+			}
+			WayOutError = FString::Printf(TEXT("the exit corridor (%.0f m) does not fit %s without touching another segment"), Len / 100.f,
+				R.bTwinAIRoom ? TEXT("from either side wall of the twin AI's room") : *FString::Printf(TEXT("straight on from the route's end at (%.0f, %.0f)"), Head.X, Head.Y));
+			return false;
+		}
 
 		bool Build()
 		{
@@ -519,7 +720,10 @@ namespace AreaGen
 					return false;
 				}
 			}
+			EndHead = Head;
+			EndDir = Dir;
 			Plan.ComputeRouteDistances();
+			Plan.LengthBeforeWayOut = Plan.RouteLength();
 
 			for (int32 Index = 0; Index < Plan.Segs.Num(); ++Index)
 			{
@@ -1463,7 +1667,8 @@ namespace AreaGen
 			{
 				Others.Emplace(P, OthersReach);
 			}
-			const float L = Plan.RouteLength();
+			// The recipe's route: the way out (Brief 26) moves no terminal placed along it.
+			const float L = Plan.LengthBeforeWayOut;
 			bool bAll = true;
 
 			// Log terminals: one per equal part of the route, each in its own closed corridor or room, in route order.
@@ -1509,14 +1714,15 @@ namespace AreaGen
 				}
 			}
 
-			// The twin AI's terminal: the last closed segment of the route.
-			const int32 Twins = FMath::Clamp(R.TwinAITerminalCount, 0, 1);
+			// The twin AI's terminal: in the twin AI's room when there is one (PlaceTwinInRoom), else the last closed segment
+			// of the recipe's route.
+			const int32 Twins = WayOut.RoomSegment >= 0 ? 0 : FMath::Clamp(R.TwinAITerminalCount, 0, 1);
 			for (int32 K = 0; K < Twins; ++K)
 			{
 				int32 Last = -1;
 				for (int32 Index = Plan.Segs.Num() - 1; Index >= 0 && Last < 0; --Index)
 				{
-					Last = Plan.Segs[Index].bClosed ? Index : -1;
+					Last = Plan.Segs[Index].bClosed && !Plan.Segs[Index].bExitCorridor ? Index : -1;
 				}
 				FString Why = TEXT("the route has no closed segment");
 				FWallPlacement Spot;
@@ -1545,6 +1751,38 @@ namespace AreaGen
 				}
 			}
 			return bAll;
+		}
+
+		/**
+		 * Brief 26: the twin AI's terminal in its room, set into the middle of the wall that faces the entrance: its back
+		 * (BackX, the body's back along its +X) on the wall panels' slab, facing the entrance; its standing place Stand in
+		 * front of its front (FrontX). WallThickness: the wall box's (the slab is its middle). False (and WallError) when the
+		 * standing place is not free or not within Reach.
+		 */
+		bool PlaceTwinInRoom(float BackX, float FrontX, float Stand, float Reach, float WallThickness)
+		{
+			if (WayOut.RoomSegment < 0 || R.TwinAITerminalCount <= 0)
+			{
+				return true;
+			}
+			const FSeg& Room = Plan.Segs[WayOut.RoomSegment];
+			const FLeg& Leg = Room.Legs.Last();
+			const FVector2D F = DirV(Leg.Dir);
+			const FVector2D FarFace = Leg.Start + F * Leg.Length;
+			FWallPlacement Spot;
+			Spot.Segment = WayOut.RoomSegment;
+			Spot.Facing = -F;
+			Spot.Pos = FarFace + F * (0.5f * WallThickness + BackX);
+			Spot.Stand = Spot.Pos - F * (FrontX + Stand);
+			Spot.RouteDistance = Plan.Project(Spot.Pos);
+			if (!Plan.IsClear(Spot.Stand, 60.0) || FVector2D::Distance(Spot.Pos, Spot.Stand) > Reach - 10.f)
+			{
+				WallError += FString::Printf(TEXT("%stwin AI terminal: its standing place in the room (%.0f, %.0f) is not free or out of reach (%.0f cm of %.0f)"),
+					WallError.IsEmpty() ? TEXT("") : TEXT("; "), Spot.Stand.X, Spot.Stand.Y, FVector2D::Distance(Spot.Pos, Spot.Stand), Reach);
+				return false;
+			}
+			TwinPlacements.Add(Spot);
+			return true;
 		}
 
 		// --- Beacons (Brief 10) ---
@@ -1755,7 +1993,8 @@ namespace AreaGen
 						continue;
 					}
 					const float RouteS = Plan.Project(Pos);
-					if (RouteS < MinS || RouteS >= MaxS || RouteS < 300.f || RouteS > Plan.RouteLength() - 600.f || Plan.Project(Stand) > Plan.RouteLength() - 600.f)
+					const float RouteEnd = Plan.LengthBeforeWayOut;
+					if (RouteS < MinS || RouteS >= MaxS || RouteS < 300.f || RouteS > RouteEnd - 600.f || Plan.Project(Stand) > RouteEnd - 600.f)
 					{
 						++OffRange;
 						continue;
@@ -1809,6 +2048,8 @@ namespace AreaGen
 		// Parallel to Walls, Curbs, Ceilings and Pillars: what the dressing needs to know of each box.
 		TArray<FEdgeRun> WallRuns, CurbRuns;
 		TArray<int32> CeilingSegments, PillarSegments;
+		/** Parallel to Walls: the exit corridor's far end (Brief 26), open on the dark: collision only, never dressed. */
+		TArray<bool> WallOpen;
 	};
 
 	static FBox BoxTransform(const FVector& Min, const FVector& Max)
@@ -1956,6 +2197,16 @@ namespace AreaGen
 				const FVector Min = bAlongY ? FVector(Out0, Run0, -FT) : FVector(Run0, Out0, -FT);
 				const FVector Max = bAlongY ? FVector(Out1, Run1, Height) : FVector(Run1, Out1, Height);
 				(bWall ? Out.Walls : Out.Curbs).Add(BoxTransform(Min, Max));
+				if (bWall)
+				{
+					bool bOpen = Plan.OpenEdges.Num() > 0;
+					for (int32 RC = R0; RC <= R1 && bOpen; ++RC)
+					{
+						const FIntPoint Floor = bAlongY ? FIntPoint(D == 0 ? Line - 1 : Line, RC) : FIntPoint(RC, D == 1 ? Line - 1 : Line);
+						bOpen = Plan.OpenEdges.Contains(FIntVector(Floor.X, Floor.Y, D));
+					}
+					Out.WallOpen.Add(bOpen);
+				}
 				FEdgeRun Run;
 				Run.D = D;
 				Run.Line = Line;
@@ -1987,9 +2238,24 @@ namespace AreaGen
 			const FVector2D P = CellCenter(Pair.Key);
 			Coarse.Add(FIntPoint(FMath::FloorToInt(P.X / CoarseSize), FMath::FloorToInt(P.Y / CoarseSize)));
 		}
+		// Brief 26: nothing stands beyond the open end of an exit corridor, in its line, out to the backdrop's reach, so that
+		// no mass closes it in a scan.
+		TArray<FBox2D> ViewStrips;
+		for (const FSeg& S : Plan.Segs)
+		{
+			if (S.bExitCorridor && S.Legs.Num() > 0)
+			{
+				const FLeg& Leg = S.Legs[0];
+				ViewStrips.Add(MakeRect(Leg.Start, Leg.Dir, Leg.Length, Leg.Length + Radius + G.BackdropClearance, -0.5 * S.Width, 0.5 * S.Width));
+			}
+		}
 		auto Clear = [&](const FBox2D& Box)
 		{
 			const FBox2D B = Grow(Box, G.BackdropClearance);
+			for (const FBox2D& Strip : ViewStrips)
+			{
+				if (B.Intersect(Strip)) { return false; }
+			}
 			for (int32 Y = FMath::FloorToInt(B.Min.Y / CoarseSize); Y <= FMath::FloorToInt(B.Max.Y / CoarseSize); ++Y)
 			{
 				for (int32 X = FMath::FloorToInt(B.Min.X / CoarseSize); X <= FMath::FloorToInt(B.Max.X / CoarseSize); ++X)
@@ -2043,6 +2309,8 @@ namespace AreaGen
 	{
 		TArray<bool> FloorHidden, WallHidden, CurbHidden, PillarHidden, CeilingHidden;
 		TArray<FTransform> Panels, Plates, CeilingPlates, Posts, Beams, Conduits, Curbs, Frames, GateFrames;
+		/** Brief 26: strips of the floor plates' family from each wall panel's foot to its slab (appended to Plates when published). */
+		TArray<FTransform> FloorStrips;
 		FString Report;
 		AAreaGenerator::FDressPanelPick Squeezed, Stretched, FirstMouth;
 	};
@@ -2409,7 +2677,12 @@ namespace AreaGen
 			return Gm;
 		};
 		auto At = [](const FRunGeo& Gm, double Mid, double S) { return Gm.bAlongY ? FVector2D(Mid, S) : FVector2D(S, Mid); };
-		auto PlacePieces = [&](const FRunGeo& Gm, double A1, double B1, bool bWall)
+		// Brief 26: the wall panel's slab stands at the wall box's middle, its ribs reach the floor's edge: between the ribs
+		// the floor would stop short of the wall by half the box. A strip of SM_KitFloorPlate (the floors' family) under each
+		// panel fills it, from the floor's edge to 1 cm into the slab, its top at the floor's.
+		const bool bStrips = IsAreaFloorStripsOn();
+		const double StripWidth = 0.5 * T + 1.0;
+		auto PlacePieces = [&](const FRunGeo& Gm, double A1, double B1, bool bWall, bool bStrip)
 		{
 			const double Len = B1 - A1;
 			if (Len < 1.0)
@@ -2440,6 +2713,15 @@ namespace AreaGen
 					if (PanelAlong.Count == 0 || Factor > Out.Stretched.Factor) { Out.Stretched = { C, DirV(Gm.Facing), Factor }; }
 					PanelAlong.Add(Factor, C);
 					Out.Panels.Add(FitPiece(C, -FT, Gm.Facing, T, PieceLen, WallTop + FT, Size));
+					if (bStrip && bStrips)
+					{
+						// The strip's middle: from the floor's edge (the box's face toward the floor) into the slab.
+						const FVector2D Toward = DirV(Gm.Facing);
+						const FVector2D SC = C + Toward * (0.5 * T - 0.5 * StripWidth);
+						const double Yaw = Gm.bAlongY ? 90.0 : 0.0;  // the plate's long side (its X) along the run
+						Out.FloorStrips.Add(FTransform(FRotator(0.0, Yaw, 0.0), FVector(SC.X, SC.Y, -FT),
+							FVector(PieceLen / PlateSize.X, StripWidth / PlateSize.Y, FT / PlateSize.Z)));
+					}
 				}
 				else
 				{
@@ -2458,12 +2740,14 @@ namespace AreaGen
 			const double B1 = Gm.B - (Gm.bConvex1 ? T : 0.0);
 			for (const FVector2D& Span : Spans(Gm.bAlongY, Gm.Mid, A1, B1))
 			{
-				PlacePieces(Gm, Span.X, Span.Y, bWall);
+				PlacePieces(Gm, Span.X, Span.Y, bWall, bWall);
 			}
 		};
+		auto IsOpenWall = [&Geo](int32 I) { return Geo.WallOpen.IsValidIndex(I) && Geo.WallOpen[I]; };
 		for (int32 I = 0; I < Geo.WallRuns.Num(); ++I)
 		{
-			if (Out.WallHidden[I])
+			// The exit corridor's open end (Brief 26) is not dressed: nothing shows there.
+			if (Out.WallHidden[I] && !IsOpenWall(I))
 			{
 				DressRun(Geo.WallRuns[I], true);
 			}
@@ -2498,7 +2782,7 @@ namespace AreaGen
 				Gm.Out0 = Face.Out0;
 				Gm.Mid = Face.Out0 + 0.5 * T;
 				Gm.Facing = Face.Facing;
-				PlacePieces(Gm, Face.A, Face.B, true);
+				PlacePieces(Gm, Face.A, Face.B, true, false);
 			}
 			for (const FVector2D& Corner : { FVector2D(P.Min.X, P.Min.Y), FVector2D(P.Max.X - T, P.Min.Y), FVector2D(P.Min.X, P.Max.Y - T), FVector2D(P.Max.X - T, P.Max.Y - T) })
 			{
@@ -2515,6 +2799,16 @@ namespace AreaGen
 		{
 			const FSquare& Sq = Squares[Key];
 			const FVector2D C = Sq.Box.GetCenter();
+			// No post on the exit corridor's open end (Brief 26): its side walls simply stop.
+			bool bOnOpenEnd = false;
+			for (int32 I = 0; I < Geo.Walls.Num() && !bOnOpenEnd; ++I)
+			{
+				bOnOpenEnd = IsOpenWall(I) && C.X > Geo.Walls[I].Min.X - 0.1 && C.X < Geo.Walls[I].Max.X + 0.1 && C.Y > Geo.Walls[I].Min.Y - 0.1 && C.Y < Geo.Walls[I].Max.Y + 0.1;
+			}
+			if (bOnOpenEnd)
+			{
+				continue;
+			}
 			bool bShownCovers = false;
 			bool bWallCovers = Sq.bWall;
 			auto Covers = [&C](const FBox& Box) { return C.X > Box.Min.X + 0.1 && C.X < Box.Max.X - 0.1 && C.Y > Box.Min.Y + 0.1 && C.Y < Box.Max.Y - 0.1; };
@@ -2586,7 +2880,7 @@ namespace AreaGen
 		for (int32 I = 0; I < Geo.WallRuns.Num(); ++I)
 		{
 			const FEdgeRun& R = Geo.WallRuns[I];
-			if (!Out.WallHidden[I])
+			if (!Out.WallHidden[I] || IsOpenWall(I))
 			{
 				continue;
 			}
@@ -2932,6 +3226,81 @@ namespace AreaGen
 		Out.Report += FString::Printf(TEXT("; conduit runs across %d niche and dead-end mouths, %s, brackets over a mouth %d, lines left unsolved %d"),
 			MouthsCrossed, *ConduitCrossF.ToString(TEXT("conduits across a mouth")), BracketsOverMouth, LinesUnsolved);
 		Out.Report += FString::Printf(TEXT("; plates by family: floors %d, ceilings %d"), Out.Plates.Num(), Out.CeilingPlates.Num());
+		int32 OpenWalls = 0;
+		for (int32 I = 0; I < Geo.Walls.Num(); ++I) { OpenWalls += IsOpenWall(I) ? 1 : 0; }
+		Out.Report += FString::Printf(TEXT("; floor strips to the wall panels' slab %d (%s, %.0f cm wide); exit corridor open ends %d (collision only, not dressed)"),
+			Out.FloorStrips.Num(), bStrips ? TEXT("on") : TEXT("off, tls.Area.FloorStrips 0"), StripWidth, OpenWalls);
+	}
+
+	/**
+	 * Brief 26: the conduits and cables of the twin AI's room, from the terminal's placement (Pos, facing Facing, its body's
+	 * box Body in its own space) and the room (Room: its rectangle; the walls' slab half a wall box behind its edges): two
+	 * conduits from the top of the body into the ceiling, two along the far wall from the body's sides into the side walls,
+	 * two along the floor from the base that turn down into the floor, bundles of cables from the top into the ceiling and
+	 * along the far wall into the side walls at two heights. Every run tiled by pieces of PieceLen scaled to fit (at most
+	 * x1.25 or x0.75). No random draw; look only.
+	 */
+	static void BuildTwinDressing(const AAreaGenerator& G, const FVector2D& Pos, const FVector2D& Facing, const FBox& Body, const FBox2D& Room,
+		TArray<FTransform>& Conduits, TArray<FTransform>& Bends, TArray<FTransform>& Cables, FString& Report)
+	{
+		const double PieceLen = FMath::Max(10.0, static_cast<double>(G.DressTwinPieceLength));
+		const double BendR = FMath::Max(10.0, static_cast<double>(G.DressTwinBendRadius));
+		const double Top = G.WallHeight + G.FloorThickness * 0.5;  // into the ceiling's box
+		const FVector Fwd(Facing.X, Facing.Y, 0.0);
+		const FVector Left(-Facing.Y, Facing.X, 0.0);
+		const FVector Origin(Pos.X, Pos.Y, 0.0);
+		auto World = [&](double X, double Y, double Z) { return Origin + Fwd * X + Left * Y + FVector(0.0, 0.0, Z); };
+		// How far the side walls' slab is from the body's centre line, along Left (the room is centred on it).
+		const FVector2D Centre = Room.GetCenter();
+		const double HalfRoom = 0.5 * FMath::Abs(FVector2D::DotProduct(Room.GetSize(), FVector2D(Left.X, Left.Y)));
+		const double OffCentre = FVector2D::DotProduct(Pos - Centre, FVector2D(Left.X, Left.Y));
+		const double SideSlab = HalfRoom + 0.5 * G.WallThickness;
+		const double Back = Body.Min.X;
+		int32 Runs = 0;
+		auto Tile = [&](TArray<FTransform>& Out, const FVector& A, const FVector& B)
+		{
+			const FVector D = B - A;
+			const double Len = D.Size();
+			if (Len < 1.0)
+			{
+				return;
+			}
+			++Runs;
+			const int32 N = FMath::Max(1, FMath::RoundToInt(Len / PieceLen));
+			const FRotator Rot = D.GetSafeNormal().Rotation();
+			for (int32 K = 0; K < N; ++K)
+			{
+				Out.Add(FTransform(Rot, A + D * (double(K) / N), FVector(Len / N / PieceLen, 1.0, 1.0)));
+			}
+		};
+		const double PipeX = Back + 30.0;  // the conduits' and cables' axis, in front of the wall
+		for (const double S : { 1.0, -1.0 })
+		{
+			const double SideY = S * Body.Max.Y;
+			const double WallY = S * SideSlab - OffCentre;
+			// From the top into the ceiling.
+			Tile(Conduits, World(PipeX - 10.0, S * 0.3 * Body.Max.Y, Body.Max.Z), World(PipeX - 10.0, S * 0.3 * Body.Max.Y, Top));
+			// From the sides into the side walls, under the ceiling.
+			Tile(Conduits, World(PipeX, SideY, Body.Max.Z * 0.77), World(PipeX, WallY, Body.Max.Z * 0.77));
+			// Along the floor from the base, turning down into the floor.
+			const double FloorZ = 12.0;
+			const double Turn = SideY + S * 1.5 * PieceLen;
+			Tile(Conduits, World(PipeX, SideY, FloorZ), World(PipeX, Turn, FloorZ));
+			{
+				// SM_KitTwinConduitBend turns from its +X to its +Z: +X along the run (away from the body), +Z down.
+				const FVector Along = Left * S;
+				const FVector Down(0.0, 0.0, -1.0);
+				const FVector Side = FVector::CrossProduct(Down, Along);
+				Bends.Add(FTransform(FMatrix(Along, Side, Down, World(PipeX, Turn, FloorZ))));
+			}
+			// Cables from the top into the ceiling, and along the far wall into the side walls at two heights.
+			Tile(Cables, World(PipeX - 5.0, S * 0.08 * Body.Max.Y, Body.Max.Z), World(PipeX - 5.0, S * 0.08 * Body.Max.Y, Top));
+			for (const double Z : { 0.40, 0.50 })
+			{
+				Tile(Cables, World(PipeX - 8.0, SideY, Body.Max.Z * Z), World(PipeX - 8.0, WallY, Body.Max.Z * Z));
+			}
+		}
+		Report = FString::Printf(TEXT("twin AI's room: %d runs, conduits %d, bends %d, cables %d"), Runs, Conduits.Num(), Bends.Num(), Cables.Num());
 	}
 }
 
@@ -3219,12 +3588,16 @@ int32 AAreaGenerator::ClearArea()
 	PublishedPieces.Reset();
 	for (TArray<FTransform>* Plan : { &PlanFloors, &PlanWalls, &PlanCurbs, &PlanPillars, &PlanCeilings, &PlanBackdrop,
 		&PlanFloorsCollision, &PlanWallsCollision, &PlanCurbsCollision, &PlanPillarsCollision, &PlanCeilingsCollision,
-		&DressWallPanels, &DressFloorPlates, &DressCeilingPlates, &DressCornerPosts, &DressCeilingBeams, &DressConduits, &DressCurbs, &DressCatwalkFrames, &DressGateFrames })
+		&DressWallPanels, &DressFloorPlates, &DressCeilingPlates, &DressCornerPosts, &DressCeilingBeams, &DressConduits, &DressCurbs, &DressCatwalkFrames, &DressGateFrames,
+		&DressTwinConduits, &DressTwinBends, &DressTwinCables })
 	{
 		Plan->Reset();
 	}
+	DressFloorStripsFrom = 0;
+	OpenEndBoxes.Reset();
 	NavigationBounds = FBox(ForceInit);
 	RouteLength = 0.f;
+	RouteLengthBeforeWayOut = 0.f;
 	return ToRemove.Num();
 }
 
@@ -3746,6 +4119,11 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		{
 			Why = FString::Printf(TEXT("route centreline %.0f m outside %.0f-%.0f m"), Builder->Plan.RouteLength() / 100.f, MinCentreline / 100.f, Recipe->RouteLengthMax * 0.98f / 100.f);
 		}
+		// The way out (Brief 26), on top of the chosen layout: the length above is the recipe's route, as before.
+		else if (!Builder->PlaceWayOut(IsAreaWayOutOn()))
+		{
+			Why = Builder->WayOutError;
+		}
 		if (Why.IsEmpty())
 		{
 			Built = MoveTemp(Builder);
@@ -3806,6 +4184,17 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		{
 			UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d: %s; the validator fails this seed."), *GetName(), Act, Seed, *Builder.WallError);
 		}
+		// Brief 26: in the twin AI's room the terminal shows its own body (SM_TwinTerminal), set into the far wall.
+		if (TwinDefaults && Builder.WayOut.RoomSegment >= 0)
+		{
+			const UStaticMesh* TwinMesh = TerminalDefaults->bModelledBody ? TwinDefaults->GetModelledBodyMesh() : nullptr;
+			const FBox Body = TwinMesh ? TwinMesh->GetBoundingBox() : TwinDefaults->GetLocalBodyBox();
+			if (!Builder.PlaceTwinInRoom(Body.IsValid ? static_cast<float>(Body.Min.X) : -20.f, Body.IsValid ? static_cast<float>(Body.Max.X) : 20.f, Stand,
+				TwinDefaults->GetInteractRadius(), WallThickness))
+			{
+				UE_LOG(LogArea, Warning, TEXT("%s: act %d seed %d: %s; the validator fails this seed."), *GetName(), Act, Seed, *Builder.WallError);
+			}
+		}
 		// Beacons last, on top of everything (no random draw, nothing else moves).
 		if (!Builder.PlaceBeacons(TerminalDefaults->GetInteractRadius(), Log.Reach, Twin.Reach))
 		{
@@ -3855,6 +4244,8 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 			}
 		}
 		DressWallPanels = MoveTemp(Dressing.Panels);
+		DressFloorStripsFrom = Dressing.Plates.Num();
+		Dressing.Plates.Append(Dressing.FloorStrips);
 		DressFloorPlates = MoveTemp(Dressing.Plates);
 		DressCeilingPlates = MoveTemp(Dressing.CeilingPlates);
 		DressCornerPosts = MoveTemp(Dressing.Posts);
@@ -3867,8 +4258,30 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		DressMostSqueezedPanel = Dressing.Squeezed;
 		DressMostStretchedPanel = Dressing.Stretched;
 		DressFirstConduitMouth = Dressing.FirstMouth;
+		OpenEndBoxes.Reset();
+		for (int32 I = 0; I < Geometry.Walls.Num(); ++I)
+		{
+			if (Geometry.WallOpen.IsValidIndex(I) && Geometry.WallOpen[I])
+			{
+				OpenEndBoxes.Add(Geometry.Walls[I]);
+			}
+		}
+		// The twin AI's room's conduits and cables (Brief 26), from its terminal's placement.
+		if (Builder.WayOut.RoomSegment >= 0 && Builder.TwinPlacements.Num() > 0)
+		{
+			const ATwinAITerminal* TwinDefaults = TwinAITerminalClass ? TwinAITerminalClass->GetDefaultObject<ATwinAITerminal>() : nullptr;
+			const UStaticMesh* TwinMesh = TwinDefaults && TerminalDefaults->bModelledBody ? TwinDefaults->GetModelledBodyMesh() : nullptr;
+			if (TwinMesh)
+			{
+				FString TwinReport;
+				BuildTwinDressing(*this, Builder.TwinPlacements[0].Pos, Builder.TwinPlacements[0].Facing, TwinMesh->GetBoundingBox(), Builder.WayOut.RoomRect,
+					DressTwinConduits, DressTwinBends, DressTwinCables, TwinReport);
+				LastDressingReport += TEXT("; ") + TwinReport;
+			}
+		}
 	}
 	RouteLength = Plan.RouteLength();
+	RouteLengthBeforeWayOut = Plan.LengthBeforeWayOut;
 
 	// --- Spawn the gameplay actors ---
 	ULevel* Level = GetLevel();
@@ -3929,6 +4342,15 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		Record.RouteEnd = S.RouteEnd;
 		Record.SpursPlaced = S.Spurs;
 		Record.NichesPlaced = S.Niches;
+		Record.bExitCorridor = S.bExitCorridor;
+		Record.bTwinAIRoom = S.bTwinRoom;
+		if (S.bExitCorridor || S.bTwinRoom)
+		{
+			const FVector2D D = DirV(S.EnterDir);
+			Record.Direction = FVector(D.X, D.Y, 0.0);
+			Record.Mouth = At(S.Mouth, 0.f);
+			Record.Width = S.Width;
+		}
 		Info->Segments.Add(Record);
 	}
 
@@ -3936,7 +4358,8 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 	const FVector2D StartDir = Plan.Route.Num() > 1 ? (Plan.Route[1] - Plan.Route[0]).GetSafeNormal() : FVector2D(1.0, 0.0);
 	PlannedStart = At(Plan.Route[0] + StartDir * 150.0, 100.f);
 	PlannedStartRotation = YawOf(StartDir);
-	PlannedEntity = At(Plan.PointAt(Plan.RouteLength() * 0.5f), 0.f);
+	// Halfway along the recipe's route: the way out (Brief 26) does not move the entity.
+	PlannedEntity = At(Plan.PointAt(Plan.LengthBeforeWayOut * 0.5f), 0.f);
 	if (bGame)
 	{
 		for (TActorIterator<APlayerStart> It(World); It; ++It)
@@ -3951,12 +4374,27 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 			break;
 		}
 	}
-	const FVector2D EndDir = (Plan.Route.Last() - Plan.Route[Plan.Route.Num() - 2]).GetSafeNormal();
-	AAreaExit* Exit = Cast<AAreaExit>(Spawn(AAreaExit::StaticClass(), At(Plan.Route.Last() - EndDir * 150.0, 150.f), YawOf(EndDir), TEXT("Area_Exit"), TEXT("Flow")));
-	if (Exit)
+	if (Builder.WayOut.CorridorSegment >= 0)
 	{
-		const float HalfWidth = FMath::Max(100.f, Plan.Segs.Last().Width * 0.5f - 10.f);
-		Exit->GetVolume()->SetBoxExtent(FVector(150.f, HalfWidth, 150.f));
+		// Brief 26: inside the exit corridor, the recipe's depth in from its mouth, across its whole section (wall to wall,
+		// floor to ceiling), so the player cannot walk past it.
+		AAreaExit* Exit = Cast<AAreaExit>(Spawn(AAreaExit::StaticClass(), At(Builder.WayOut.ExitPos, WallHeight * 0.5f), YawOf(Builder.WayOut.ExitDir), TEXT("Area_Exit"), TEXT("Flow")));
+		if (Exit)
+		{
+			Exit->GetVolume()->SetBoxExtent(FVector(150.f, Builder.WayOut.HalfWidth, WallHeight * 0.5f));
+			// The rest of the corridor past the exit: back in Normal time a player there travels at once.
+			Exit->RunPastExit = FMath::Max(0.f, Builder.WayOut.Length - static_cast<float>(FVector2D::Distance(Builder.WayOut.ExitPos, Plan.Segs[Builder.WayOut.CorridorSegment].Mouth)) - 150.f);
+		}
+	}
+	else
+	{
+		const FVector2D EndDir = (Plan.Route.Last() - Plan.Route[Plan.Route.Num() - 2]).GetSafeNormal();
+		AAreaExit* Exit = Cast<AAreaExit>(Spawn(AAreaExit::StaticClass(), At(Plan.Route.Last() - EndDir * 150.0, 150.f), YawOf(EndDir), TEXT("Area_Exit"), TEXT("Flow")));
+		if (Exit)
+		{
+			const float HalfWidth = FMath::Max(100.f, Plan.Segs.Last().Width * 0.5f - 10.f);
+			Exit->GetVolume()->SetBoxExtent(FVector(150.f, HalfWidth, 150.f));
+		}
 	}
 
 	// Gates
@@ -4153,5 +4591,15 @@ bool AAreaGenerator::StartAttempt(int32 InSeed, FString& OutError)
 		Geometry.Floors.Num(), Geometry.Walls.Num(), Geometry.Curbs.Num(), Geometry.Pillars.Num(), Geometry.Ceilings.Num(), Geometry.Backdrop.Num(),
 		Builder.NormalResidues.Num() + Builder.GatePlacements.Num(), Builder.GatePlacements.Num(), Builder.LightPlacements.Num(),
 		Builder.LogPlacements.Num(), Builder.TwinPlacements.Num(), Builder.BeaconPlacements.Num());
+	if (Builder.WayOut.CorridorSegment >= 0)
+	{
+		const FSeg& Corridor = Plan.Segs[Builder.WayOut.CorridorSegment];
+		UE_LOG(LogArea, Log, TEXT("%s: WAY OUT act %d seed %d: route %.1f m before it, %.1f m with it; %sexit corridor segment %d from (%.0f, %.0f) heading yaw %.0f, %.0f m long (exit %.0f m in, %.0f m past it), %.0f cm wide."),
+			*GetName(), Act, Seed, Plan.LengthBeforeWayOut / 100.f, Plan.RouteLength() / 100.f,
+			Builder.WayOut.RoomSegment >= 0 ? *FString::Printf(TEXT("twin AI's room segment %d (%.0f m a side) entered at (%.0f, %.0f); "), Builder.WayOut.RoomSegment,
+				Plan.Segs[Builder.WayOut.RoomSegment].Width / 100.f, Plan.Segs[Builder.WayOut.RoomSegment].Mouth.X, Plan.Segs[Builder.WayOut.RoomSegment].Mouth.Y) : TEXT(""),
+			Builder.WayOut.CorridorSegment, Corridor.Mouth.X, Corridor.Mouth.Y, YawOf(Builder.WayOut.ExitDir).Yaw, Builder.WayOut.Length / 100.f,
+			FVector2D::Distance(Builder.WayOut.ExitPos, Corridor.Mouth) / 100.f, (Builder.WayOut.Length - FVector2D::Distance(Builder.WayOut.ExitPos, Corridor.Mouth)) / 100.f, Corridor.Width);
+	}
 	return true;
 }

@@ -115,6 +115,26 @@ struct THELASTSHIFT_API FAreaRecipe
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area", meta = (ClampMin = "0.0", ClampMax = "500000.0", Units = "cm"))
 	float RouteLengthMax = 55000.f;
 
+	/**
+	 * The way out (Brief 26): the route ends in one exit corridor, closed and straight, added by the planner after the
+	 * recipe's last segment (after the twin AI's room when there is one) with no random draw, so that nothing else of the
+	 * area moves. The travel starts at the area's exit, this far in from the corridor's mouth.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Way Out", meta = (ClampMin = "2.0", ClampMax = "50.0", Units = "m"))
+	float ExitTriggerDepthM = 10.f;
+
+	/** The exit corridor goes on past the exit for this long and ends open on the dark, with no wall at its end. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Way Out", meta = (ClampMin = "10.0", ClampMax = "200.0", Units = "m"))
+	float ExitRunLengthM = 60.f;
+
+	/**
+	 * A room of the twin AI's own (Brief 26), on the route right before the exit corridor: entered on one side, the exit
+	 * corridor's mouth in a side wall, the twin AI's terminal set into the wall facing the entrance. With
+	 * TwinAITerminalCount 1 the terminal stands there instead of the last closed segment.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Way Out")
+	bool bTwinAIRoom = false;
+
 	/** Number of Gate entries in Segments. */
 	int32 GetGateCount() const;
 };
@@ -149,6 +169,26 @@ struct THELASTSHIFT_API FAreaSegmentRecord
 	/** Wall niches placed (closed corridors). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
 	int32 NichesPlaced = 0;
+
+	/** The area's exit corridor (Brief 26): the route's last segment, straight, open at its far end. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	bool bExitCorridor = false;
+
+	/** The twin AI's room (Brief 26), right before the exit corridor. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	bool bTwinAIRoom = false;
+
+	/** Exit corridor: the direction it runs in (unit, horizontal). Twin AI's room: the direction the route enters it in. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	FVector Direction = FVector::ZeroVector;
+
+	/** Exit corridor: the middle of its mouth, at floor height. Twin AI's room: the middle of its entrance. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area")
+	FVector Mouth = FVector::ZeroVector;
+
+	/** Exit corridor: its width. Twin AI's room: its side. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Area", meta = (Units = "cm"))
+	float Width = 0.f;
 };
 
 /** A walkable floor rectangle of the generated route (top at Z of the box's max). */

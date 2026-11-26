@@ -769,6 +769,22 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability", meta = (AllowedClasses = "/Script/Engine.StaticMesh"))
 	TSoftObjectPtr<UStaticMesh> TerminalBodyMesh;
 
+	/**
+	 * Brief 26: the twin AI's terminal's own body (SM_TwinTerminal: about 300 x 300 cm, pivot at the centre of its base,
+	 * front +X, its back set into the wall), shown instead of TerminalBodyMesh by the twin AI's terminal with
+	 * bModelledBody. The one owner of the reference.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability", meta = (AllowedClasses = "/Script/Engine.StaticMesh"))
+	TSoftObjectPtr<UStaticMesh> TwinTerminalBodyMesh;
+
+	/** Brief 26: the first payment at the twin AI's terminal, which wakes it and plays part 1. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Energy", meta = (ClampMin = "0", ClampMax = "99"))
+	int32 TwinAIWakeCost = 2;
+
+	/** Brief 26: every later payment at the twin AI's terminal (one part each). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Energy", meta = (ClampMin = "0", ClampMax = "99"))
+	int32 TwinAIPartCost = 1;
+
 	/** The travel screen stays black at least this long, even when the next area is ready sooner. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Travel", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float TravelHoldSeconds = 4.f;
@@ -1036,6 +1052,13 @@ public:
 
 	/** The terminals' modelled body (loaded on first use), or null when none is set. */
 	static UStaticMesh* GetTerminalBodyMesh() { return Get()->TerminalBodyMesh.LoadSynchronous(); }
+
+	/** The twin AI's terminal's body (loaded on first use), or null when none is set. */
+	static UStaticMesh* GetTwinTerminalBodyMesh() { return Get()->TwinTerminalBodyMesh.LoadSynchronous(); }
+
+	/** TwinAIWakeCost and TwinAIPartCost, clamped. */
+	static int32 GetTwinAIWakeCost() { return FMath::Clamp(Get()->TwinAIWakeCost, 0, 99); }
+	static int32 GetTwinAIPartCost() { return FMath::Clamp(Get()->TwinAIPartCost, 0, 99); }
 
 	/** The map a run starts in: the first entry of AreaMaps (null when the list is empty). */
 	TSoftObjectPtr<UWorld> GetFirstAreaMap() const { return AreaMaps.Num() > 0 ? AreaMaps[0] : TSoftObjectPtr<UWorld>(); }

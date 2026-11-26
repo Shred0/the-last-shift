@@ -262,6 +262,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Shape", meta = (ClampMin = "1", ClampMax = "64"))
 	int32 PlacementAttempts = 16;
 
+	// --- The way out (Brief 26): the exit corridor and the twin AI's room, after the recipe's segments, no random draw ---
+
+	/** Width of the exit corridor (the area corridors' width). Its depth and run are the recipe's (ExitTriggerDepthM, ExitRunLengthM). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Way Out", meta = (ClampMin = "200.0", ClampMax = "1000.0", Units = "cm"))
+	float ExitCorridorWidth = 400.f;
+
+	/** Side of the twin AI's room (square, on the plan's grid). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Way Out", meta = (ClampMin = "1000.0", ClampMax = "1400.0", Units = "cm"))
+	float TwinRoomSide = 1200.f;
+
+	/** The short passage, as wide as the exit corridor, that leads into the twin AI's room (part of the room's segment). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Way Out", meta = (ClampMin = "300.0", ClampMax = "1000.0", Units = "cm"))
+	float TwinRoomPassageLength = 400.f;
+
 	// --- Placement ---
 
 	/** No two residues closer than this. */
@@ -421,6 +435,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "0.0", ClampMax = "2000.0", Units = "cm"))
 	float DressFrameSpacing = 200.f;
 
+	/**
+	 * Brief 26: the twin AI's room's conduits and cables (SM_KitTwinConduit, SM_KitTwinCable: this long along +X, pivot at
+	 * the centre of their start; SM_KitTwinConduitBend: a quarter turn from +X to +Z of this radius at its centreline).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "10.0", ClampMax = "500.0", Units = "cm"))
+	float DressTwinPieceLength = 100.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Dressing", meta = (ClampMin = "10.0", ClampMax = "200.0", Units = "cm"))
+	float DressTwinBendRadius = 40.f;
+
 	/** Instances of the dressing (all pieces). */
 	UFUNCTION(BlueprintPure, Category = "Area")
 	int32 GetDressingInstanceCount() const;
@@ -506,6 +530,13 @@ public:
 	/** Route centreline length of the current plan. */
 	UFUNCTION(BlueprintPure, Category = "Area", meta = (Units = "cm"))
 	float GetRouteLength() const { return RouteLength; }
+
+	/** Route centreline length before the way out (the twin AI's room and the exit corridor): the recipe's own route. */
+	UFUNCTION(BlueprintPure, Category = "Area", meta = (Units = "cm"))
+	float GetRouteLengthBeforeWayOut() const { return RouteLengthBeforeWayOut; }
+
+	/** The exit corridor's end edge: the collision-only box that keeps the player from walking off it (no dressing, never rendered). */
+	const TArray<FBox>& GetOpenEndBoxes() const { return OpenEndBoxes; }
 
 	/** Seed of the current (or last) attempt. */
 	UFUNCTION(BlueprintPure, Category = "Area")
@@ -606,6 +637,21 @@ public:
 	/** SM_KitGateFrame around each gate's door. */
 	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
 	TArray<FTransform> DressGateFrames;
+
+	/** SM_KitTwinConduit: the thick conduits running to the twin AI's terminal (Brief 26). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressTwinConduits;
+
+	/** SM_KitTwinConduitBend: where those conduits turn (down into the floor). */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressTwinBends;
+
+	/** SM_KitTwinCable: the bundles of cables running to the twin AI's terminal. */
+	UPROPERTY(Transient, VisibleInstanceOnly, BlueprintReadOnly, Category = "Area|Dressing")
+	TArray<FTransform> DressTwinCables;
+
+	/** The floor strips of the last dressing (Brief 26): DressFloorPlates from this index on fill the floor to the wall panels' slab. */
+	int32 DressFloorStripsFrom = 0;
 
 	/** A wall panel the last dressing placed: its centre (on the wall box's middle line), the way it faces, its factor along. */
 	struct FDressPanelPick
@@ -744,6 +790,8 @@ private:
 	bool bRevalidateOnly = false;
 	int64 LayoutHash = 0;
 	float RouteLength = 0.f;
+	float RouteLengthBeforeWayOut = 0.f;
+	TArray<FBox> OpenEndBoxes;
 	float TimeToReadySeconds = 0.f;
 	double GenerationStartTime = 0.0;
 	double PhaseStartTime = 0.0;

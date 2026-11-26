@@ -52,7 +52,7 @@ void APowerTerminal::OnConstruction(const FTransform& Transform)
 
 void APowerTerminal::ApplyTerminalBody()
 {
-	UStaticMesh* Body = bModelledBody ? UTheLastShiftSettings::GetTerminalBodyMesh() : nullptr;
+	UStaticMesh* Body = bModelledBody ? GetModelledBodyMesh() : nullptr;
 	if (!Mesh || !Body)
 	{
 		return;
@@ -122,6 +122,11 @@ EPaymentKind APowerTerminal::GetPaymentKind() const
 		bAny = true;
 	}
 	return bAny ? Kind : EPaymentKind::Other;
+}
+
+UStaticMesh* APowerTerminal::GetModelledBodyMesh() const
+{
+	return UTheLastShiftSettings::GetTerminalBodyMesh();
 }
 
 int32 APowerTerminal::GetCost() const
@@ -195,7 +200,8 @@ bool APowerTerminal::TryActivate(APawn* InstigatorPawn)
 	}
 
 	UEnergySubsystem* Energy = UEnergySubsystem::Get(this);
-	const int32 Price = TerminalTuning::Cost(Cost);
+	// The cost of this payment (the twin AI's terminal: its wake cost, then its part cost).
+	const int32 Price = TerminalTuning::Cost(GetCost());
 	const int32 Banked = Energy ? Energy->GetBankedEnergy() : 0;
 	const bool bStopped = TimeState && TimeState->IsStopped();
 

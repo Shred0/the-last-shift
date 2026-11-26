@@ -55,6 +55,11 @@ struct THELASTSHIFT_API FAreaValidationResult
  *    the maximum length; the body blocks nothing and changes no navigation; its terminal stands at the entrance and can
  *    be reached and paid before the space is crossed, within reach of no other terminal; the exit is reached without
  *    paying any beacon.
+ * 9. The way out (Brief 26): exactly one exit corridor, the route's last segment, straight and closed; the exit lies in it
+ *    at the recipe's ExitTriggerDepthM from its mouth across its whole section, the corridor runs ExitRunLengthM past it
+ *    and holds nothing; with the recipe's twin AI's room, the room is the segment right before it, the corridor starts
+ *    from one of its side walls and the twin AI's terminal stands in it on the wall that faces its entrance. Rule 4 leaves
+ *    the exit corridor out, rule 7 reads the twin AI's terminal in that room.
  */
 namespace AreaValidator
 {

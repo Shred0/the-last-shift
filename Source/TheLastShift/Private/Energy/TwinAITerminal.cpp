@@ -25,6 +25,17 @@ int32 ATwinAITerminal::GetPartsPlayed() const
 	return Run ? Run->GetArchive().TwinPartsPlayed : 0;
 }
 
+int32 ATwinAITerminal::GetCost() const
+{
+	// The first payment wakes the twin AI; every later one plays a part (Brief 26; one owner: the settings).
+	return GetPartsPlayed() == 0 ? UTheLastShiftSettings::GetTwinAIWakeCost() : UTheLastShiftSettings::GetTwinAIPartCost();
+}
+
+UStaticMesh* ATwinAITerminal::GetModelledBodyMesh() const
+{
+	return UTheLastShiftSettings::GetTwinTerminalBodyMesh();
+}
+
 bool ATwinAITerminal::AcceptsPayment() const
 {
 	return GetPartsPlayed() < GetPartCount();

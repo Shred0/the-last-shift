@@ -6,6 +6,7 @@
 #include "Area/AreaGenerator.h"
 #include "Area/AreaInfo.h"
 #include "Area/AreaTypes.h"
+#include "Components/BoxComponent.h"
 #include "Energy/BeaconBody.h"
 #include "Energy/DoorDevice.h"
 #include "Energy/LightGroupDevice.h"
@@ -390,7 +391,8 @@ namespace AreaValidation
 		const int32 Steps = FMath::CeilToInt(BandMax / Step);
 		for (const FAreaSegmentRecord& Segment : C.Info->Segments)
 		{
-			if (!Segment.bClosed)
+			// The exit corridor holds no hiding place by design (Brief 26; rule 9 checks it).
+			if (!Segment.bClosed || Segment.bExitCorridor)
 			{
 				continue;
 			}
@@ -699,10 +701,15 @@ namespace AreaValidation
 			Lines.Add(FString::Printf(TEXT("%s segment %d at %.1f m, reading place %.0f cm from the screen"), *Name, Segment, RouteS / 100.f, ReadDistance));
 		}
 
+		// The twin AI's room when the area has one (Brief 26), else the last closed segment before the exit corridor.
 		int32 LastClosed = -1;
 		for (int32 Index = C.Info->Segments.Num() - 1; Index >= 0 && LastClosed < 0; --Index)
 		{
-			LastClosed = C.Info->Segments[Index].bClosed ? Index : -1;
+			LastClosed = C.Info->Segments[Index].bTwinAIRoom ? Index : -1;
+		}
+		for (int32 Index = C.Info->Segments.Num() - 1; Index >= 0 && LastClosed < 0; --Index)
+		{
+			LastClosed = C.Info->Segments[Index].bClosed && !C.Info->Segments[Index].bExitCorridor ? Index : -1;
 		}
 		for (const ATwinAITerminal* Twin : Twins)
 		{
@@ -720,7 +727,7 @@ namespace AreaValidation
 				++Failures;
 				FString Text = Name + TEXT(":");
 				if (!bStand) { Text += FString::Printf(TEXT(" standing place: %s;"), *Why); }
-				if (!bSegmentOk) { Text += FString::Printf(TEXT(" segment %d is not the last closed segment %d;"), Segment, LastClosed); }
+				if (!bSegmentOk) { Text += FString::Printf(TEXT(" segment %d is not the twin AI's room or the last closed segment %d;"), Segment, LastClosed); }
 				if (!bTargets) { Text += TEXT(" it powers a device;"); }
 				AddDetail(R, Text);
 			}
@@ -1069,6 +1076,151 @@ namespace AreaValidation
 			bExitFree ? TEXT("yes") : TEXT("NO"), Lines.Num() > 0 ? TEXT("; ") : TEXT(""), *FString::Join(Lines, TEXT("; ")));
 		return R;
 	}
+
+	/**
+	 * Rule 9 (Brief 26): the way out. Exactly one exit corridor, the route's last segment, straight (one leg of the route,
+	 * its floor one rectangle as wide as the corridor), closed (a ceiling over it); the exit lies in it at the recipe's
+	 * depth from its mouth, across its whole section; the corridor runs the recipe's run past it and holds nothing (no
+	 * niche, side passage, residue, terminal, door, light or beacon). With the recipe's twin AI's room: the room is the
+	 * segment right before the exit corridor, the corridor starts from it and the twin AI's terminal stands in it, on the
+	 * wall that faces the room's entrance, facing it.
+	 */
+	static FAreaRuleResult RuleWayOut(FContext& C)
+	{
+		FAreaRuleResult R;
+		R.Rule = 9;
+		R.Name = TEXT("the way out");
+		UWorld* World = C.World;
+		const TArray<FAreaSegmentRecord>& Segs = C.Info->Segments;
+		TArray<int32> Corridors;
+		for (int32 I = 0; I < Segs.Num(); ++I)
+		{
+			if (Segs[I].bExitCorridor) { Corridors.Add(I); }
+		}
+		int32 Failures = 0;
+		auto Fail = [&](const FString& Why) { ++Failures; AddDetail(R, Why); };
+		if (Corridors.Num() != 1)
+		{
+			Fail(FString::Printf(TEXT("%d exit corridors (want 1)"), Corridors.Num()));
+			R.Summary = FString::Printf(TEXT("%d exit corridors"), Corridors.Num());
+			return R;
+		}
+		const int32 Index = Corridors[0];
+		const FAreaSegmentRecord& Seg = Segs[Index];
+		const FVector Dir = Seg.Direction.GetSafeNormal2D();
+		const FVector Lateral(-Dir.Y, Dir.X, 0.f);
+		const float Depth = FMath::Clamp(C.Recipe->ExitTriggerDepthM, 2.f, 50.f) * 100.f;
+		const float Run = FMath::Clamp(C.Recipe->ExitRunLengthM, 10.f, 200.f) * 100.f;
+		const float Length = Seg.RouteEnd - Seg.RouteStart;
+		if (Index != Segs.Num() - 1 || !Seg.bClosed || Seg.Type != EAreaSegmentType::Corridor) { Fail(FString::Printf(TEXT("segment %d is not the route's last, closed corridor"), Index)); }
+		// Straight: one piece of the route, and its floor one rectangle as wide as the corridor along it.
+		int32 Pieces = 0;
+		for (int32 I = 0; I + 1 < C.Info->RoutePoints.Num(); ++I) { Pieces += C.Info->RoutePointSegments.IsValidIndex(I) && C.Info->RoutePointSegments[I] == Index ? 1 : 0; }
+		int32 FloorRects = 0;
+		FBox Floor(ForceInit);
+		for (const FAreaFloorRect& Rect : C.Info->FloorRects)
+		{
+			if (Rect.Segment == Index) { ++FloorRects; Floor += Rect.Box; }
+		}
+		const FVector Size = Floor.IsValid ? Floor.GetSize() : FVector::ZeroVector;
+		const float Across = static_cast<float>(FMath::Abs(FVector::DotProduct(Size, Lateral)));
+		const float Along = static_cast<float>(FMath::Abs(FVector::DotProduct(Size, Dir)));
+		if (Pieces != 1 || FloorRects != 1 || FMath::Abs(Across - Seg.Width) > 1.f || FMath::Abs(Along - Length) > 1.f)
+		{
+			Fail(FString::Printf(TEXT("not straight: %d route pieces, %d floor rectangles, %.0f x %.0f cm (want %.0f x %.0f)"), Pieces, FloorRects, Along, Across, Length, Seg.Width));
+		}
+		if (FMath::Abs(Length - (Depth + Run)) > 51.f) { Fail(FString::Printf(TEXT("%.0f cm long, want %.0f + %.0f"), Length, Depth, Run)); }
+		if (Seg.NichesPlaced > 0 || Seg.SpursPlaced > 0) { Fail(FString::Printf(TEXT("%d niches and %d side passages"), Seg.NichesPlaced, Seg.SpursPlaced)); }
+		// Closed: the ceiling's boxes cover it.
+		double Covered = 0.0;
+		for (const FBox& Box : C.Generator->GetPublishedPieces(EAreaPieceKind::Ceilings))
+		{
+			const FBox Over = Box.Overlap(FBox(FVector(Floor.Min.X, Floor.Min.Y, -1.0), FVector(Floor.Max.X, Floor.Max.Y, 1.0e5)));
+			Covered += Over.IsValid ? Over.GetSize().X * Over.GetSize().Y : 0.0;
+		}
+		const double Area = Size.X * Size.Y;
+		if (Area <= 0.0 || Covered < Area * 0.999) { Fail(FString::Printf(TEXT("its ceiling covers %.1f%% of it"), Area > 0.0 ? 100.0 * Covered / Area : 0.0)); }
+		// The exit: at the depth, across the whole section.
+		const AAreaExit* Exit = nullptr;
+		for (TActorIterator<AAreaExit> It(World); It; ++It) { Exit = *It; break; }
+		float ExitDepth = -1.f;
+		if (Exit)
+		{
+			const FVector P = Exit->GetActorLocation();
+			ExitDepth = static_cast<float>(FVector::DotProduct(P - Seg.Mouth, Dir));
+			const float Off = static_cast<float>(FMath::Abs(FVector::DotProduct(P - Seg.Mouth, Lateral)));
+			const FVector Extent = Exit->GetVolume()->GetScaledBoxExtent();
+			const float WallHeight = C.Generator->WallHeight;
+			const bool bSection = Extent.Y >= 0.5f * Seg.Width - 1.f && P.Z - Extent.Z <= 1.f && P.Z + Extent.Z >= WallHeight - 1.f;
+			const bool bFacing = FVector::DotProduct(Exit->GetActorForwardVector().GetSafeNormal2D(), Dir) > 0.999f;
+			if (FMath::Abs(ExitDepth - Depth) > 51.f || Off > 1.f || !bSection || !bFacing)
+			{
+				Fail(FString::Printf(TEXT("the exit %s: %.0f cm in (want %.0f), %.0f cm off the axis, extent %s (section %s), facing along %s"), *Where(P), ExitDepth, Depth, Off,
+					*Extent.ToCompactString(), bSection ? TEXT("whole") : TEXT("NOT whole"), bFacing ? TEXT("yes") : TEXT("NO")));
+			}
+		}
+		else
+		{
+			Fail(TEXT("no exit"));
+		}
+		// Nothing placed in it.
+		const FBox Inside(Floor.Min - FVector(0.0, 0.0, 10.0), FVector(Floor.Max.X, Floor.Max.Y, C.Generator->WallHeight));
+		TArray<FString> Found;
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			const AActor* A = *It;
+			const bool bKind = A->IsA<AResidue>() || A->IsA<APowerTerminal>() || A->IsA<ADoorDevice>() || A->IsA<ALightGroupDevice>() || A->IsA<ALight>() || A->IsA<ABeaconBody>();
+			if (bKind && Inside.IsInsideOrOn(A->GetActorLocation())) { Found.Add(Label(A)); }
+		}
+		if (Found.Num() > 0) { Fail(TEXT("it holds ") + FString::Join(Found, TEXT(", "))); }
+		// The twin AI's room.
+		FString RoomLine;
+		if (C.Recipe->bTwinAIRoom)
+		{
+			const int32 RoomIndex = Index - 1;
+			const FAreaSegmentRecord* Room = Segs.IsValidIndex(RoomIndex) ? &Segs[RoomIndex] : nullptr;
+			if (!Room || !Room->bTwinAIRoom || !Room->bClosed)
+			{
+				Fail(TEXT("the segment before the exit corridor is not the twin AI's room"));
+			}
+			else
+			{
+				const FVector In = Room->Direction.GetSafeNormal2D();
+				const FBox2D RoomBox(FVector2D(Room->Bounds.Min), FVector2D(Room->Bounds.Max));
+				const bool bFromRoom = RoomBox.ExpandBy(1.0).IsInside(FVector2D(Seg.Mouth)) && FMath::Abs(FVector::DotProduct(Dir, In)) < 0.01f;
+				if (!bFromRoom) { Fail(FString::Printf(TEXT("the exit corridor's mouth %s is not in a side wall of the room"), *Where(Seg.Mouth))); }
+				int32 InRoom = 0;
+				for (TActorIterator<ATwinAITerminal> It(World); It; ++It)
+				{
+					const FVector P = It->GetActorLocation();
+					int32 S = -1;
+					float Offset = 0.f;
+					C.Info->ProjectToRoute(P, S, Offset);
+					const bool bIn = Room->Bounds.ExpandBy(FVector(30.0, 30.0, 10.0)).IsInsideOrOn(P);
+					// On the far wall: facing back toward the entrance, its back within half a wall box of the far edge.
+					const double FarEdge = FVector::DotProduct(Room->Bounds.GetCenter() - Room->Mouth, In) + 0.5 * FMath::Abs(FVector::DotProduct(Room->Bounds.GetSize(), In));
+					const double At = FVector::DotProduct(P - Room->Mouth, In);
+					const bool bFacing = FVector::DotProduct(It->GetActorForwardVector().GetSafeNormal2D(), -In) > 0.999f;
+					const double Centred = FMath::Abs(FVector::DotProduct(P - Room->Bounds.GetCenter(), FVector(-In.Y, In.X, 0.0)));
+					if (!bIn || !bFacing || FarEdge - At > 100.0 || Centred > 1.0)
+					{
+						Fail(FString::Printf(TEXT("%s at %s: in the room %s, facing the entrance %s, %.0f cm from the far wall's edge, %.0f cm off its middle"), *Label(*It), *Where(P),
+							bIn ? TEXT("yes") : TEXT("NO"), bFacing ? TEXT("yes") : TEXT("NO"), FarEdge - At, Centred));
+					}
+					else
+					{
+						++InRoom;
+					}
+				}
+				if (InRoom != C.Recipe->TwinAITerminalCount) { Fail(FString::Printf(TEXT("%d twin AI terminals in the room (recipe %d)"), InRoom, C.Recipe->TwinAITerminalCount)); }
+				RoomLine = FString::Printf(TEXT("; twin AI's room segment %d, %.0f x %.0f cm, %d terminal(s) on its far wall"), RoomIndex, Room->Bounds.GetSize().X, Room->Bounds.GetSize().Y, InRoom);
+			}
+		}
+		R.bPass = Failures == 0;
+		R.Summary = FString::Printf(TEXT("exit corridor segment %d (last of %d), %.0f cm long, %.0f wide, exit %.0f cm in (want %.0f), %.0f cm past it (want %.0f)%s"),
+			Index, Segs.Num(), Length, Seg.Width, ExitDepth, Depth, Length - ExitDepth, Run, *RoomLine);
+		return R;
+	}
 }
 
 bool FAreaValidationResult::AllPassed() const
@@ -1161,6 +1313,7 @@ FAreaValidationResult AreaValidator::Validate(UWorld* World)
 	Result.Rules.Add(RuleNavmesh(C));
 	Result.Rules.Add(RuleOptionalTerminals(C));
 	Result.Rules.Add(RuleBeacons(C));
+	Result.Rules.Add(RuleWayOut(C));
 	Result.Seconds = FPlatformTime::Seconds() - T0;
 	return Result;
 }

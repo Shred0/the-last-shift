@@ -113,9 +113,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Terminal")
 	bool HasUnpoweredTarget() const;
 
-	/** Cost, clamped as TryActivate spends it. */
+	/** What the next payment costs, as TryActivate spends it: Cost, clamped. The twin AI's terminal gives its own (Brief 26). */
 	UFUNCTION(BlueprintPure, Category = "Terminal")
-	int32 GetCost() const;
+	virtual int32 GetCost() const;
 
 	/** InteractRadius, clamped as IsInRange reads it. */
 	UFUNCTION(BlueprintPure, Category = "Terminal", meta = (Units = "cm"))
@@ -136,6 +136,9 @@ public:
 
 	/** Gives Mesh the modelled body when bModelledBody is set (the area generator calls it after setting the flag on a terminal it spawns). */
 	void ApplyTerminalBody();
+
+	/** The modelled body this terminal shows with bModelledBody: TerminalBodyMesh; the twin AI's terminal, its own (Brief 26). */
+	virtual UStaticMesh* GetModelledBodyMesh() const;
 
 	/** The terminal nearest to Pawn within its InteractRadius, or null. */
 	static APowerTerminal* FindNearestInRange(const APawn* Pawn);
