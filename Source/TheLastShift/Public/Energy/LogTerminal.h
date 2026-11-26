@@ -42,6 +42,12 @@ public:
 	virtual bool OffersRead() const override { return bUnlocked && Entries.Num() > 0; }
 	virtual EPaymentKind GetPaymentKind() const override { return EPaymentKind::Log; }
 
+	/** Brief 27: the console's screen (SM_LogConsole: 90 x 65 cm inside its frame); none on the plain slab. */
+	virtual bool GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const override;
+
+	/** Brief 27: blank while its surface shows no entry (before it is paid, and whenever it has nothing to show). */
+	virtual bool IsScreenBlank() const override;
+
 	/** An Interact at the unlocked terminal showed its next entry, for free (a payment fires OnActivated instead). */
 	UPROPERTY(BlueprintAssignable, Category = "Terminal|Events")
 	FOnLogTerminalRead OnRead;

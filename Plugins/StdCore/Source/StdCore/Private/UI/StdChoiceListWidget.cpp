@@ -93,6 +93,11 @@ void UStdChoiceListWidget::SetTitle(const FText& InTitle)
 		Text_Title->SetText(Title);
 		Text_Title->SetVisibility(Title.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
 	}
+	// The theme's rule under the title, when it has put one there, shows with the title.
+	if (UWidget* Rule = WidgetTree ? WidgetTree->FindWidget(StdUITheme::TitleRuleName) : nullptr)
+	{
+		Rule->SetVisibility(Title.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
 }
 
 void UStdChoiceListWidget::SetBody(const FText& InBody)

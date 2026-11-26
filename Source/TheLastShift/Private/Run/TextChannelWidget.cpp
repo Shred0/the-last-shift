@@ -15,6 +15,7 @@
 #include "Styling/CoreStyle.h"
 #include "TextChannel/TextChannelComponent.h"
 #include "UI/StdBarcodeText.h"
+#include "UI/StdUIStyle.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(TextChannelWidget)
 
@@ -77,8 +78,8 @@ void UTextChannelWidget::ApplyStyle()
 	const float Width = FMath::Clamp(MaxWidth, 100.f, 1200.f);
 	if (Text_Message)
 	{
-		// The engine's own font: no imported font.
-		Text_Message->SetFont(FCoreStyle::GetDefaultFontStyle("Regular", FMath::Clamp(FontSize, 8, 48)));
+		// The one font of the game's text (StdCore's style, the engine's own monospace font): no imported font.
+		Text_Message->SetFont(StdUIStyle::MakeFont(FMath::Clamp(FontSize, 8, 48)));
 		Text_Message->SetColorAndOpacity(FSlateColor(UTheLastShiftSettings::GetTextColors().HomeAI));
 		Text_Message->SetAutoWrapText(false);
 		Text_Message->SetWrapTextAt(Width);
@@ -86,7 +87,7 @@ void UTextChannelWidget::ApplyStyle()
 	}
 	if (Barcode_Message)
 	{
-		// One cell per character at the home text's size: Roboto's average advance is about 0.72 of the font size.
+		// One cell per character at the home text's size: wider than the monospace font's advance (0.6 of its size).
 		const int32 Size = FMath::Clamp(FontSize, 8, 48);
 		const FVector2D Cell(FMath::RoundToDouble(Size * 0.72), FMath::RoundToDouble(Size * 1.6));
 		Barcode_Message->SetCellSize(Cell);
@@ -96,7 +97,8 @@ void UTextChannelWidget::ApplyStyle()
 	}
 	if (Border_Text)
 	{
-		Border_Text->SetBrush(FSlateRoundedBoxBrush(BackdropColor, 4.f));
+		// The box keeps its fill and takes the panel's frame line and cut corner (StdCore's style).
+		Border_Text->SetBrush(StdUIStyle::MakeBoxBrush(BackdropColor));
 	}
 	if (Border_Voice)
 	{

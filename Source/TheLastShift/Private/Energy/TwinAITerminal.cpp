@@ -36,6 +36,22 @@ UStaticMesh* ATwinAITerminal::GetModelledBodyMesh() const
 	return UTheLastShiftSettings::GetTwinTerminalBodyMesh();
 }
 
+bool ATwinAITerminal::GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const
+{
+	const UStaticMesh* Shown = Mesh ? Mesh->GetStaticMesh() : nullptr;
+	if (!bModelledBody || !Shown || Shown != UTheLastShiftSettings::GetTwinTerminalBodyMesh())
+	{
+		return false;
+	}
+	// SM_TwinTerminal's slanted desk in its own frame (pivot at its base centre, front +X): 120 cm wide, from X 5 at 128 cm
+	// up to X 35 at 110 cm, facing up and forward.
+	OutCentre = FVector(20.f, 0.f, 119.f);
+	OutNormal = FVector(0.514f, 0.f, 0.857f).GetSafeNormal();
+	OutUp = FVector(-30.f, 0.f, 18.f).GetSafeNormal();
+	OutSize = FVector2D(116.f, 33.f);
+	return true;
+}
+
 bool ATwinAITerminal::AcceptsPayment() const
 {
 	return GetPartsPlayed() < GetPartCount();

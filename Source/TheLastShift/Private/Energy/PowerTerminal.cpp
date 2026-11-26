@@ -12,6 +12,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
+#include "Look/ScreenPlate.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Time/TimeStateSubsystem.h"
 #include "UObject/ConstructorHelpers.h"
@@ -42,6 +43,13 @@ APowerTerminal::APowerTerminal()
 		Mesh->SetStaticMesh(CubeMesh.Object);
 	}
 
+	// Brief 27: the black plate over the body's screen, laid on it by UpdateScreenPlate (hidden without a screen).
+	ScreenPlate = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ScreenPlate"));
+	ScreenPlate->SetupAttachment(Mesh);
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> PlaneMesh(ScreenPlate::PlanePath);
+	ScreenPlate::Setup(ScreenPlate, PlaneMesh.Succeeded() ? PlaneMesh.Object : nullptr);
+	ScreenPlate->SetVisibility(false);
+
 }
 
 void APowerTerminal::OnConstruction(const FTransform& Transform)
@@ -64,6 +72,61 @@ void APowerTerminal::ApplyTerminalBody()
 	Mesh->EmptyOverrideMaterials();
 	Mesh->SetRelativeLocation(FVector::ZeroVector);
 	Mesh->SetRelativeScale3D(FVector::OneVector);
+	UpdateScreenPlate();
+}
+
+namespace TerminalScreens
+{
+	// SM_TerminalBody's slanted panel, in its own frame (pivot at the base centre, front +X): the face between the frame's
+	// top lip (X -14) and its front lip (X +14), 48 cm wide between the frame's sides, rising toward the back.
+	static const FVector BodyCentre(0.f, 0.f, 102.57f);
+	static const FVector BodyNormal(0.528f, 0.f, 0.849f);
+	static const FVector2D BodySize(46.f, 32.f);
+}
+
+bool APowerTerminal::GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const
+{
+	const UStaticMesh* Shown = Mesh ? Mesh->GetStaticMesh() : nullptr;
+	if (!bModelledBody || !Shown || Shown != UTheLastShiftSettings::GetTerminalBodyMesh())
+	{
+		return false;
+	}
+	OutCentre = TerminalScreens::BodyCentre;
+	OutNormal = TerminalScreens::BodyNormal.GetSafeNormal();
+	// Up the slope, toward the back.
+	OutUp = FVector::CrossProduct(FVector::YAxisVector, OutNormal).GetSafeNormal() * -1.f;
+	if (OutUp.Z < 0.f)
+	{
+		OutUp = -OutUp;
+	}
+	OutSize = TerminalScreens::BodySize;
+	return true;
+}
+
+void APowerTerminal::UpdateScreenPlate()
+{
+	if (!ScreenPlate)
+	{
+		return;
+	}
+	FVector Centre, Normal, Up;
+	FVector2D Size;
+	const bool bFace = GetScreenFace(Centre, Normal, Up, Size);
+	if (bFace)
+	{
+		ScreenPlate::Place(ScreenPlate, Centre, Normal, Up, Size);
+		ScreenPlate::ApplyMaterial(ScreenPlate);
+	}
+	const bool bShow = bFace && IsScreenBlank();
+	if (ScreenPlate->IsVisible() != bShow)
+	{
+		ScreenPlate->SetVisibility(bShow);
+	}
+}
+
+bool APowerTerminal::IsScreenPlateShown() const
+{
+	return ScreenPlate && ScreenPlate->IsVisible() && ScreenPlate->IsRegistered();
 }
 
 void APowerTerminal::BeginPlay()
@@ -72,6 +135,7 @@ void APowerTerminal::BeginPlay()
 	// Shown in scans through the lidar channel of InteractableScanChannel (one owner: the project settings).
 	Mesh->SetRenderCustomDepth(true);
 	Mesh->SetCustomDepthStencilValue(UTheLastShiftSettings::GetInteractableScanChannel());
+	UpdateScreenPlate();
 }
 
 bool APowerTerminal::HasUnpoweredTarget() const

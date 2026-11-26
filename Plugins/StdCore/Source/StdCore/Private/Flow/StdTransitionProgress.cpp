@@ -46,6 +46,11 @@ FStdTransitionLayout FStdTransitionLayout::Compute(const UStdProjectSettings& Se
 		Layout.BarPosition = FVector2f(0.f, ScreenSize.Y - BarHeight);
 		Layout.BarSize = FVector2f(ScreenSize.X * Progress.GetBarFraction(), BarHeight);
 		Layout.BarColor = Settings.TransitionProgressBarColor;
+		if (Settings.bUseStyle && Settings.bTransitionUsesStyleAccent)
+		{
+			const FLinearColor Accent = StdUIStyle::GetAccentColor();
+			Layout.BarColor = FLinearColor(Accent.R, Accent.G, Accent.B, Settings.TransitionProgressBarColor.A);
+		}
 		Layout.BarColor.A *= Opacity;
 	}
 

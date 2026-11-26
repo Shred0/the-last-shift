@@ -10,6 +10,19 @@
 #include "RunSceneSubsystem.generated.h"
 
 class UDataTable;
+
+/** Brief 27: what decides the interruption at a text scene's cut, for the sound and for the static alike. */
+namespace RunScenes
+{
+	/** A line of Voice is shown on the paradise's white background (Paradise, EngineerParadise). */
+	THELASTSHIFT_API bool IsOnWhite(ESceneVoice Voice);
+
+	/**
+	 * The interruption: the line at Index is the scene's first change from a line on white to a line on black (its line
+	 * before on white, it on black, and no such change before it).
+	 */
+	THELASTSHIFT_API bool IsInterruptionLine(const TArray<ESceneVoice>& Voices, int32 Index);
+}
 class URunEndingWidget;
 class URunTextSceneWidget;
 class UStdScreenWidget;

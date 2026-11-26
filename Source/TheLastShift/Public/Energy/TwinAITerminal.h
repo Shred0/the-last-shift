@@ -46,6 +46,9 @@ public:
 	/** Its own body: UTheLastShiftSettings::TwinTerminalBodyMesh (SM_TwinTerminal), set into a wall of the twin AI's room. */
 	virtual UStaticMesh* GetModelledBodyMesh() const override;
 
+	/** Brief 27: the slanted desk at the front of SM_TwinTerminal, its one screen. */
+	virtual bool GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const override;
+
 protected:
 	virtual void HandlePaid(APawn* InstigatorPawn) override;
 

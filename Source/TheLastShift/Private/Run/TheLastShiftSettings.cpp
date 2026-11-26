@@ -87,6 +87,20 @@ bool UTheLastShiftSettings::GetMapFlashlight(int32 PrologueStage, bool& bInOutOn
 	}
 }
 
+FRackLightsTuning UTheLastShiftSettings::GetRackLightsTuning() const
+{
+	FRackLightsTuning T;
+	T.PerServer = FMath::Clamp(RackLights.PerServer, 0, 6);
+	T.PeriodMinSeconds = FMath::Clamp(RackLights.PeriodMinSeconds, 0.1f, 30.f);
+	T.PeriodMaxSeconds = FMath::Clamp(RackLights.PeriodMaxSeconds, T.PeriodMinSeconds, 30.f);
+	T.OnShare = FMath::Clamp(RackLights.OnShare, 0.05f, 0.95f);
+	T.Level = FMath::Clamp(RackLights.Level, 0.f, 50.f);
+	T.SecondColor = RackLights.SecondColor;
+	T.SecondShare = FMath::Clamp(RackLights.SecondShare, 0.f, 1.f);
+	T.SizeCm = FMath::Clamp(RackLights.SizeCm, 0.2f, 5.f);
+	return T;
+}
+
 FHologramTuning UTheLastShiftSettings::GetHologramTuning() const
 {
 	FHologramTuning T;

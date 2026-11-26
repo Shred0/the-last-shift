@@ -4,6 +4,7 @@
 
 #include "Blueprint/WidgetTree.h"
 #include "Brushes/SlateRoundedBoxBrush.h"
+#include "UI/StdUIStyle.h"
 #include "Components/Border.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
@@ -91,7 +92,8 @@ void UFlashlightHintWidget::ApplyStyle()
 	}
 	if (Border_Hint)
 	{
-		Border_Hint->SetBrush(FSlateRoundedBoxBrush(BackdropColor, 4.f));
+		// The panel's frame line and cut corner (StdCore's style) around the hint's own fill.
+		Border_Hint->SetBrush(StdUIStyle::MakeBoxBrush(BackdropColor));
 	}
 	if (UCanvasPanelSlot* CanvasSlot = Border_Hint ? Cast<UCanvasPanelSlot>(Border_Hint->Slot) : nullptr)
 	{

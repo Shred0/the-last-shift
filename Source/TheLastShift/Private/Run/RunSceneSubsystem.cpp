@@ -15,6 +15,27 @@
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunSceneSubsystem)
 
+bool RunScenes::IsOnWhite(ESceneVoice Voice)
+{
+	return Voice == ESceneVoice::Paradise || Voice == ESceneVoice::EngineerParadise;
+}
+
+bool RunScenes::IsInterruptionLine(const TArray<ESceneVoice>& Voices, int32 Index)
+{
+	if (!Voices.IsValidIndex(Index) || Index == 0)
+	{
+		return false;
+	}
+	for (int32 I = 1; I <= Index; ++I)
+	{
+		if (IsOnWhite(Voices[I - 1]) && !IsOnWhite(Voices[I]))
+		{
+			return I == Index;
+		}
+	}
+	return false;
+}
+
 DEFINE_LOG_CATEGORY(LogScenes);
 
 URunSceneSubsystem* URunSceneSubsystem::Get(const UObject* WorldContext)

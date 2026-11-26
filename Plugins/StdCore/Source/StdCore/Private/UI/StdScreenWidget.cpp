@@ -23,6 +23,15 @@ void UStdScreenWidget::NativeOnInitialized()
 {
 	Super::NativeOnInitialized();
 
+	// Before the Slate tree is built: the theme's rule under the title takes its place in the tree.
+	if (bApplyTheme && !IsDesignTime())
+	{
+		if (const UStdUITheme* Theme = StdUITheme::Get())
+		{
+			StdUITheme::AddTitleRule(*Theme, *this);
+		}
+	}
+
 	if (UWidget* FocusWidget = GetDefaultFocusWidget())
 	{
 		SetDesiredFocusWidget(FocusWidget);

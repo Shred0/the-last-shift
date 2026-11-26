@@ -140,6 +140,28 @@ public:
 	/** The modelled body this terminal shows with bModelledBody: TerminalBodyMesh; the twin AI's terminal, its own (Brief 26). */
 	virtual UStaticMesh* GetModelledBodyMesh() const;
 
+	/**
+	 * Brief 27: the screen's face of the body Mesh shows now, in Mesh's own frame: its centre, its normal (out of the
+	 * screen), the screen's up direction in its plane and its size (width along normal x up, height along up), cm.
+	 * False when the body has no screen (the engine's cube). The power terminals' body: its slanted panel; the twin AI's
+	 * terminal and the log terminal override it.
+	 */
+	virtual bool GetScreenFace(FVector& OutCentre, FVector& OutNormal, FVector& OutUp, FVector2D& OutSize) const;
+
+	/** Brief 27: the screen shows nothing now (the log terminal: while no entry is on its surface). */
+	virtual bool IsScreenBlank() const { return true; }
+
+	/** Lays ScreenPlate over GetScreenFace, shown while the screen is blank (call after the body or what the screen shows changes). */
+	void UpdateScreenPlate();
+
+	/** The black plate over the body's screen (null on a class without one). */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	UStaticMeshComponent* GetScreenPlate() const { return ScreenPlate; }
+
+	/** The plate is on screen: the body has a screen and it shows nothing. */
+	UFUNCTION(BlueprintPure, Category = "Terminal")
+	bool IsScreenPlateShown() const;
+
 	/** The terminal nearest to Pawn within its InteractRadius, or null. */
 	static APowerTerminal* FindNearestInRange(const APawn* Pawn);
 
@@ -162,4 +184,12 @@ protected:
 	/** The terminal's body; tagged for the interactable scan channel at BeginPlay. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")
 	TObjectPtr<UStaticMeshComponent> Mesh;
+
+	/**
+	 * Brief 27: a flat plate laid over the body's screen (the engine's plane scaled to the face, attached to Mesh), in
+	 * UTheLastShiftSettings::ScreenMaterial: the screen is black while it shows nothing. It collides with nothing, casts no
+	 * shadow and is never captured by a scan (the scan still sees the body's own face under it).
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Terminal")
+	TObjectPtr<UStaticMeshComponent> ScreenPlate;
 };

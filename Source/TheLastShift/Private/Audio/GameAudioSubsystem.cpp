@@ -69,11 +69,6 @@ float FGameAudio::GetVolume(EGameSound Sound) const
 
 namespace GameAudio
 {
-	/** True for the voices of a text scene shown on the paradise's white background. */
-	static bool IsOnWhite(ESceneVoice Voice)
-	{
-		return Voice == ESceneVoice::Paradise || Voice == ESceneVoice::EngineerParadise;
-	}
 
 	static const TCHAR* VoiceName(ETextVoice Voice)
 	{
@@ -466,7 +461,8 @@ void UGameAudioSubsystem::HandleTypingStarted(FName RowName, ETextVoice Voice, b
 
 void UGameAudioSubsystem::HandleSceneLineStarted(FName Scene, int32 Index, ESceneVoice Voice, FName Cue)
 {
-	const bool bWhite = GameAudio::IsOnWhite(Voice);
+	// The rule of the interruption is RunScenes' (the static at the cut follows the same one).
+	const bool bWhite = RunScenes::IsOnWhite(Voice);
 	if (Index == 0 || Scene != SceneName)
 	{
 		// A new scene: nothing before its first line.

@@ -432,6 +432,50 @@ struct THELASTSHIFT_API FHologramTuning
 };
 
 /**
+ * The indicator lights on the servers of the monitor room's racks in Prologue_Home (Brief 27): small lights on each
+ * server's front, each blinking on its own rhythm (a period drawn in [PeriodMinSeconds, PeriodMaxSeconds] and a phase of
+ * its own), on for OnShare of its period. Most show home's tint (SurfaceLook.Home.Tint, read from there), SecondShare of
+ * them SecondColor; their level is Level times the colour. They are not lamps: they light nothing. Normal time only
+ * (hidden while Stopped), never captured by a scan, still behind the pause menu: the hologram's rules. Emissive, the one
+ * exception to "nothing emissive", allowed because they are hidden while Stopped.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FRackLightsTuning
+{
+	GENERATED_BODY()
+
+	/** Lights on each server's front. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RackLights", meta = (ClampMin = "0", ClampMax = "6"))
+	int32 PerServer = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RackLights", meta = (ClampMin = "0.1", ClampMax = "30.0", Units = "s"))
+	float PeriodMinSeconds = 0.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RackLights", meta = (ClampMin = "0.1", ClampMax = "30.0", Units = "s"))
+	float PeriodMaxSeconds = 2.6f;
+
+	/** Share of its period a light is on. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RackLights", meta = (ClampMin = "0.05", ClampMax = "0.95"))
+	float OnShare = 0.5f;
+
+	/** Emissive level: the colour times this. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RackLights", meta = (ClampMin = "0.0", ClampMax = "50.0"))
+	float Level = 2.f;
+
+	/** The colour of the few lights that are not in home's tint. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RackLights")
+	FLinearColor SecondColor = FLinearColor(1.f, 0.55f, 0.1f, 1.f);
+
+	/** Share of the lights in SecondColor. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RackLights", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SecondShare = 0.2f;
+
+	/** Size of one light (a cube), cm. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RackLights", meta = (ClampMin = "0.2", ClampMax = "5.0", Units = "cm"))
+	float SizeCm = 1.2f;
+};
+
+/**
  * The flashlight (Brief 21): the pawn's spot light, the one owner of its values. Normal time only (it is off while
  * Stopped). With bInverseSquaredFalloff (the physical falloff) Intensity is in lumens; without it Intensity is the
  * engine's unitless brightness, and the light falls only as (1 - (d / AttenuationRadius)^2)^FalloffExponent, flat near
@@ -777,6 +821,14 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability", meta = (AllowedClasses = "/Script/Engine.StaticMesh"))
 	TSoftObjectPtr<UStaticMesh> TwinTerminalBodyMesh;
 
+	/**
+	 * Brief 27: the surface of every screen that shows nothing (MI_Surface_Screen: black, opaque, not emissive), shown by
+	 * the plate laid over each screen's face (the power terminals' slanted panel, the log console's screen, the twin AI's
+	 * terminal's desk, the monitor room's monitors). The one owner of the reference; its folder is always cooked.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Readability", meta = (AllowedClasses = "/Script/Engine.MaterialInterface"))
+	TSoftObjectPtr<UMaterialInterface> ScreenMaterial;
+
 	/** Brief 26: the first payment at the twin AI's terminal, which wakes it and plays part 1. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Energy", meta = (ClampMin = "0", ClampMax = "99"))
 	int32 TwinAIWakeCost = 2;
@@ -852,6 +904,17 @@ public:
 	float SceneCharsPerSecond = 40.f;
 
 	/**
+	 * Brief 27: the static at a text scene's cut, at the first change from a line on the paradise's white to a line on
+	 * black (where the interruption's noise plays): the background is noise for StaticSeconds, then fades to the line's
+	 * black over StaticFadeSeconds.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Scenes", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float StaticSeconds = 2.f;
+
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Scenes", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float StaticFadeSeconds = 0.5f;
+
+	/**
 	 * The ending "Open the structure" is offered only when the suit's archive holds at least this many parts of the twin
 	 * AI. 0 = every part of the twin AI's table.
 	 */
@@ -917,6 +980,13 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
 	FHologramTuning Hologram;
 
+	/** Brief 27: the indicator lights of the monitor room's racks; the one owner of their values. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	FRackLightsTuning RackLights;
+
+	/** RackLights, every value clamped (the longest period at least the shortest). */
+	FRackLightsTuning GetRackLightsTuning() const;
+
 	/** The look of home and of the twin structure (Brief 21): the one owner of every value of the two variants. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Surface Look")
 	FSurfaceLook SurfaceLook;
@@ -980,6 +1050,10 @@ public:
 
 	/** SceneCharsPerSecond, clamped. */
 	float GetSceneCharsPerSecond() const { return FMath::Clamp(SceneCharsPerSecond, 1.f, 500.f); }
+
+	/** StaticSeconds and StaticFadeSeconds, clamped. */
+	float GetStaticSeconds() const { return FMath::Clamp(StaticSeconds, 0.f, 30.f); }
+	float GetStaticFadeSeconds() const { return FMath::Clamp(StaticFadeSeconds, 0.f, 30.f); }
 
 	/** Twin AI parts the archive must hold for "Open the structure": OpenEndingTwinParts, or every part of the twin table for 0. */
 	int32 GetOpenEndingTwinParts() const;
@@ -1055,6 +1129,9 @@ public:
 
 	/** The twin AI's terminal's body (loaded on first use), or null when none is set. */
 	static UStaticMesh* GetTwinTerminalBodyMesh() { return Get()->TwinTerminalBodyMesh.LoadSynchronous(); }
+
+	/** The screens' surface (loaded on first use), or null when none is set. */
+	static UMaterialInterface* GetScreenMaterial() { return Get()->ScreenMaterial.LoadSynchronous(); }
 
 	/** TwinAIWakeCost and TwinAIPartCost, clamped. */
 	static int32 GetTwinAIWakeCost() { return FMath::Clamp(Get()->TwinAIWakeCost, 0, 99); }
