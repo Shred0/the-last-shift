@@ -36,6 +36,8 @@ UStdProjectSettings::UStdProjectSettings()
 	// Escape always pauses, so the player can never lock themselves out of the menu.
 	ReservedKeys.Add(EKeys::Escape);
 
+	FrameRateLimits = { 30, 60, 90, 120, 144, 240 };
+
 	MainMenuWidgetClass = TSoftClassPtr<UStdMainMenuWidget>(FSoftObjectPath(StdCoreDefaults::MainMenuWidget));
 	PauseMenuWidgetClass = TSoftClassPtr<UStdPauseMenuWidget>(FSoftObjectPath(StdCoreDefaults::PauseMenuWidget));
 	SettingsWidgetClass = TSoftClassPtr<UStdSettingsWidget>(FSoftObjectPath(StdCoreDefaults::SettingsWidget));

@@ -13,6 +13,7 @@
 // Built with TLS_COST_BASELINE defined to 1 (the Step 1 baseline copy, without lines), it measures 0 neighbours only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/FrameCapsTestScope.h"
 #include "Area/AreaInfo.h"
 #include "Area/AreaTypes.h"
 #include "Camera/CameraComponent.h"
@@ -251,8 +252,8 @@ namespace LinksCostDebug
 		case EPhase::WaitWorld:
 			if (L && Pawn() && Now - G.PhaseStart > 4.0)
 			{
-				Exec(TEXT("t.MaxFPS 0"));
-				Exec(TEXT("r.VSync 0"));
+				// No cap for the run: the player's frame-rate limit and V-Sync are lifted, and put back at the end.
+				FrameCapsTest::Lift(W(), TEXT("tls.Links.CostRun"));
 				Exec(TEXT("r.VSyncEditor 0"));
 				Begin(EPhase::Pose, Now);
 			}
@@ -418,6 +419,7 @@ namespace LinksCostDebug
 				D->ApplyScanMemory();
 			}
 #endif
+			FrameCapsTest::Restore(W(), TEXT("tls.Links.CostRun"));
 			UE_LOG(LogTheLastShift, Display, TEXT("CostRun: ===== done (%s build)%s ====="), TLS_COST_BASELINE ? TEXT("Step 1 baseline") : TEXT("Brief 13"), *G.Results);
 			if (G.bQuit)
 			{

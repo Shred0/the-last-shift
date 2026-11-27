@@ -78,6 +78,16 @@ struct STDCORE_API FStdKeyBindingRowSetting
 	FText Category;
 };
 
+/** The video options of the settings screen, each with its own row (UStdProjectSettings::HiddenVideoOptions). */
+UENUM(BlueprintType)
+enum class EStdVideoOption : uint8
+{
+	/** The frame-rate limit, with its Unlimited box beside it. */
+	FrameRateLimit,
+	AntiAliasing,
+	VSync
+};
+
 /**
  * Per-project settings of the Std Core plugin: Project Settings > Game > Std Core.
  * Saved in the host project's DefaultGame.ini. Every default points to an asset inside the plugin,
@@ -240,6 +250,44 @@ public:
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Input")
 	TArray<FName> HiddenKeyMappings;
+
+	// Video
+
+	/** The frame-rate limits the settings screen offers, in frames a second, in this order. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Video")
+	TArray<int32> FrameRateLimits;
+
+	/** The frame-rate limit of a player who has not chosen one, in frames a second (kept while the frame rate is unlimited). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Video", meta = (ClampMin = "10", ClampMax = "1000"))
+	int32 DefaultFrameRateLimit = 60;
+
+	/**
+	 * A player who has not chosen gets no frame-rate limit. On by default, so a project that sets nothing runs as it did
+	 * before the option existed.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Video")
+	bool bDefaultFrameRateUnlimited = true;
+
+	/**
+	 * The anti-aliasing of a player who has not chosen one, by the number r.AntiAliasingMethod gives it (0 none, 1 FXAA,
+	 * 2 TAA, 3 MSAA, 4 TSR). -1: the method the project's renderer settings set, so a player who changes nothing sees the
+	 * project as it is.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Video", meta = (ClampMin = "-1", ClampMax = "4"))
+	int32 DefaultAntiAliasingMethod = -1;
+
+	/** V-Sync of a player who has not chosen. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Video")
+	bool bDefaultVSync = false;
+
+	/**
+	 * Rows of the settings screen that are not shown. A hidden option stays at its default above, whatever the player's
+	 * settings file holds.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Video")
+	TArray<EStdVideoOption> HiddenVideoOptions;
+
+	bool IsVideoOptionHidden(EStdVideoOption Option) const { return HiddenVideoOptions.Contains(Option); }
 
 	// UI
 

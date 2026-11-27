@@ -2,7 +2,13 @@
 
 #include "Blueprint/WidgetTree.h"
 #include "Components/Button.h"
+#include "Components/ButtonSlot.h"
+#include "Components/CheckBox.h"
+#include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
 #include "Components/PanelWidget.h"
+#include "Components/ScrollBox.h"
+#include "Components/VerticalBoxSlot.h"
 #include "Components/Slider.h"
 #include "Components/TextBlock.h"
 #include "Components/WidgetSwitcher.h"
@@ -37,6 +43,17 @@ UStdSettingsWidget::UStdSettingsWidget(const FObjectInitializer& ObjectInitializ
 	};
 	CustomQualityText = LOCTEXT("QualityCustom", "Custom");
 	DefaultsRestoredText = LOCTEXT("KeysDefaultsRestored", "Default controls restored.");
+	FrameRateLimitLabel = LOCTEXT("FrameRateLimitLabel", "Frame rate limit");
+	FrameRateUnlimitedLabel = LOCTEXT("FrameRateUnlimitedLabel", "Unlimited");
+	AntiAliasingLabel = LOCTEXT("AntiAliasingLabel", "Anti-aliasing");
+	VSyncLabel = LOCTEXT("VSyncLabel", "V-Sync");
+	AntiAliasingNames = {
+		LOCTEXT("AntiAliasingOff", "Off"),
+		LOCTEXT("AntiAliasingFXAA", "FXAA"),
+		LOCTEXT("AntiAliasingTAA", "TAA"),
+		LOCTEXT("AntiAliasingMSAA", "MSAA"),
+		LOCTEXT("AntiAliasingTSR", "TSR")
+	};
 }
 
 void UStdSettingsWidget::NativeOnInitialized()
@@ -90,6 +107,9 @@ void UStdSettingsWidget::NativeOnInitialized()
 	{
 		Button_Back->OnClicked.AddUniqueDynamic(this, &ThisClass::HandleBackClicked);
 	}
+
+	// Before the Slate tree is built and before the theme is applied (Pre Construct): the rows are themed like the rest.
+	BuildVideoRows();
 }
 
 void UStdSettingsWidget::NativeConstruct()
@@ -175,6 +195,239 @@ void UStdSettingsWidget::RefreshAudioVideo()
 	if (Text_Quality)
 	{
 		Text_Quality->SetText(GetQualityText(SettingsSubsystem->GetQualityLevel()));
+	}
+	RefreshVideo();
+}
+
+// Video options
+
+void UStdSettingsWidget::BuildVideoRows()
+{
+	if (IsDesignTime() || !WidgetTree)
+	{
+		return;
+	}
+
+	const UStdProjectSettings* Settings = UStdProjectSettings::Get();
+	UWidget* TemplateRow = Button_Quality ? Button_Quality->GetParent() : nullptr;
+	UPanelWidget* RowPanel = Box_VideoOptions ? Box_VideoOptions.Get() : (TemplateRow ? TemplateRow->GetParent() : nullptr);
+	if (!RowPanel)
+	{
+		UE_LOG(LogStdCore, Warning, TEXT("Settings: no panel for the video options (no Box_VideoOptions, and Button_Quality is not in a row of a panel)."));
+		return;
+	}
+
+	// The designer's rows give the spacing and the label's share of the row.
+	FMargin RowPadding(0.f, 0.f, 0.f, 16.f);
+	if (const UVerticalBoxSlot* TemplateSlot = TemplateRow ? Cast<UVerticalBoxSlot>(TemplateRow->Slot) : nullptr)
+	{
+		RowPadding = TemplateSlot->GetPadding();
+	}
+	float LabelShare = 0.4f;
+	if (const UPanelWidget* TemplatePanel = Cast<UPanelWidget>(TemplateRow))
+	{
+		if (const UHorizontalBoxSlot* LabelSlot = TemplatePanel->GetChildrenCount() > 0 ? Cast<UHorizontalBoxSlot>(TemplatePanel->GetChildAt(0)->Slot) : nullptr)
+		{
+			LabelShare = LabelSlot->GetSize().Value;
+		}
+	}
+
+	// Eight rows do not fit every panel: the tab scrolls, keeping the focused row in view.
+	UPanelWidget* Holder = RowPanel->GetParent();
+	if (!Box_VideoOptions && Holder && !Holder->IsA<UScrollBox>())
+	{
+		const int32 Index = Holder->GetChildIndex(RowPanel);
+		UScrollBox* Scroll = WidgetTree->ConstructWidget<UScrollBox>(UScrollBox::StaticClass(), TEXT("ScrollBox_AudioVideo"));
+		Scroll->SetScrollWhenFocusChanges(EScrollWhenFocusChanges::AnimatedScroll);
+		Holder->RemoveChildAt(Index);
+		Holder->InsertChildAt(Index, Scroll);
+		Scroll->AddChild(RowPanel);
+	}
+
+	const auto AddRow = [this, RowPanel, RowPadding, LabelShare](const TCHAR* Name, const FText& Label)
+	{
+		UHorizontalBox* Row = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), *FString::Printf(TEXT("Row_%s"), Name));
+		UPanelSlot* RowSlot = RowPanel->AddChild(Row);
+		if (UVerticalBoxSlot* VerticalSlot = Cast<UVerticalBoxSlot>(RowSlot))
+		{
+			VerticalSlot->SetPadding(RowPadding);
+		}
+		UTextBlock* Text = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), *FString::Printf(TEXT("Text_%sLabel"), Name));
+		Text->SetText(Label);
+		if (UHorizontalBoxSlot* TextSlot = Row->AddChildToHorizontalBox(Text))
+		{
+			FSlateChildSize Size(ESlateSizeRule::Fill);
+			Size.Value = LabelShare;
+			TextSlot->SetSize(Size);
+			TextSlot->SetVerticalAlignment(VAlign_Center);
+		}
+		return Row;
+	};
+	const auto AddButton = [this](UHorizontalBox* Row, const TCHAR* Name, float Share, UTextBlock*& OutText)
+	{
+		UButton* Button = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass(), *FString::Printf(TEXT("Button_%s"), Name));
+		OutText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), *FString::Printf(TEXT("Text_%s"), Name));
+		OutText->SetJustification(ETextJustify::Center);
+		Button->AddChild(OutText);
+		if (UHorizontalBoxSlot* ButtonSlot = Row->AddChildToHorizontalBox(Button))
+		{
+			FSlateChildSize Size(ESlateSizeRule::Fill);
+			Size.Value = Share;
+			ButtonSlot->SetSize(Size);
+			ButtonSlot->SetVerticalAlignment(VAlign_Center);
+		}
+		return Button;
+	};
+	const auto AddCheckBox = [this](UHorizontalBox* Row, const TCHAR* Name, float Share, const FText* Label, const FMargin& BoxPadding)
+	{
+		UCheckBox* CheckBox = WidgetTree->ConstructWidget<UCheckBox>(UCheckBox::StaticClass(), *FString::Printf(TEXT("CheckBox_%s"), Name));
+		if (Label)
+		{
+			// The label is the box's content: a click on it ticks the box too.
+			UTextBlock* Text = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), *FString::Printf(TEXT("Text_%s"), Name));
+			Text->SetText(*Label);
+			CheckBox->AddChild(Text);
+		}
+		if (UHorizontalBoxSlot* BoxSlot = Row->AddChildToHorizontalBox(CheckBox))
+		{
+			FSlateChildSize Size(ESlateSizeRule::Fill);
+			Size.Value = Share;
+			BoxSlot->SetSize(Size);
+			BoxSlot->SetPadding(BoxPadding);
+			BoxSlot->SetHorizontalAlignment(HAlign_Left);
+			BoxSlot->SetVerticalAlignment(VAlign_Center);
+		}
+		return CheckBox;
+	};
+
+	const float ControlShare = 1.f - LabelShare;
+	if (!Settings->IsVideoOptionHidden(EStdVideoOption::FrameRateLimit))
+	{
+		UHorizontalBox* Row = AddRow(TEXT("FrameRateLimit"), FrameRateLimitLabel);
+		// The choice and its box share the control's column, so the label's column is the other rows' (a gap in the row
+		// itself would narrow it).
+		UHorizontalBox* Controls = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("Box_FrameRateLimitControls"));
+		if (UHorizontalBoxSlot* ControlsSlot = Row->AddChildToHorizontalBox(Controls))
+		{
+			FSlateChildSize Size(ESlateSizeRule::Fill);
+			Size.Value = ControlShare;
+			ControlsSlot->SetSize(Size);
+			ControlsSlot->SetVerticalAlignment(VAlign_Center);
+		}
+		UTextBlock* Text = nullptr;
+		Button_FrameRateLimit = AddButton(Controls, TEXT("FrameRateLimit"), 0.55f, Text);
+		Text_FrameRateLimit = Text;
+		Button_FrameRateLimit->OnClicked.AddUniqueDynamic(this, &ThisClass::HandleFrameRateLimitClicked);
+		CheckBox_FrameRateUnlimited = AddCheckBox(Controls, TEXT("FrameRateUnlimited"), 0.45f, &FrameRateUnlimitedLabel, FMargin(16.f, 0.f, 0.f, 0.f));
+		CheckBox_FrameRateUnlimited->OnCheckStateChanged.AddUniqueDynamic(this, &ThisClass::HandleFrameRateUnlimitedChanged);
+	}
+	if (!Settings->IsVideoOptionHidden(EStdVideoOption::AntiAliasing))
+	{
+		UHorizontalBox* Row = AddRow(TEXT("AntiAliasing"), AntiAliasingLabel);
+		UTextBlock* Text = nullptr;
+		Button_AntiAliasing = AddButton(Row, TEXT("AntiAliasing"), ControlShare, Text);
+		Text_AntiAliasing = Text;
+		Button_AntiAliasing->OnClicked.AddUniqueDynamic(this, &ThisClass::HandleAntiAliasingClicked);
+	}
+	if (!Settings->IsVideoOptionHidden(EStdVideoOption::VSync))
+	{
+		UHorizontalBox* Row = AddRow(TEXT("VSync"), VSyncLabel);
+		CheckBox_VSync = AddCheckBox(Row, TEXT("VSync"), ControlShare, nullptr, FMargin(0.f));
+		CheckBox_VSync->OnCheckStateChanged.AddUniqueDynamic(this, &ThisClass::HandleVSyncChanged);
+	}
+}
+
+void UStdSettingsWidget::RefreshVideo()
+{
+	const UStdSettingsSubsystem* SettingsSubsystem = GetSettingsSubsystem();
+	if (!SettingsSubsystem)
+	{
+		return;
+	}
+
+	const bool bUnlimited = SettingsSubsystem->IsFrameRateUnlimited();
+	if (Text_FrameRateLimit)
+	{
+		Text_FrameRateLimit->SetText(FText::AsNumber(SettingsSubsystem->GetFrameRateLimit()));
+	}
+	if (Button_FrameRateLimit)
+	{
+		// The choice keeps its value while the box is ticked.
+		Button_FrameRateLimit->SetIsEnabled(!bUnlimited);
+	}
+	if (CheckBox_FrameRateUnlimited)
+	{
+		CheckBox_FrameRateUnlimited->SetIsChecked(bUnlimited);
+	}
+	if (Text_AntiAliasing)
+	{
+		const int32 Method = SettingsSubsystem->GetAntiAliasingMethod();
+		Text_AntiAliasing->SetText(AntiAliasingNames.IsValidIndex(Method) ? AntiAliasingNames[Method] : FText::AsNumber(Method));
+	}
+	if (CheckBox_VSync)
+	{
+		CheckBox_VSync->SetIsChecked(SettingsSubsystem->IsVSyncEnabled());
+	}
+}
+
+namespace StdSettingsVideo
+{
+	/** The entry after Current in Choices, wrapping; a value not in the list moves to the first entry above it. */
+	int32 Next(const TArray<int32>& Choices, int32 Current)
+	{
+		if (Choices.IsEmpty())
+		{
+			return Current;
+		}
+		const int32 Index = Choices.IndexOfByKey(Current);
+		if (Index != INDEX_NONE)
+		{
+			return Choices[(Index + 1) % Choices.Num()];
+		}
+		for (const int32 Choice : Choices)
+		{
+			if (Choice > Current)
+			{
+				return Choice;
+			}
+		}
+		return Choices[0];
+	}
+}
+
+void UStdSettingsWidget::HandleFrameRateLimitClicked()
+{
+	if (UStdSettingsSubsystem* SettingsSubsystem = GetSettingsSubsystem())
+	{
+		SettingsSubsystem->SetFrameRateLimit(StdSettingsVideo::Next(UStdProjectSettings::Get()->FrameRateLimits, SettingsSubsystem->GetFrameRateLimit()));
+		RefreshVideo();
+	}
+}
+
+void UStdSettingsWidget::HandleFrameRateUnlimitedChanged(bool bIsChecked)
+{
+	if (UStdSettingsSubsystem* SettingsSubsystem = GetSettingsSubsystem())
+	{
+		SettingsSubsystem->SetFrameRateUnlimited(bIsChecked);
+		RefreshVideo();
+	}
+}
+
+void UStdSettingsWidget::HandleAntiAliasingClicked()
+{
+	if (UStdSettingsSubsystem* SettingsSubsystem = GetSettingsSubsystem())
+	{
+		SettingsSubsystem->SetAntiAliasingMethod(StdSettingsVideo::Next(UStdSettingsSubsystem::GetAntiAliasingChoices(), SettingsSubsystem->GetAntiAliasingMethod()));
+		RefreshVideo();
+	}
+}
+
+void UStdSettingsWidget::HandleVSyncChanged(bool bIsChecked)
+{
+	if (UStdSettingsSubsystem* SettingsSubsystem = GetSettingsSubsystem())
+	{
+		SettingsSubsystem->SetVSyncEnabled(bIsChecked);
+		RefreshVideo();
 	}
 }
 
