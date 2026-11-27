@@ -19,7 +19,9 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
 #include "Entity/Entity.h"
+#include "Entity/EntityFigureShape.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -1081,12 +1083,64 @@ namespace TerminalCheck
 	};
 
 	static FBox Shrunk(const FBox& B, double By) { return FBox(B.Min + FVector(By), B.Max - FVector(By)); }
+
+	/** A triangle and an axis-aligned box (its centre and half size) overlap: the separating axis test (13 axes). */
+	static bool TriangleBoxOverlap(const FVector& Centre, const FVector& Half, FVector A, FVector B, FVector C)
+	{
+		A -= Centre;
+		B -= Centre;
+		C -= Centre;
+		auto Separates = [&](const FVector& Axis)
+		{
+			if (Axis.SizeSquared() < 1.e-12)
+			{
+				return false;
+			}
+			const double P0 = FVector::DotProduct(A, Axis), P1 = FVector::DotProduct(B, Axis), P2 = FVector::DotProduct(C, Axis);
+			const double R = Half.X * FMath::Abs(Axis.X) + Half.Y * FMath::Abs(Axis.Y) + Half.Z * FMath::Abs(Axis.Z);
+			return FMath::Min3(P0, P1, P2) > R || FMath::Max3(P0, P1, P2) < -R;
+		};
+		const FVector Edges[3] = { B - A, C - B, A - C };
+		const FVector Axes[3] = { FVector::XAxisVector, FVector::YAxisVector, FVector::ZAxisVector };
+		for (const FVector& Edge : Edges)
+		{
+			for (const FVector& Axis : Axes)
+			{
+				if (Separates(FVector::CrossProduct(Axis, Edge)))
+				{
+					return false;
+				}
+			}
+		}
+		for (const FVector& Axis : Axes)
+		{
+			if (Separates(Axis))
+			{
+				return false;
+			}
+		}
+		return !Separates(FVector::CrossProduct(Edges[0], Edges[1]));
+	}
+
+	/** LOD 0's triangles of a mesh in its own space, read once (empty when the mesh keeps no CPU copy). */
+	static const TPair<TArray<FVector>, TArray<uint32>>& MeshTriangles(const UStaticMesh* Mesh)
+	{
+		static TMap<FString, TPair<TArray<FVector>, TArray<uint32>>> Cache;
+		const FString Key = Mesh ? Mesh->GetPathName() : FString();
+		if (const TPair<TArray<FVector>, TArray<uint32>>* Found = Cache.Find(Key))
+		{
+			return *Found;
+		}
+		TPair<TArray<FVector>, TArray<uint32>>& Read = Cache.Add(Key);
+		FEntityFigureShape::ReadMeshTriangles(Mesh, Read.Key, Read.Value);
+		return Read;
+	}
 }
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsTerminalCheckCommand(
 	TEXT("tls.TerminalCheck"),
-	TEXT("tls.TerminalCheck: (any map; the game world, else the editor's) for every power terminal showing the modelled body, logs every visible mesh part its body's parts (plinth, column, head) cut into by more than 0.5 cm: a wall panel's own parts (slab, ribs, rail, louvre, upper frame) from SM_KitWallPanel's source, any other mesh by its bounds; and the distance from its back to the wall panel's slab face behind it."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld*)
+	TEXT("tls.TerminalCheck: (any map; the game world, else the editor's) for every power terminal showing the modelled body, logs every visible mesh part its body's parts (plinth, column, head) cut into by more than 0.5 cm: a wall panel's own parts (slab, ribs, rail, louvre, upper frame) from SM_KitWallPanel's source, any other mesh by its own triangles (LOD 0; its bounds only find the candidates, and measure a mesh whose triangles cannot be read); and the distance from its back to the wall panel's slab face behind it. Args: [probe] spawns one SM_KitConduit through the first such terminal's head for this run only (the check must name it), then destroys it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		using namespace TerminalCheck;
 		UWorld* World = nullptr;
@@ -1102,6 +1156,31 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsTerminalCheckCommand(
 		{
 			UE_LOG(LogArea, Warning, TEXT("tls.TerminalCheck: no world."));
 			return;
+		}
+		// probe: a kit piece through the first modelled terminal's head, for this run only (proves a real contact is reported).
+		AStaticMeshActor* Probe = nullptr;
+		if (Args.ContainsByPredicate([](const FString& A) { return A.Equals(TEXT("probe"), ESearchCase::IgnoreCase); }))
+		{
+			UStaticMesh* Piece = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/TheLastShift/Art/Kit/SM_KitConduit.SM_KitConduit"));
+			for (TActorIterator<APowerTerminal> It(World); It && Piece && !Probe; ++It)
+			{
+				if (!It->bModelledBody)
+				{
+					continue;
+				}
+				const FVector Head = It->GetActorTransform().TransformPosition(FVector(0.0, 0.0, 99.0));
+				FActorSpawnParameters Params;
+				Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+				Probe = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), FTransform(FRotator(90.0, 90.0, 0.0), FVector::ZeroVector, FVector(1.0, 0.5, 1.0)), Params);
+				if (Probe)
+				{
+					Probe->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
+					Probe->GetStaticMeshComponent()->SetStaticMesh(Piece);
+					Probe->SetActorLocation(Head - Probe->GetStaticMeshComponent()->Bounds.Origin);
+					UE_LOG(LogArea, Display, TEXT("tls.TerminalCheck: probe %s (SM_KitConduit) spawned through %s's head, bounds %s"), *Probe->GetName(), *It->GetActorNameOrLabel(),
+						*Probe->GetStaticMeshComponent()->Bounds.GetBox().ToString());
+				}
+			}
 		}
 		int32 Terminals = 0, Clear = 0;
 		for (TActorIterator<APowerTerminal> It(World); It; ++It)
@@ -1169,7 +1248,44 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsTerminalCheckCommand(
 						ISM ? *FString::Printf(TEXT(" #%d"), I) : TEXT(""));
 					if (!bPanel)
 					{
-						Test(Owner, Local.TransformBy(W));
+						// Any other mesh by its own triangles (Brief 36A): its bounds only find the candidates. A mesh whose
+						// triangles cannot be read is measured by its bounds, as before.
+						const TPair<TArray<FVector>, TArray<uint32>>& Tris = MeshTriangles(C->GetStaticMesh());
+						if (Tris.Value.Num() < 3)
+						{
+							Test(Owner + TEXT(" (by its bounds)"), Local.TransformBy(W));
+							continue;
+						}
+						for (int32 Part = 0; Part < BodyBoxes.Num(); ++Part)
+						{
+							const FBox& PartBox = BodyBoxes[Part];
+							if (!PartBox.Intersect(Local.TransformBy(W)))
+							{
+								continue;
+							}
+							FBox Cut(ForceInit);
+							for (int32 K = 0; K + 2 < Tris.Value.Num(); K += 3)
+							{
+								const FVector A = W.TransformPosition(Tris.Key[Tris.Value[K]]);
+								const FVector B = W.TransformPosition(Tris.Key[Tris.Value[K + 1]]);
+								const FVector D = W.TransformPosition(Tris.Key[Tris.Value[K + 2]]);
+								FBox TriBox(ForceInit);
+								TriBox += A;
+								TriBox += B;
+								TriBox += D;
+								if (TriBox.Intersect(PartBox) && TriangleBoxOverlap(PartBox.GetCenter(), PartBox.GetExtent(), A, B, D))
+								{
+									Cut += TriBox.Overlap(PartBox);
+								}
+							}
+							if (Cut.IsValid)
+							{
+								const FVector O = Cut.GetSize();
+								++HitCount;
+								Hits += FString::Printf(TEXT("%s%s into the %s by its triangles (%.1f cm)"), Hits.IsEmpty() ? TEXT("") : TEXT("; "), *Owner, BodyParts[Part].Name,
+									FMath::Max3(O.X, O.Y, O.Z) + 0.5);
+							}
+						}
 						continue;
 					}
 					for (const FPart& P : PanelParts)
@@ -1196,6 +1312,11 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsTerminalCheckCommand(
 				BackToFace >= 0.0 ? *FString::Printf(TEXT("; its back %.1f cm from the wall panel's slab face"), BackToFace) : TEXT("; no wall panel behind it"));
 		}
 		UE_LOG(LogArea, Display, TEXT("tls.TerminalCheck: %d terminals with the modelled body in %s, %d clear"), Terminals, *World->GetMapName(), Clear);
+		if (Probe)
+		{
+			UE_LOG(LogArea, Display, TEXT("tls.TerminalCheck: probe %s destroyed"), *Probe->GetName());
+			Probe->Destroy();
+		}
 	}));
 
 #endif // !UE_BUILD_SHIPPING

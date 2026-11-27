@@ -7,25 +7,23 @@
 #include "ChoiceTerminal.generated.h"
 
 class AChoiceTerminal;
+class UChoiceDialogWidget;
 class UTimeStateSubsystem;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChoiceHoldProgress, float, Fraction);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChoiceMade, AChoiceTerminal*, Terminal);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnChoiceMade, AChoiceTerminal*, Terminal, FName, Ending);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnChoiceDialogChanged, AChoiceTerminal*, Terminal, bool, bOpen);
 
 /**
- * One of the two places of the battery's chamber, on the power terminal's modelled body: acting at it chooses one of the
- * two endings (Ending: Inject or Open). It takes no payment and powers nothing: the Interact prompt shows the key and the
- * ending's label (URunSceneSubsystem::GetEndingLabel, the list's own) while it offers the choice.
+ * The one terminal of the battery's chamber, on the power terminal's modelled body: the ending is chosen there. It takes
+ * no payment and powers nothing. It offers (OffersChoice) as a terminal offers, by the Interact prompt within its reach,
+ * with the Interact key and its label (URunSceneSubsystem::GetChooseLabel): only in Normal time, once the chamber has let
+ * it (SetOffering: after the home AI's last message), before any choice is made and while its dialog is closed.
  *
- * It offers the choice (OffersChoice) only in Normal time, once the chamber has let it (SetOffering: after the home AI's
- * last message), before any choice is made, and for Open only when the suit's archive holds the twin AI's parts the list
- * asks for (URunSceneSubsystem::IsOpenEndingOffered). Without them it offers nothing: no prompt, no refusal, no sound.
- *
- * The choice is a hold: BeginHold starts it (the pawn's Interact pressed), EndHold before the end cancels it (released).
- * The hold lasts UTheLastShiftSettings::ChoiceHoldSeconds of the run's clock, reported by OnHoldProgress (the suit's
- * collection ring follows it); it stands still behind the pause menu and is cancelled by a Stop or by leaving the
- * terminal's reach. Held through: OnChoiceMade, and the terminal's OnActivated and OnAnyActivated with cost 0 (the
- * terminal sound; no spending comment).
+ * Interact (a press, TryActivate) opens the choice's dialog (UChoiceDialogWidget) over the game's view, with one button
+ * for each ending GetEndings gives: Inject always, Open only when the suit's archive holds the twin AI's parts the list
+ * asks for (URunSceneSubsystem::IsOpenEndingOffered). A button held through calls Choose: OnChoiceMade with the ending,
+ * and the terminal's OnActivated and OnAnyActivated with cost 0 (the terminal sound; no spending comment). Closed without
+ * choosing, the terminal offers again.
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API AChoiceTerminal : public APowerTerminal
@@ -35,53 +33,53 @@ class THELASTSHIFT_API AChoiceTerminal : public APowerTerminal
 public:
 	AChoiceTerminal();
 
-	/** The ending this place chooses: Inject or Open (the DT_Endings row; never text). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice")
-	FName Ending = TEXT("Inject");
-
-	/** The chamber lets the place offer its choice (after the last message), or stops it (a choice was made). */
+	/** The chamber lets the terminal offer the choice (after the last message), or stops it (a choice was made). */
 	UFUNCTION(BlueprintCallable, Category = "Choice")
 	void SetOffering(bool bInOffering);
 
-	/** The place offers its choice now: let by the chamber, Normal time, no choice made, and for Open the twin AI's parts. */
+	/** The terminal offers now: let by the chamber, Normal time, the run not frozen, no choice made, its dialog closed. */
 	UFUNCTION(BlueprintPure, Category = "Choice")
 	bool OffersChoice() const;
 
-	/** The label the prompt shows with the key: the ending list's label for Ending. */
+	/** The endings the dialog offers now, in order: Inject, then Open when the twin AI's parts are in the archive (DT_Endings rows; never text). */
 	UFUNCTION(BlueprintPure, Category = "Choice")
-	FText GetChoiceLabel() const;
+	TArray<FName> GetEndings() const;
 
-	/** Starts the hold for Pawn: false when the place offers nothing or Pawn is out of its reach. */
+	/** The label the prompt shows with the key: URunSceneSubsystem::GetChooseLabel. */
+	UFUNCTION(BlueprintPure, Category = "Choice")
+	FText GetPromptLabel() const;
+
+	/** The dialog chose Ending (held through): false when the terminal does not offer it now. */
 	UFUNCTION(BlueprintCallable, Category = "Choice")
-	bool BeginHold(APawn* Pawn);
+	bool Choose(FName Ending);
 
-	/** Interact released: cancels a hold that has not ended. */
-	UFUNCTION(BlueprintCallable, Category = "Choice")
-	void EndHold();
-
-	UFUNCTION(BlueprintPure, Category = "Choice")
-	bool IsHolding() const { return bHolding; }
-
-	/** 0..1 of the hold now (0 when none). */
-	UFUNCTION(BlueprintPure, Category = "Choice")
-	float GetHoldFraction() const;
-
-	/** The hold was held through: the choice is made. */
+	/** The choice is made. */
 	UFUNCTION(BlueprintPure, Category = "Choice")
 	bool HasChosen() const { return bChosen; }
 
-	/** Holds started and cancelled so far (tests). */
-	int32 GetHoldsStarted() const { return HoldsStarted; }
-	int32 GetHoldsCancelled() const { return HoldsCancelled; }
+	/** The dialog opened from this terminal, while it is open (null otherwise). */
+	UFUNCTION(BlueprintPure, Category = "Choice")
+	UChoiceDialogWidget* GetDialog() const { return Dialog; }
 
-	UPROPERTY(BlueprintAssignable, Category = "Choice")
-	FOnChoiceHoldProgress OnHoldProgress;
+	UFUNCTION(BlueprintPure, Category = "Choice")
+	bool IsDialogOpen() const { return Dialog != nullptr; }
+
+	/** Called by the dialog when it closes, chosen or not. */
+	void NotifyDialogClosed(UChoiceDialogWidget* InDialog);
+
+	/** Dialogs opened so far (tests). */
+	int32 GetDialogsOpened() const { return DialogsOpened; }
 
 	UPROPERTY(BlueprintAssignable, Category = "Choice")
 	FOnChoiceMade OnChoiceMade;
 
+	UPROPERTY(BlueprintAssignable, Category = "Choice")
+	FOnChoiceDialogChanged OnDialogChanged;
+
+	/** Interact pressed within reach: opens the dialog when the terminal offers; otherwise nothing (no refusal, no sound). */
+	virtual bool TryActivate(APawn* InstigatorPawn) override;
+
 	// --- The power terminal: no payment, nothing powered ---
-	virtual bool TryActivate(APawn* InstigatorPawn) override { return false; }
 	virtual bool AcceptsPayment() const override { return false; }
 	virtual bool OffersPayment() const override { return false; }
 	virtual bool OffersRead() const override { return false; }
@@ -90,20 +88,16 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
-	virtual void Tick(float DeltaSeconds) override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
-	void CancelHold(const TCHAR* Why);
-
 	UPROPERTY(Transient)
 	TObjectPtr<UTimeStateSubsystem> TimeState;
 
-	TWeakObjectPtr<APawn> HoldPawn;
+	UPROPERTY(Transient)
+	TObjectPtr<UChoiceDialogWidget> Dialog;
+
 	bool bOffering = false;
-	bool bHolding = false;
 	bool bChosen = false;
-	double HoldSeconds = 0.0;
-	double LastRunSeconds = -1.0;
-	int32 HoldsStarted = 0;
-	int32 HoldsCancelled = 0;
+	int32 DialogsOpened = 0;
 };

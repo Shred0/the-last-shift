@@ -11,7 +11,6 @@
 #include "InputAction.h"
 #include "InputActionValue.h"
 #include "Energy/PowerTerminal.h"
-#include "Epilogue/ChoiceTerminal.h"
 #include "LidarScanComponent.h"
 #include "Residue/Residue.h"
 #include "Residue/ResidueCollectCueWidget.h"
@@ -313,21 +312,8 @@ void ATestLidarCharacter::OnInteractPressed()
 			return;
 		}
 	}
-	APowerTerminal* Terminal = APowerTerminal::FindNearestInRange(this);
-	// A place of the battery's chamber is held, not pressed; when it offers nothing, nothing happens.
-	if (AChoiceTerminal* Choice = Cast<AChoiceTerminal>(Terminal))
-	{
-		if (Choice->BeginHold(this))
-		{
-			HeldChoice = Choice;
-			if (CollectCue)
-			{
-				CollectCue->SetChoice(Choice);
-			}
-		}
-		return;
-	}
-	if (Terminal)
+	// The battery's chamber's terminal opens its dialog on this press (AChoiceTerminal::TryActivate); nothing is held.
+	if (APowerTerminal* Terminal = APowerTerminal::FindNearestInRange(this))
 	{
 		Terminal->TryActivate(this);
 	}
@@ -345,15 +331,9 @@ void ATestLidarCharacter::OnInteractReleased()
 		Residue->EndCollect();
 	}
 	HeldResidue.Reset();
-	if (AChoiceTerminal* Choice = HeldChoice.Get())
-	{
-		Choice->EndHold();
-	}
-	HeldChoice.Reset();
 	if (CollectCue)
 	{
 		CollectCue->SetResidue(nullptr);
-		CollectCue->SetChoice(nullptr);
 	}
 }
 

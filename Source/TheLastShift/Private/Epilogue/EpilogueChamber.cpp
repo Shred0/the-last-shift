@@ -8,10 +8,8 @@
 #include "Epilogue/ChoiceTerminal.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
-#include "Prologue/PrologueSlidingPanel.h"
 #include "Run/HomeAIComponent.h"
 #include "Run/RunSubsystem.h"
-#include "Run/TheLastShiftSettings.h"
 #include "TextChannel/TextChannelComponent.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
@@ -27,7 +25,6 @@ namespace EpilogueChamberImpl
 		case EEpilogueChamberState::Waiting: return TEXT("Waiting");
 		case EEpilogueChamberState::Lines: return TEXT("Lines");
 		case EEpilogueChamberState::Offering: return TEXT("Offering");
-		case EEpilogueChamberState::HatchOpening: return TEXT("HatchOpening");
 		case EEpilogueChamberState::Ended: return TEXT("Ended");
 		}
 		return TEXT("Unknown");
@@ -66,18 +63,14 @@ void AEpilogueChamber::BeginPlay()
 	State = EEpilogueChamberState::Waiting;
 	LastRow = Chosen = NAME_None;
 	bLastSeen = bTravelAsked = false;
-	HatchSeconds = 0.0;
 	LastRunSeconds = LinesStartRun = OfferedRun = ChosenRun = EndingRun = -1.0;
-	for (AChoiceTerminal* Place : TArray<AChoiceTerminal*>{ Intake.Get(), HatchTerminal.Get() })
+	if (Terminal)
 	{
-		if (Place)
-		{
-			Place->SetOffering(false);
-			Place->OnChoiceMade.AddUniqueDynamic(this, &AEpilogueChamber::HandleChoiceMade);
-		}
+		Terminal->SetOffering(false);
+		Terminal->OnChoiceMade.AddUniqueDynamic(this, &AEpilogueChamber::HandleChoiceMade);
 	}
-	UE_LOG(LogTheLastShift, Log, TEXT("%s: the battery's chamber: intake %s, outer hatch %s with its terminal %s, entry door %s (run on its way home: %d)."), *GetName(),
-		*GetNameSafe(Intake), *GetNameSafe(OuterHatch), *GetNameSafe(HatchTerminal), *GetNameSafe(EntryDoor),
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: the battery's chamber: its terminal %s, entry door %s (run on its way home: %d)."), *GetName(),
+		*GetNameSafe(Terminal), *GetNameSafe(EntryDoor),
 		URunSubsystem::Get(this) && URunSubsystem::Get(this)->IsReturningHome() ? 1 : 0);
 }
 
@@ -90,17 +83,6 @@ void AEpilogueChamber::SetState(EEpilogueChamberState NewState)
 	State = NewState;
 	UE_LOG(LogTheLastShift, Log, TEXT("%s: %s (run clock %.3f s)."), *GetName(), EpilogueChamberImpl::LexToString(NewState), TimeState ? TimeState->GetRunSeconds() : -1.0);
 	OnStateChanged.Broadcast(NewState);
-}
-
-void AEpilogueChamber::SetPlacesOffering(bool bOffering)
-{
-	for (AChoiceTerminal* Place : TArray<AChoiceTerminal*>{ Intake.Get(), HatchTerminal.Get() })
-	{
-		if (Place)
-		{
-			Place->SetOffering(bOffering);
-		}
-	}
 }
 
 void AEpilogueChamber::StartLines(double Now)
@@ -124,28 +106,25 @@ void AEpilogueChamber::StartLines(double Now)
 void AEpilogueChamber::Offer(double Now, const TCHAR* Why)
 {
 	OfferedRun = Now;
-	UE_LOG(LogTheLastShift, Log, TEXT("%s: the places offer their choice (%s, %.2f s of the run's clock after the lines began)."), *GetName(), Why, Now - LinesStartRun);
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: the terminal offers the choice (%s, %.2f s of the run's clock after the lines began)."), *GetName(), Why, Now - LinesStartRun);
 	SetState(EEpilogueChamberState::Offering);
-	SetPlacesOffering(true);
+	if (Terminal)
+	{
+		Terminal->SetOffering(true);
+	}
 }
 
-void AEpilogueChamber::HandleChoiceMade(AChoiceTerminal* Terminal)
+void AEpilogueChamber::HandleChoiceMade(AChoiceTerminal* InTerminal, FName Ending)
 {
-	if (State != EEpilogueChamberState::Offering || !Terminal)
+	if (State != EEpilogueChamberState::Offering || !InTerminal || InTerminal != Terminal || Ending.IsNone())
 	{
 		return;
 	}
-	Chosen = Terminal->Ending;
+	Chosen = Ending;
 	ChosenRun = TimeState ? TimeState->GetRunSeconds() : -1.0;
 	// Nothing in the room answers once a choice is made.
-	SetPlacesOffering(false);
-	UE_LOG(LogTheLastShift, Log, TEXT("%s: %s chosen at %s."), *GetName(), *Chosen.ToString(), *Terminal->GetName());
-	if (Terminal == HatchTerminal && OuterHatch)
-	{
-		HatchSeconds = 0.0;
-		SetState(EEpilogueChamberState::HatchOpening);
-		return;
-	}
+	Terminal->SetOffering(false);
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: %s chosen at %s."), *GetName(), *Chosen.ToString(), *InTerminal->GetName());
 	SetState(EEpilogueChamberState::Ended);
 }
 
@@ -154,7 +133,6 @@ void AEpilogueChamber::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 	const UWorld* World = GetWorld();
 	const double Now = TimeState ? TimeState->GetRunSeconds() : (World ? World->GetTimeSeconds() : 0.0);
-	const double Step = LastRunSeconds >= 0.0 ? FMath::Max(Now - LastRunSeconds, 0.0) : 0.0;
 	LastRunSeconds = Now;
 	const bool bStill = TimeState && (TimeState->IsStopped() || TimeState->IsRunFrozen());
 
@@ -188,26 +166,6 @@ void AEpilogueChamber::Tick(float DeltaSeconds)
 	}
 	case EEpilogueChamberState::Offering:
 		break;
-	case EEpilogueChamberState::HatchOpening:
-	{
-		if (!bStill)
-		{
-			HatchSeconds += Step;
-		}
-		const float Seconds = UTheLastShiftSettings::Get()->GetChamberHatchOpenSeconds();
-		OuterHatch->SetOpenFraction(FMath::Clamp(static_cast<float>(HatchSeconds / Seconds), 0.f, 1.f));
-		if (HatchSeconds >= Seconds)
-		{
-			UE_LOG(LogTheLastShift, Log, TEXT("%s: the outer hatch has opened on the dark (%.2f s of Normal time)."), *GetName(), Seconds);
-			SetState(EEpilogueChamberState::Ended);
-		}
-		else
-		{
-			break;
-		}
-		// Opened: the ending is asked in this same frame.
-		[[fallthrough]];
-	}
 	case EEpilogueChamberState::Ended:
 		// The ending's travel, in Normal time only: asked again each frame until it starts.
 		if (!bTravelAsked && !bStill && !Chosen.IsNone())

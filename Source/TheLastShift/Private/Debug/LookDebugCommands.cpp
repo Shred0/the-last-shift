@@ -777,7 +777,7 @@ namespace LookDebug
 				}
 			}
 		}
-		static const TCHAR* const WantedFrames[] = { TEXT("SM_HatchFrame"), TEXT("SM_KitDoorFrame") };
+		static const TCHAR* const WantedFrames[] = { TEXT("SM_HangarHatchFrame"), TEXT("SM_KitDoorFrame") };
 		for (int32 Pass = 0; Pass < 2 && !bFrame; ++Pass)
 		{
 		const FString Wanted = WantedFrames[Pass];
@@ -796,7 +796,7 @@ namespace LookDebug
 				T.Box = It->Bounds.GetBox();
 				// Its lintel, the part always in front of whoever looks at the doorway.
 				T.Look = FVector(T.Box.GetCenter().X, T.Box.GetCenter().Y, T.Box.Max.Z - 40.0);
-				if (PickSide(FVector(T.Box.GetCenter().X, T.Box.GetCenter().Y, T.Box.Min.Z), It->GetComponentTransform().GetUnitAxis(EAxis::X), Name == TEXT("SM_HatchFrame") ? 900.0 : 350.0, T.Stand,
+				if (PickSide(FVector(T.Box.GetCenter().X, T.Box.GetCenter().Y, T.Box.Min.Z), It->GetComponentTransform().GetUnitAxis(EAxis::X), Name == TEXT("SM_HangarHatchFrame") ? 900.0 : 350.0, T.Stand,
 					ShipNear ? ShipNear->GetActorLocation() : FVector::ZeroVector))
 				{
 					Out.Add(T);

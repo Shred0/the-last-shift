@@ -200,12 +200,12 @@ void UInteractPromptWidget::Refresh()
 	}
 	RefusalUntil = -1.0;
 
-	// A place of the battery's chamber: its ending's label while it offers the choice, nothing otherwise (no refusal).
+	// The battery's chamber's terminal: "Choose" while it offers the choice, nothing otherwise (no refusal; nothing while its dialog is open).
 	if (const AChoiceTerminal* Choice = Cast<AChoiceTerminal>(Terminal))
 	{
-		if (Choice->OffersChoice() && !Choice->IsHolding())
+		if (Choice->OffersChoice())
 		{
-			ShowMode(EInteractPromptMode::Choice, FText::GetEmpty(), Choice->GetChoiceLabel());
+			ShowMode(EInteractPromptMode::Choice, FText::GetEmpty(), Choice->GetPromptLabel());
 		}
 		else
 		{

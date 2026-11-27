@@ -4,20 +4,20 @@
 
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 #include "Run/RunSceneSubsystem.h"
-#include "Run/TheLastShiftSettings.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
+#include "UI/ChoiceDialogWidget.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(ChoiceTerminal)
 
 AChoiceTerminal::AChoiceTerminal()
 {
-	PrimaryActorTick.bCanEverTick = true;
-	PrimaryActorTick.bStartWithTickEnabled = true;
 	bModelledBody = true;
 	Cost = 0;
-	InteractRadius = 180.f;
+	// Reaches a player standing 2 m in front of its front face (the reach is measured from its centre, on the floor).
+	InteractRadius = 230.f;
 }
 
 void AChoiceTerminal::BeginPlay()
@@ -25,124 +25,95 @@ void AChoiceTerminal::BeginPlay()
 	Super::BeginPlay();
 	const UWorld* World = GetWorld();
 	TimeState = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
-	bOffering = bHolding = bChosen = false;
-	HoldSeconds = 0.0;
-	LastRunSeconds = -1.0;
+	bOffering = bChosen = false;
+	Dialog = nullptr;
+}
+
+void AChoiceTerminal::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UChoiceDialogWidget* Open = Dialog)
+	{
+		Dialog = nullptr;
+		Open->Close(TEXT("the terminal left play"));
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 void AChoiceTerminal::SetOffering(bool bInOffering)
 {
 	if (bOffering != bInOffering)
 	{
-		UE_LOG(LogTheLastShift, Log, TEXT("%s (%s): %s."), *GetName(), *Ending.ToString(), bInOffering ? TEXT("may offer its choice") : TEXT("offers nothing any more"));
+		UE_LOG(LogTheLastShift, Log, TEXT("%s: %s."), *GetName(), bInOffering ? TEXT("may offer the choice") : TEXT("offers nothing any more"));
 	}
 	bOffering = bInOffering;
-	if (!bOffering && bHolding)
+	if (!bOffering && Dialog && !bChosen)
 	{
-		CancelHold(TEXT("no longer offering"));
+		Dialog->Close(TEXT("the terminal no longer offers"));
 	}
 }
 
 bool AChoiceTerminal::OffersChoice() const
 {
-	if (!bOffering || bChosen || (TimeState && (TimeState->IsStopped() || TimeState->IsRunFrozen())))
+	return bOffering && !bChosen && !Dialog && !(TimeState && (TimeState->IsStopped() || TimeState->IsRunFrozen()));
+}
+
+TArray<FName> AChoiceTerminal::GetEndings() const
+{
+	TArray<FName> Endings{ TEXT("Inject") };
+	// Only to an engineer who has heard all of what the twin AI said; nothing tells the others it exists.
+	const URunSceneSubsystem* Scenes = URunSceneSubsystem::Get(this);
+	if (Scenes && Scenes->IsOpenEndingOffered())
+	{
+		Endings.Add(TEXT("Open"));
+	}
+	return Endings;
+}
+
+FText AChoiceTerminal::GetPromptLabel() const
+{
+	return URunSceneSubsystem::GetChooseLabel();
+}
+
+bool AChoiceTerminal::TryActivate(APawn* InstigatorPawn)
+{
+	if (!OffersChoice() || !IsInRange(InstigatorPawn))
 	{
 		return false;
 	}
-	if (Ending == TEXT("Open"))
-	{
-		// Only to an engineer who has heard all of what the twin AI said; nothing tells the others it exists.
-		const URunSceneSubsystem* Scenes = URunSceneSubsystem::Get(this);
-		return Scenes && Scenes->IsOpenEndingOffered();
-	}
-	return true;
-}
-
-FText AChoiceTerminal::GetChoiceLabel() const
-{
-	return URunSceneSubsystem::GetEndingLabel(Ending);
-}
-
-float AChoiceTerminal::GetHoldFraction() const
-{
-	if (bChosen)
-	{
-		return 1.f;
-	}
-	return bHolding ? FMath::Clamp(static_cast<float>(HoldSeconds / UTheLastShiftSettings::Get()->GetChoiceHoldSeconds()), 0.f, 1.f) : 0.f;
-}
-
-bool AChoiceTerminal::BeginHold(APawn* Pawn)
-{
-	if (bHolding || !OffersChoice() || !IsInRange(Pawn))
+	APlayerController* Player = InstigatorPawn ? Cast<APlayerController>(InstigatorPawn->GetController()) : nullptr;
+	Dialog = UChoiceDialogWidget::Open(Player, this);
+	if (!Dialog)
 	{
 		return false;
 	}
-	bHolding = true;
-	HoldPawn = Pawn;
-	HoldSeconds = 0.0;
-	LastRunSeconds = TimeState ? TimeState->GetRunSeconds() : -1.0;
-	++HoldsStarted;
-	UE_LOG(LogTheLastShift, Log, TEXT("%s (%s): hold started (%.2f s)."), *GetName(), *Ending.ToString(), UTheLastShiftSettings::Get()->GetChoiceHoldSeconds());
-	OnHoldProgress.Broadcast(0.f);
+	++DialogsOpened;
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: the choice's dialog opened (%d endings)."), *GetName(), Dialog->GetButtonCount());
+	OnDialogChanged.Broadcast(this, true);
 	return true;
 }
 
-void AChoiceTerminal::EndHold()
+void AChoiceTerminal::NotifyDialogClosed(UChoiceDialogWidget* InDialog)
 {
-	if (bHolding)
+	if (InDialog && InDialog == Dialog)
 	{
-		CancelHold(TEXT("Interact released"));
+		Dialog = nullptr;
+		UE_LOG(LogTheLastShift, Log, TEXT("%s: the choice's dialog closed%s."), *GetName(), bChosen ? TEXT(", the choice made") : TEXT(" without a choice"));
+		OnDialogChanged.Broadcast(this, false);
 	}
 }
 
-void AChoiceTerminal::CancelHold(const TCHAR* Why)
+bool AChoiceTerminal::Choose(FName Ending)
 {
-	bHolding = false;
-	HoldPawn.Reset();
-	++HoldsCancelled;
-	UE_LOG(LogTheLastShift, Log, TEXT("%s (%s): hold cancelled at %.2f s (%s)."), *GetName(), *Ending.ToString(), HoldSeconds, Why);
-	HoldSeconds = 0.0;
-	OnHoldProgress.Broadcast(0.f);
-}
-
-void AChoiceTerminal::Tick(float DeltaSeconds)
-{
-	Super::Tick(DeltaSeconds);
-	if (!bHolding)
+	if (!bOffering || bChosen || !GetEndings().Contains(Ending))
 	{
-		return;
+		UE_LOG(LogTheLastShift, Log, TEXT("%s: %s refused (offering %d, chosen %d)."), *GetName(), *Ending.ToString(), bOffering ? 1 : 0, bChosen ? 1 : 0);
+		return false;
 	}
-	const double Now = TimeState ? TimeState->GetRunSeconds() : (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0);
-	const double Step = LastRunSeconds >= 0.0 ? FMath::Max(Now - LastRunSeconds, 0.0) : 0.0;
-	LastRunSeconds = Now;
-	// Behind the pause menu the hold stands still (the run's clock does too).
-	if (TimeState && TimeState->IsRunFrozen())
-	{
-		return;
-	}
-	if (TimeState && TimeState->IsStopped())
-	{
-		CancelHold(TEXT("time stopped"));
-		return;
-	}
-	if (!HoldPawn.IsValid() || !IsInRange(HoldPawn.Get()) || !OffersChoice())
-	{
-		CancelHold(TEXT("out of reach or no longer offered"));
-		return;
-	}
-	HoldSeconds += Step;
-	const float Seconds = UTheLastShiftSettings::Get()->GetChoiceHoldSeconds();
-	OnHoldProgress.Broadcast(FMath::Clamp(static_cast<float>(HoldSeconds / Seconds), 0.f, 1.f));
-	if (HoldSeconds >= Seconds)
-	{
-		bHolding = false;
-		bChosen = true;
-		HoldPawn.Reset();
-		UE_LOG(LogTheLastShift, Log, TEXT("%s (%s): held through (%.2f s): the choice is made."), *GetName(), *Ending.ToString(), HoldSeconds);
-		// The terminal accepts what the player did: its sound, as a free activation (no spending comment).
-		OnActivated.Broadcast(0);
-		OnAnyActivated.Broadcast(this, 0);
-		OnChoiceMade.Broadcast(this);
-	}
+	bChosen = true;
+	UE_LOG(LogTheLastShift, Log, TEXT("%s: %s chosen: the choice is made."), *GetName(), *Ending.ToString());
+	// The terminal accepts what the player did: its sound, as a free activation (no spending comment).
+	OnActivated.Broadcast(0);
+	OnAnyActivated.Broadcast(this, 0);
+	OnChoiceMade.Broadcast(this, Ending);
+	return true;
 }

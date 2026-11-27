@@ -5,7 +5,6 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
-#include "Epilogue/ChoiceTerminal.h"
 #include "Residue/Residue.h"
 #include "UI/StdRadialProgress.h"
 
@@ -35,7 +34,6 @@ void UResidueCollectCueWidget::NativeConstruct()
 void UResidueCollectCueWidget::NativeDestruct()
 {
 	UnbindResidue();
-	UnbindChoice();
 	Super::NativeDestruct();
 }
 
@@ -50,7 +48,7 @@ void UResidueCollectCueWidget::ApplyStyle()
 	Ring->SetTrackColor(TrackColor);
 	Ring->SetClockwise(true);
 	Ring->SetStartAngle(0.f);
-	if (Residue.IsValid() || Choice.IsValid())
+	if (Residue.IsValid())
 	{
 		Ring->SetFillColor(AResidue::GetResidueColor());
 		Ring->SetUseReadyColor(false);
@@ -97,43 +95,6 @@ void UResidueCollectCueWidget::UnbindResidue()
 	Residue.Reset();
 }
 
-void UResidueCollectCueWidget::SetChoice(AChoiceTerminal* InChoice)
-{
-	if (InChoice == Choice.Get())
-	{
-		return;
-	}
-	UnbindChoice();
-	Choice = InChoice;
-	if (InChoice)
-	{
-		// The same ring as a residue's collection, in the same colour.
-		InChoice->OnHoldProgress.AddUniqueDynamic(this, &UResidueCollectCueWidget::HandleProgress);
-		InChoice->OnChoiceMade.AddUniqueDynamic(this, &UResidueCollectCueWidget::HandleChoiceMade);
-		ApplyStyle();
-		HandleProgress(InChoice->GetHoldFraction());
-	}
-	else
-	{
-		Show(false);
-	}
-}
-
-void UResidueCollectCueWidget::UnbindChoice()
-{
-	if (AChoiceTerminal* Current = Choice.Get())
-	{
-		Current->OnHoldProgress.RemoveDynamic(this, &UResidueCollectCueWidget::HandleProgress);
-		Current->OnChoiceMade.RemoveDynamic(this, &UResidueCollectCueWidget::HandleChoiceMade);
-	}
-	Choice.Reset();
-}
-
-void UResidueCollectCueWidget::HandleChoiceMade(AChoiceTerminal* InChoice)
-{
-	Show(false);
-}
-
 bool UResidueCollectCueWidget::IsRingShown() const
 {
 	return Ring && Ring->GetVisibility() != ESlateVisibility::Hidden && Ring->GetVisibility() != ESlateVisibility::Collapsed;
@@ -147,7 +108,7 @@ float UResidueCollectCueWidget::GetRingProgress() const
 void UResidueCollectCueWidget::HandleProgress(float Fraction)
 {
 	Progress = FMath::Clamp(Fraction, 0.f, 1.f);
-	const bool bShow = (Residue.IsValid() || Choice.IsValid()) && Fraction > 0.f;
+	const bool bShow = Residue.IsValid() && Fraction > 0.f;
 	if (Ring)
 	{
 		Ring->SetProgress(FMath::Clamp(Fraction, 0.f, 1.f));

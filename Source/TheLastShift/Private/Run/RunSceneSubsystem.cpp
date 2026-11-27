@@ -226,6 +226,11 @@ FText URunSceneSubsystem::GetEndingLabel(FName Ending)
 	return FText::GetEmpty();
 }
 
+FText URunSceneSubsystem::GetChooseLabel()
+{
+	return NSLOCTEXT("TheLastShift", "ChamberChoose", "Choose");
+}
+
 void URunSceneSubsystem::SetChosenEnding(FName Ending)
 {
 	ChosenEnding = Ending;

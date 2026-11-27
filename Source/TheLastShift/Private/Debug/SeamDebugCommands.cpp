@@ -786,7 +786,7 @@ namespace SeamDebug
 			const UStaticMeshComponent* C = P.Component.Get();
 			const bool bOwn = C && C->GetOwner() == A;
 			const FString MeshName = GetNameSafe(C ? C->GetStaticMesh() : nullptr);
-			const bool bFrame = MeshName == TEXT("SM_HatchFrame") || MeshName == TEXT("SM_HangarHatchFrame") || MeshName == TEXT("SM_KitDoorFrame") || MeshName == TEXT("SM_KitGateFrame");
+			const bool bFrame = MeshName == TEXT("SM_HangarHatchFrame") || MeshName == TEXT("SM_KitDoorFrame") || MeshName == TEXT("SM_KitGateFrame");
 			if (!C || !(bOwn || bFrame) || !P.Box.Intersect(Near))
 			{
 				continue;
@@ -981,7 +981,7 @@ namespace SeamDebug
 			const UStaticMeshComponent* C = P.Component.Get();
 			const FString Mesh = GetNameSafe(C ? C->GetStaticMesh() : nullptr);
 			// The frames of doors, gates and hatches (the kit's door and gate frames, the hangars' hatch frame).
-			if (C && (C->ComponentHasTag(TEXT("AreaDressGateFrames")) || Mesh == TEXT("SM_KitDoorFrame") || Mesh == TEXT("SM_KitGateFrame") || Mesh == TEXT("SM_HatchFrame")
+			if (C && (C->ComponentHasTag(TEXT("AreaDressGateFrames")) || Mesh == TEXT("SM_KitDoorFrame") || Mesh == TEXT("SM_KitGateFrame")
 				|| Mesh == TEXT("SM_HangarHatchFrame")))
 			{
 				FFrameRef& F = Out.AddDefaulted_GetRef();

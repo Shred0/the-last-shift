@@ -1074,7 +1074,7 @@ public:
 	/**
 	 * The battery's chamber. On (with the way home on and ChamberMap set): the exit of the way home's corridor travels to
 	 * ChamberMap behind the travel screen (the first Passage row of the epilogue table as its label), where the ending is
-	 * chosen by acting at one of its two places. Off: the corridor's exit opens the ending's list, as with the way home alone.
+	 * chosen in the dialog of its one terminal. Off: the corridor's exit opens the ending's list, as with the way home alone.
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
 	bool bChoiceChamber = true;
@@ -1083,13 +1083,12 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
 	TSoftObjectPtr<UWorld> ChamberMap;
 
-	/** Normal-time seconds Interact is held at one of the chamber's two places before its ending opens. */
+	/**
+	 * Seconds of the run's clock a button of the chamber's choice dialog is held (the mouse button kept down on it, or the
+	 * confirm key while it is focused) before its ending is chosen. Read only by the dialog's buttons.
+	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.2", ClampMax = "10.0", Units = "s"))
-	float ChoiceHoldSeconds = 2.f;
-
-	/** Normal-time seconds the chamber's outer hatch takes to slide open once its ending has been chosen. */
-	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
-	float ChamberHatchOpenSeconds = 3.f;
+	float ChoiceHoldSeconds = 3.f;
 
 	/** Normal-time seconds the arrival hangar's hatch takes to close once the player has left the ship. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
@@ -1168,9 +1167,6 @@ public:
 
 	/** ChoiceHoldSeconds, clamped. */
 	float GetChoiceHoldSeconds() const { return FMath::Clamp(ChoiceHoldSeconds, 0.2f, 10.f); }
-
-	/** ChamberHatchOpenSeconds, clamped. */
-	float GetChamberHatchOpenSeconds() const { return FMath::Clamp(ChamberHatchOpenSeconds, 0.5f, 30.f); }
 
 	/** 1 for the prologue's home map, 2 for its arrival map (PIE prefix ignored), 0 for any other map. */
 	int32 GetPrologueStageOfMap(const FString& PackageName) const;

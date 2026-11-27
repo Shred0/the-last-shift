@@ -127,9 +127,12 @@ public:
 
 	/**
 	 * The label of an ending (Inject: "Inject the harvest", Open: "Open the structure"; empty for any other): the one owner of
-	 * the two labels, read by the ending's list and by the chamber's two places.
+	 * the two labels, read by the ending's list and by the chamber's choice dialog.
 	 */
 	static FText GetEndingLabel(FName Ending);
+
+	/** The prompt's label at the battery's chamber's terminal ("Choose"): a short UI label, its one owner, next to the endings'. */
+	static FText GetChooseLabel();
 
 	/** The ending chosen in the chamber, opened alone by the main menu with the pending ending (None: the list). */
 	void SetChosenEnding(FName Ending);
