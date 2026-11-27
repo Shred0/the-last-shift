@@ -15,6 +15,8 @@
 // scan of the Stop and "===== done". Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
+#include "Debug/FrameCapsTestScope.h"
 #include "Area/AreaInfo.h"
 #include "Area/AreaTypes.h"
 #include "Camera/CameraComponent.h"
@@ -234,6 +236,8 @@ namespace EntityFoundCostDebug
 
 	static void Finish()
 	{
+		EntityFormTest::Restore(TEXT("tls.EntityFound.Cost"));
+		FrameCapsTest::Restore(W(), TEXT("tls.EntityFound.Cost"));
 		if (UTimeStateSubsystem* T = TS(); T && T->IsStopped())
 		{
 			T->Resume();
@@ -272,8 +276,8 @@ namespace EntityFoundCostDebug
 		case EPhase::WaitWorld:
 			if (L && D && E && T && Pawn() && Now - G.PhaseStart > 4.0)
 			{
-				Exec(TEXT("t.MaxFPS 0"));
-				Exec(TEXT("r.VSync 0"));
+				// No cap for the run: the player's frame-rate limit and V-Sync are lifted, and put back at the end.
+				FrameCapsTest::Lift(W(), TEXT("tls.EntityFound.Cost"));
 				Exec(TEXT("r.VSyncEditor 0"));
 				G.SavedSpeed = E->Speed;
 				G.SavedGraze = E->GrazeRadius;
@@ -441,6 +445,8 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsEntityFoundCostCommand(
 		{
 			FTSTicker::RemoveTicker(G.Ticker);
 		}
+		EntityFormTest::Restore(TEXT("tls.EntityFound.Cost"));
+		EntityFormTest::ForceAreaOneForm(TEXT("tls.EntityFound.Cost"));
 		G = FCost();
 		G.bQuit = Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0;
 		G.Rounds = Args.Num() > 1 ? FMath::Clamp(FCString::Atoi(*Args[1]), 1, 100) : 10;

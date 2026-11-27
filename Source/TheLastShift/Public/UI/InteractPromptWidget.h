@@ -26,7 +26,9 @@ enum class EInteractPromptMode : uint8
 	/** A terminal refused for lack of energy: "Not enough energy" for RefusalSeconds. */
 	Refusal,
 	/** Normal time, an unlocked log terminal within reach: "[key] Read" (free). */
-	Read
+	Read,
+	/** Normal time, the battery's chamber's terminal while it offers the choice: "[key] Choose". */
+	Choice
 };
 
 /**
@@ -39,6 +41,8 @@ enum class EInteractPromptMode : uint8
  *   its targets is not powered, a locked log terminal, a twin AI terminal with a part left):
  *   "[key] Power — cost · energy banked", the numbers read every frame.
  * - In Normal time, within an unlocked log terminal's reach (APowerTerminal::OffersRead): "[key] Read".
+ * - In Normal time, within reach of the battery's chamber's terminal while it offers the choice (AChoiceTerminal::OffersChoice):
+ *   "[key] Choose" (AChoiceTerminal::GetPromptLabel); hidden while its dialog is open and when it offers nothing.
  * - A press refused for lack of energy (the terminal's OnInsufficientEnergy in Normal time): "Not enough energy" for
  *   RefusalSeconds of real time.
  *

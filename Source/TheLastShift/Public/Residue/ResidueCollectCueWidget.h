@@ -26,6 +26,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Collect Cue")
 	void SetResidue(AResidue* InResidue);
 
+	/** The ring is shown now (a hold in progress). */
+	UFUNCTION(BlueprintPure, Category = "Collect Cue")
+	bool IsRingShown() const;
+
+	/** The ring's fill now (0..1). */
+	UFUNCTION(BlueprintPure, Category = "Collect Cue")
+	float GetRingProgress() const;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collect Cue", meta = (ClampMin = "8.0", ClampMax = "64.0"))
 	float RingRadius = 18.f;
 
@@ -57,4 +65,5 @@ private:
 	void UnbindResidue();
 
 	TWeakObjectPtr<AResidue> Residue;
+	float Progress = 0.f;
 };

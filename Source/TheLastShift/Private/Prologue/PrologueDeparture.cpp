@@ -11,6 +11,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Prologue/PrologueEntryDoor.h"
 #include "Prologue/PrologueSlidingPanel.h"
+#include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
@@ -57,6 +58,13 @@ void APrologueDeparture::BeginPlay()
 	State = EPrologueDepartureState::Waiting;
 	PhaseSeconds = 0.0;
 	SetExitEnabled(false);
+	// Brief 31A: on the way home the departure does not run (the entry door stays shut, the ship's exit off).
+	if (URunSubsystem::IsReturnStateOf(GetWorld()))
+	{
+		SetActorTickEnabled(false);
+		UE_LOG(LogTheLastShift, Log, TEXT("%s: the way home: the departure does not run."), *GetName());
+		return;
+	}
 	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
 	UE_LOG(LogTheLastShift, Log, TEXT("%s: waiting for the player in the hangar; door %s closes in %.2f s, hatch %s opens in %.2f s, ship's hatch %s in %.2f s (Normal time); exit %s off."),
 		*GetName(), *GetNameSafe(EntryDoor), Settings->GetHomeDoorCloseSeconds(), *GetNameSafe(HangarHatch), Settings->GetHomeHatchOpenSeconds(),

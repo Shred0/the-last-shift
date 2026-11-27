@@ -12,6 +12,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
+#include "Epilogue/ChamberBattery.h"
 #include "Prologue/PrologueHatch.h"
 #include "Prologue/PrologueSlidingPanel.h"
 #include "Residue/Residue.h"
@@ -22,6 +23,7 @@
 #include "Sound/SoundBase.h"
 #include "Sound/SoundClass.h"
 #include "Time/TimeStateSubsystem.h"
+#include "UI/StdTextSceneWidget.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(GameAudioSubsystem)
 
@@ -41,6 +43,7 @@ const FGameSoundSlot* FGameAudio::FindEffect(EGameSound Sound) const
 	case EGameSound::Door: return &Door;
 	case EGameSound::Energy: return &Energy;
 	case EGameSound::Interruption: return &Interruption;
+	case EGameSound::ChamberHum: return &ChamberHum;
 	default: return nullptr;
 	}
 }
@@ -132,6 +135,8 @@ void UGameAudioSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UGameAudioSubsystem::Deinitialize()
 {
+	ReleaseInterruption(TEXT("the game instance ends"));
+	StopHum(TEXT("the game instance ends"));
 	FWorldDelegates::OnWorldInitializedActors.Remove(InitializedActorsHandle);
 	FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
 	UScanDirectorComponent::OnDirectorBeganPlay.Remove(DirectorBeganHandle);
@@ -213,6 +218,10 @@ void UGameAudioSubsystem::HandleWorldCleanup(UWorld* World, bool bSessionEnded, 
 		}
 	}
 	HeldComponents.RemoveAll([World](const TObjectPtr<UAudioComponent>& C) { return !C || C->GetWorld() == World; });
+	if ((HumSound && HumSound->GetWorld() == World) || (HumBattery.IsValid() && HumBattery->GetWorld() == World))
+	{
+		StopHum(TEXT("the hall's map ends"));
+	}
 	if (const FDelegateHandle* Handle = SpawnHandles.Find(World))
 	{
 		World->RemoveOnActorSpawnedHandler(*Handle);
@@ -233,6 +242,120 @@ void UGameAudioSubsystem::HandleWorldBeganPlay(UWorld* World)
 	}
 	bLeavingMenu = false;
 	UpdateMusic(IsMenuWorld(World) ? TEXT("the main menu map began") : TEXT("a map began"));
+	if (AChamberBattery* Battery = AChamberBattery::Find(World))
+	{
+		StartHum(Battery);
+	}
+}
+
+void UGameAudioSubsystem::StartHum(AChamberBattery* Battery)
+{
+	StopHum(TEXT("a hall begins"));
+	if (!Battery)
+	{
+		return;
+	}
+	const FGameAudio& Audio = UTheLastShiftSettings::Get()->Audio;
+	const FVector Location = Battery->GetActorLocation();
+	FGameSoundRequest& Request = AddRequest(EGameSound::ChamberHum, FString::Printf(TEXT("the hall's hum: %s"), *Battery->GetName()));
+	Request.bInWorld = true;
+	Request.Location = Location;
+	Request.Pitch = 1.f;
+	++HumStarts;
+	HumBattery = Battery;
+	UAudioComponent* Component = CreateSoundComponent(EGameSound::ChamberHum, &Location, 1.f, Request);
+	if (!Component)
+	{
+		// An empty slot: nothing plays, and that is not an error.
+		return;
+	}
+	// From the battery: at its full level within ChamberHumFullRadiusCm, falling to nothing over ChamberHumFalloffCm.
+	Component->AttenuationOverrides.AttenuationShapeExtents = FVector(Audio.GetChamberHumFullRadiusCm(), 0.f, 0.f);
+	Component->AttenuationOverrides.FalloffDistance = Audio.GetChamberHumFalloffCm();
+	Component->bAutoDestroy = false;
+	HumSound = Component;
+	const UTimeStateSubsystem* Time = Battery->GetWorld() ? Battery->GetWorld()->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+	HumFade = Time && Time->IsStopped() ? 0.f : 1.f;
+	TickHum(0.f);
+	Component->Play();
+	HumTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this, &UGameAudioSubsystem::TickHum));
+	UE_LOG(LogGameAudio, Log, TEXT("Audio: the hall's hum from %s (volume %.2f, pitch %.2f)."), *Location.ToCompactString(), HumVolume, HumPitch);
+}
+
+bool UGameAudioSubsystem::TickHum(float DeltaSeconds)
+{
+	AChamberBattery* Battery = HumBattery.Get();
+	UAudioComponent* Component = HumSound;
+	if (!Battery || !Component)
+	{
+		return true;
+	}
+	const UWorld* World = Battery->GetWorld();
+	const UTimeStateSubsystem* Time = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+	// Behind the pause menu it pauses with the game and keeps its values.
+	if (Time && Time->IsRunFrozen())
+	{
+		return true;
+	}
+	const FGameAudio& Audio = UTheLastShiftSettings::Get()->Audio;
+	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+	// Normal time only: out at a Stop and back at the return to Normal time, over ChamberHumFadeSeconds (real time).
+	const float Target = Time && Time->IsStopped() ? 0.f : 1.f;
+	const float Step = DeltaSeconds / Audio.GetChamberHumFadeSeconds();
+	HumFade = Target > HumFade ? FMath::Min(Target, HumFade + Step) : FMath::Max(Target, HumFade - Step);
+
+	// The battery the hall shows, and the aftermath of the choice.
+	const float B = Battery->GetBatteryShown();
+	float Volume = Audio.GetHumVolumeAt(B);
+	float Pitch = Audio.GetHumPitchAt(B);
+	const FName Ending = Battery->GetAftermathEnding();
+	const float A = FMath::Clamp(Battery->GetAftermathAlpha(), 0.f, 1.f);
+	const float Ease = A * A * (3.f - 2.f * A);
+	if (Ending == TEXT("Open"))
+	{
+		// The structure lets go: volume and pitch sink to nothing with the glow; silent at the aftermath's end.
+		Volume *= 1.f - Ease;
+		Pitch = FMath::Lerp(Pitch, 0.4f, Ease);
+	}
+	else if (Ending == TEXT("Inject"))
+	{
+		const float Surge = 1.f + Settings->GetAftermathSurge();
+		Volume = FMath::Lerp(Volume, Audio.GetHumVolumeFull() * Surge, Ease);
+		Pitch = FMath::Lerp(Pitch, FMath::Min(Audio.GetHumPitchFull() * Surge, 2.f), Ease);
+	}
+	HumVolume = Audio.GetVolume(EGameSound::ChamberHum) * Volume * HumFade;
+	HumPitch = Pitch;
+	Component->SetVolumeMultiplier(HumVolume);
+	Component->SetPitchMultiplier(HumPitch);
+	if (!Component->IsPlaying() && HumVolume > 0.f)
+	{
+		Component->Play();
+	}
+	return true;
+}
+
+void UGameAudioSubsystem::StopHum(const TCHAR* Why)
+{
+	if (HumTicker.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(HumTicker);
+		HumTicker.Reset();
+	}
+	if (UAudioComponent* Component = HumSound)
+	{
+		Component->Stop();
+		Component->DestroyComponent();
+		UE_LOG(LogGameAudio, Log, TEXT("Audio: the hall's hum stops (%s)."), Why);
+	}
+	HumSound = nullptr;
+	HumBattery = nullptr;
+	HumVolume = 0.f;
+	HumFade = 0.f;
+}
+
+bool UGameAudioSubsystem::IsHumPlaying() const
+{
+	return HumSound && HumSound->IsPlaying();
 }
 
 void UGameAudioSubsystem::HandleActorSpawned(AActor* Actor)
@@ -472,7 +595,9 @@ void UGameAudioSubsystem::HandleSceneLineStarted(FName Scene, int32 Index, EScen
 	else if (bSceneLastWhite && !bWhite && !bSceneInterrupted)
 	{
 		bSceneInterrupted = true;
-		PlaySound(EGameSound::Interruption, FString::Printf(TEXT("scene %s line %d"), *Scene.ToString(), Index + 1));
+		// Brief 35: held with the static the line's screen shows at this cut (RunScenes::IsInterruptionLine decides both).
+		const URunSceneSubsystem* Scenes = GetGameInstance()->GetSubsystem<URunSceneSubsystem>();
+		HoldInterruption(Scenes ? Scenes->GetLineScreen() : nullptr, Index, FString::Printf(TEXT("scene %s line %d"), *Scene.ToString(), Index + 1));
 	}
 	bSceneLastWhite = bWhite;
 	PlaySound(EGameSound::Line, FString::Printf(TEXT("scene %s line %d %s"), *Scene.ToString(), Index + 1, LexToString(Voice)));
@@ -480,6 +605,10 @@ void UGameAudioSubsystem::HandleSceneLineStarted(FName Scene, int32 Index, EScen
 
 void UGameAudioSubsystem::HandleSceneScreenChanged(FName Scene, bool bOpen)
 {
+	if (!bOpen && bInterruptionHeld)
+	{
+		ReleaseInterruption(TEXT("the scene's screen closed"));
+	}
 	UpdateMusic(bOpen ? TEXT("a scene's screen opened") : TEXT("a scene's screen closed"));
 }
 
@@ -490,6 +619,160 @@ void UGameAudioSubsystem::HandleFlowStateChanged(EStdFlowState NewState)
 		bLeavingMenu = true;
 		UpdateMusic(TEXT("a travel leaves the main menu"));
 	}
+}
+
+// --- Brief 35: the interruption's noise, held with the static ---
+
+void UGameAudioSubsystem::HoldInterruption(UStdTextSceneWidget* Screen, int32 Index, const FString& Source)
+{
+	if (bInterruptionHeld)
+	{
+		ReleaseInterruption(TEXT("a new interruption"));
+	}
+	const FGameAudio& Audio = UTheLastShiftSettings::Get()->Audio;
+	FGameSoundRequest& Request = AddRequest(EGameSound::Interruption, Source);
+	Request.Volume = Audio.GetVolume(EGameSound::Interruption);
+	USoundBase* Asset = Audio.GetSound(EGameSound::Interruption).LoadSynchronous();
+	Request.bHadSound = Asset != nullptr;
+	UWorld* World = CurrentWorld();
+	InterruptionPlays = 0;
+	InterruptionShare = 0.f;
+	UE_LOG(LogGameAudio, Verbose, TEXT("Audio: Interruption (%s)%s."), *Source, Asset ? TEXT("") : TEXT(", empty slot"));
+	if (!Asset || !World)
+	{
+		return;
+	}
+	FAudioDevice::FCreateComponentParams Params(World);
+	Params.bPlay = false;
+	Params.bAutoDestroy = false;
+	UAudioComponent* Component = FAudioDevice::CreateComponent(Asset, Params);
+	if (!Component)
+	{
+		return;
+	}
+	Component->SoundClassOverride = GameAudio::SfxClass();
+	Component->bAllowSpatialization = false;
+	Component->bIsUISound = false;
+	InterruptionVolume = Request.Volume;
+	InterruptionShare = 1.f;
+	Component->SetVolumeMultiplier(InterruptionVolume);
+	Component->SetPitchMultiplier(1.f);
+	Component->OnAudioFinishedNative.AddUObject(this, &UGameAudioSubsystem::HandleInterruptionFinished);
+	InterruptionSound = Component;
+	InterruptionScreen = Screen;
+	InterruptionIndex = Index;
+	InterruptionStartReal = FPlatformTime::Seconds();
+	bInterruptionHeld = true;
+	InterruptionPlays = 1;
+	Component->Play();
+	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+	UE_LOG(LogGameAudio, Log, TEXT("Audio: Interruption (%s) held with the static of line %d (%s; StaticSeconds %.2f, StaticFadeSeconds %.2f)."), *Source, Index + 1,
+		Screen ? *Screen->GetName() : TEXT("no screen: the settings' times on real time"), Settings->GetStaticSeconds(), Settings->GetStaticFadeSeconds());
+	InterruptionTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this, &UGameAudioSubsystem::TickInterruption));
+}
+
+bool UGameAudioSubsystem::TickInterruption(float DeltaSeconds)
+{
+	if (!bInterruptionHeld)
+	{
+		InterruptionTicker.Reset();
+		return false;
+	}
+	float Share = 0.f;
+	const TCHAR* Why = nullptr;
+	if (InterruptionScreen.IsValid())
+	{
+		// The static's own state on its screen: its strength (1 for StaticSeconds, then down to 0 over StaticFadeSeconds, on
+		// the screen's clock), and its end with its line (the next line, a skip).
+		UStdTextSceneWidget* Screen = InterruptionScreen.Get();
+		if (!Screen->IsInViewport() && !Screen->GetParent())
+		{
+			Why = TEXT("the scene's screen is gone");
+		}
+		else if (Screen->GetCurrentIndex() != InterruptionIndex)
+		{
+			Why = TEXT("the static ended with its line");
+		}
+		else if (!Screen->IsEffectShown())
+		{
+			Why = TEXT("the static has faded out");
+		}
+		else
+		{
+			Share = FMath::Clamp(Screen->GetEffectOpacity(), 0.f, 1.f);
+		}
+	}
+	else if (InterruptionScreen.IsStale())
+	{
+		Why = TEXT("the scene's screen is gone");
+	}
+	else
+	{
+		// No screen to follow (a scene shown some other way): the settings' two values, on real time.
+		const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+		const double Elapsed = FPlatformTime::Seconds() - InterruptionStartReal;
+		const double Hold = Settings->GetStaticSeconds();
+		const double Fade = Settings->GetStaticFadeSeconds();
+		Share = Elapsed <= Hold ? 1.f : (Fade > 0.0 ? static_cast<float>(FMath::Clamp(1.0 - (Elapsed - Hold) / Fade, 0.0, 1.0)) : 0.f);
+	}
+	if (!Why && Share <= 0.f)
+	{
+		Why = TEXT("the static has faded out");
+	}
+	if (Why)
+	{
+		ReleaseInterruption(Why);
+		return false;
+	}
+	InterruptionShare = Share;
+	if (UAudioComponent* Component = InterruptionSound.Get())
+	{
+		Component->SetVolumeMultiplier(InterruptionVolume * Share);
+	}
+	return true;
+}
+
+void UGameAudioSubsystem::HandleInterruptionFinished(UAudioComponent* Component)
+{
+	if (bInterruptionHeld && Component && Component == InterruptionSound)
+	{
+		// Shorter than the static: again until it ends.
+		++InterruptionPlays;
+		Component->Play();
+	}
+}
+
+bool UGameAudioSubsystem::IsInterruptionPlaying() const
+{
+	return InterruptionSound && InterruptionSound->IsPlaying();
+}
+
+void UGameAudioSubsystem::ReleaseInterruption(const TCHAR* Why)
+{
+	if (!bInterruptionHeld)
+	{
+		return;
+	}
+	bInterruptionHeld = false;
+	InterruptionShare = 0.f;
+	if (InterruptionTicker.IsValid())
+	{
+		FTSTicker::RemoveTicker(InterruptionTicker);
+		InterruptionTicker.Reset();
+	}
+	FGameSoundRequest& Request = AddRequest(EGameSound::Interruption, FString::Printf(TEXT("interruption: %s (played %d)"), Why, InterruptionPlays));
+	Request.bStop = true;
+	Request.bHadSound = InterruptionSound != nullptr;
+	if (UAudioComponent* Component = InterruptionSound.Get())
+	{
+		Component->OnAudioFinishedNative.RemoveAll(this);
+		Component->Stop();
+		Component->DestroyComponent();
+	}
+	InterruptionSound = nullptr;
+	InterruptionScreen.Reset();
+	InterruptionIndex = INDEX_NONE;
+	UE_LOG(LogGameAudio, Log, TEXT("Audio: Interruption stopped: %s (played %d)."), Why, InterruptionPlays);
 }
 
 // --- Playing ---

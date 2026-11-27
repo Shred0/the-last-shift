@@ -95,8 +95,19 @@ void UResidueCollectCueWidget::UnbindResidue()
 	Residue.Reset();
 }
 
+bool UResidueCollectCueWidget::IsRingShown() const
+{
+	return Ring && Ring->GetVisibility() != ESlateVisibility::Hidden && Ring->GetVisibility() != ESlateVisibility::Collapsed;
+}
+
+float UResidueCollectCueWidget::GetRingProgress() const
+{
+	return Progress;
+}
+
 void UResidueCollectCueWidget::HandleProgress(float Fraction)
 {
+	Progress = FMath::Clamp(Fraction, 0.f, 1.f);
 	const bool bShow = Residue.IsValid() && Fraction > 0.f;
 	if (Ring)
 	{

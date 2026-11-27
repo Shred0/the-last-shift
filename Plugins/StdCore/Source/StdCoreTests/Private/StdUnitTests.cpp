@@ -1,4 +1,5 @@
-// Logic that needs no world: the volume formula, volume clamping, the styles built by the UI theme, the radial progress, the barcode text,
+// Logic that needs no world: the volume formula, volume clamping, the video options (defaults, choices, clamping,
+// hidden rows, a settings file saved before they existed), the styles built by the UI theme, the radial progress, the barcode text,
 // the key prompt without a player, the order of the Controls tab rows, the wrapping of the covered screen's label, the
 // covered screen's progress bar and marker (switched off, shape, progress, marker over simulated ticks).
 
@@ -14,6 +15,10 @@
 #include "Components/TextBlock.h"
 #include "Flow/StdFlowSubsystem.h"
 #include "Flow/StdTransitionProgress.h"
+#include "HAL/FileManager.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Settings/StdProjectSettings.h"
 #include "Styling/SlateColor.h"
 #include "Widgets/SWidget.h"
@@ -54,6 +59,134 @@ bool FStdVolumesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+namespace StdUnitTests
+{
+	/** The project's video defaults and hidden rows, set for one test and put back when it ends. */
+	struct FVideoProjectScope
+	{
+		UStdProjectSettings* Settings = GetMutableDefault<UStdProjectSettings>();
+		int32 Limit = Settings->DefaultFrameRateLimit;
+		bool bUnlimited = Settings->bDefaultFrameRateUnlimited;
+		int32 Method = Settings->DefaultAntiAliasingMethod;
+		bool bVSync = Settings->bDefaultVSync;
+		TArray<EStdVideoOption> Hidden = Settings->HiddenVideoOptions;
+
+		~FVideoProjectScope()
+		{
+			Settings->DefaultFrameRateLimit = Limit;
+			Settings->bDefaultFrameRateUnlimited = bUnlimited;
+			Settings->DefaultAntiAliasingMethod = Method;
+			Settings->bDefaultVSync = bVSync;
+			Settings->HiddenVideoOptions = Hidden;
+		}
+	};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdVideoOptionsTest, "StdCore.Settings.VideoOptions", StdUnitTests::Flags)
+
+bool FStdVideoOptionsTest::RunTest(const FString& Parameters)
+{
+	StdUnitTests::FVideoProjectScope Scope;
+	UStdProjectSettings* Settings = Scope.Settings;
+	Settings->DefaultFrameRateLimit = 90;
+	Settings->bDefaultFrameRateUnlimited = false;
+	Settings->DefaultAntiAliasingMethod = 1;
+	Settings->bDefaultVSync = true;
+	Settings->HiddenVideoOptions.Reset();
+
+	// A transient instance: the class default object holds the player's saved values.
+	UStdUserSettings* User = NewObject<UStdUserSettings>(GetTransientPackage());
+	User->ResetToDefaults();
+	TestFalse(TEXT("Nothing chosen after a reset"), User->HasChosen(EStdVideoOption::FrameRateLimit) || User->HasChosen(EStdVideoOption::AntiAliasing) || User->HasChosen(EStdVideoOption::VSync));
+	TestEqual(TEXT("Not chosen: the project's frame-rate limit"), User->GetFrameRateLimit(), 90);
+	TestFalse(TEXT("Not chosen: the project's Unlimited (off)"), User->IsFrameRateUnlimited());
+	TestEqual(TEXT("Not chosen: the project's anti-aliasing"), User->GetAntiAliasingMethod(), 1);
+	TestTrue(TEXT("Not chosen: the project's V-Sync"), User->IsVSyncEnabled());
+
+	Settings->DefaultFrameRateLimit = 144;
+	TestEqual(TEXT("A default changed is followed while nothing is chosen"), User->GetFrameRateLimit(), 144);
+	Settings->DefaultAntiAliasingMethod = -1;
+	TestEqual(TEXT("Default -1: the project's own renderer method"), User->GetAntiAliasingMethod(), UStdUserSettings::GetProjectAntiAliasingMethod());
+
+	User->SetFrameRateLimit(30);
+	User->SetFrameRateUnlimited(true);
+	User->SetAntiAliasingMethod(2);
+	User->SetVSyncEnabled(false);
+	TestEqual(TEXT("Chosen limit"), User->GetFrameRateLimit(), 30);
+	TestTrue(TEXT("Chosen Unlimited"), User->IsFrameRateUnlimited());
+	TestEqual(TEXT("Chosen anti-aliasing"), User->GetAntiAliasingMethod(), 2);
+	TestFalse(TEXT("Chosen V-Sync off"), User->IsVSyncEnabled());
+	TestTrue(TEXT("The limit is kept while unlimited"), User->HasChosen(EStdVideoOption::FrameRateLimit) && User->GetFrameRateLimit() == 30);
+
+	User->SetFrameRateLimit(3);
+	TestEqual(TEXT("A limit below 10 is clamped"), User->GetFrameRateLimit(), 10);
+	User->SetFrameRateLimit(5000);
+	TestEqual(TEXT("A limit above 1000 is clamped"), User->GetFrameRateLimit(), 1000);
+	User->SetAntiAliasingMethod(9);
+	TestEqual(TEXT("A method above 4 is clamped"), User->GetAntiAliasingMethod(), 4);
+
+	// A hidden row: its option stays at the project's default whatever is stored.
+	Settings->DefaultFrameRateLimit = 60;
+	Settings->bDefaultFrameRateUnlimited = false;
+	Settings->DefaultAntiAliasingMethod = 0;
+	Settings->bDefaultVSync = true;
+	Settings->HiddenVideoOptions = { EStdVideoOption::FrameRateLimit, EStdVideoOption::AntiAliasing, EStdVideoOption::VSync };
+	TestEqual(TEXT("Hidden frame-rate row: the default limit"), User->GetFrameRateLimit(), 60);
+	TestFalse(TEXT("Hidden frame-rate row: the default Unlimited"), User->IsFrameRateUnlimited());
+	TestEqual(TEXT("Hidden anti-aliasing row: the default method"), User->GetAntiAliasingMethod(), 0);
+	TestTrue(TEXT("Hidden V-Sync row: the default V-Sync"), User->IsVSyncEnabled());
+	TestFalse(TEXT("Hidden: not chosen"), User->HasChosen(EStdVideoOption::AntiAliasing));
+	Settings->HiddenVideoOptions.Reset();
+	TestEqual(TEXT("Shown again: the stored choice"), User->GetAntiAliasingMethod(), 4);
+
+	// The choices the screen offers.
+	const TArray<int32> Choices = UStdSettingsSubsystem::GetAntiAliasingChoices();
+	TestTrue(TEXT("Off, FXAA and TAA first"), Choices.Num() >= 3 && Choices[0] == 0 && Choices[1] == 1 && Choices[2] == 2);
+	TestTrue(TEXT("The project's own method is offered"), Choices.Contains(UStdUserSettings::GetProjectAntiAliasingMethod()));
+	TestTrue(TEXT("The project offers frame-rate limits"), GetDefault<UStdProjectSettings>()->FrameRateLimits.Num() > 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdVideoOldFileTest, "StdCore.Settings.VideoOldFile", StdUnitTests::Flags)
+
+bool FStdVideoOldFileTest::RunTest(const FString& Parameters)
+{
+	StdUnitTests::FVideoProjectScope Scope;
+	Scope.Settings->DefaultFrameRateLimit = 60;
+	Scope.Settings->bDefaultFrameRateUnlimited = false;
+	Scope.Settings->DefaultAntiAliasingMethod = -1;
+	Scope.Settings->bDefaultVSync = false;
+	Scope.Settings->HiddenVideoOptions.Reset();
+
+	// A settings file as the plugin wrote it before the video options existed: volumes only.
+	const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Automation"), TEXT("StdCoreVideoOldFile.ini")));
+	const FString Text = TEXT("[/Script/Engine.GameUserSettings]\r\nbUseVSync=False\r\n\r\n[/Script/StdCore.StdUserSettings]\r\nMasterVolume=0.250000\r\nMusicVolume=0.500000\r\nSfxVolume=0.750000\r\n");
+	if (!TestTrue(TEXT("The old file is written"), FFileHelper::SaveStringToFile(Text, *Path)))
+	{
+		return false;
+	}
+
+	UStdUserSettings* User = NewObject<UStdUserSettings>(GetTransientPackage());
+	User->ResetToDefaults();
+	User->SetFrameRateLimit(240);
+	User->SetAntiAliasingMethod(2);
+	// As a fresh process: everything at its default, then the file.
+	User->ResetToDefaults();
+	User->LoadConfig(nullptr, *Path);
+	GConfig->UnloadFile(Path);
+	IFileManager::Get().Delete(*Path);
+
+	TestEqual(TEXT("Old file: master volume kept"), User->GetMasterVolume(), 0.25f);
+	TestEqual(TEXT("Old file: music volume kept"), User->GetMusicVolume(), 0.5f);
+	TestEqual(TEXT("Old file: effects volume kept"), User->GetSfxVolume(), 0.75f);
+	TestFalse(TEXT("Old file: no video option chosen"), User->HasChosen(EStdVideoOption::FrameRateLimit) || User->HasChosen(EStdVideoOption::AntiAliasing) || User->HasChosen(EStdVideoOption::VSync));
+	TestEqual(TEXT("Old file: the default frame-rate limit"), User->GetFrameRateLimit(), 60);
+	TestFalse(TEXT("Old file: limited by default"), User->IsFrameRateUnlimited());
+	TestEqual(TEXT("Old file: the project's anti-aliasing"), User->GetAntiAliasingMethod(), UStdUserSettings::GetProjectAntiAliasingMethod());
+	TestFalse(TEXT("Old file: V-Sync off"), User->IsVSyncEnabled());
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStdThemeStylesTest, "StdCore.Theme.Styles", StdUnitTests::Flags)
 
 bool FStdThemeStylesTest::RunTest(const FString& Parameters)
@@ -77,6 +210,13 @@ bool FStdThemeStylesTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Slider thumb has a size"), Slider.NormalThumbImage.ImageSize.X > 0.f);
 
 	TestNotNull(TEXT("The default fonts point to the engine's Roboto"), Theme->BodyFont.FontObject.Get());
+
+	const FCheckBoxStyle CheckBox = Theme->MakeCheckBoxStyle();
+	TestTrue(TEXT("A check box is a box, not a toggle button"), CheckBox.CheckBoxType == ESlateCheckBoxType::CheckBox);
+	TestTrue(TEXT("The check box has a size"), CheckBox.UncheckedImage.ImageSize.X > 0.f && CheckBox.CheckedImage.ImageSize.X > 0.f);
+	TestEqual(TEXT("A ticked box is filled with the accent"), CheckBox.CheckedImage.TintColor.GetSpecifiedColor(), Theme->AccentColor);
+	TestEqual(TEXT("An unticked box has no fill"), CheckBox.UncheckedImage.TintColor.GetSpecifiedColor().A, 0.f);
+	TestEqual(TEXT("The focused box's frame takes the accent"), CheckBox.UncheckedHoveredImage.OutlineSettings.Color.GetSpecifiedColor(), Theme->AccentColor);
 	return true;
 }
 

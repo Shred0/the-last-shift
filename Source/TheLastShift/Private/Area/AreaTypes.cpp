@@ -26,6 +26,19 @@ const TCHAR* LexToString(EAreaSegmentType Type)
 	return TEXT("Unknown");
 }
 
+const TCHAR* LexToString(EAreaPassageKind Kind)
+{
+	switch (Kind)
+	{
+	case EAreaPassageKind::CorridorMouth: return TEXT("CorridorMouth");
+	case EAreaPassageKind::RoomMouth: return TEXT("RoomMouth");
+	case EAreaPassageKind::GateMouth: return TEXT("GateMouth");
+	case EAreaPassageKind::SideMouth: return TEXT("SideMouth");
+	case EAreaPassageKind::Walkway: return TEXT("Walkway");
+	}
+	return TEXT("Unknown");
+}
+
 bool IsClosedAreaSegment(EAreaSegmentType Type)
 {
 	return Type == EAreaSegmentType::Corridor || Type == EAreaSegmentType::Room || Type == EAreaSegmentType::Gate;

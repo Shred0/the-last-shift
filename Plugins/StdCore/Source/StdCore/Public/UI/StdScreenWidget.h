@@ -87,8 +87,8 @@ protected:
 	bool bApplyTheme = true;
 
 	/**
-	 * The focused button, slider or key selector shows its hovered look, and the mouse moves the focus to what it
-	 * hovers: one highlighted widget at a time, for mouse, keyboard and gamepad alike.
+	 * The focused button, slider, check box or key selector shows its hovered look, and the mouse moves the focus to
+	 * what it hovers: one highlighted widget at a time, for mouse, keyboard and gamepad alike.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Std Core|UI")
 	bool bHighlightFocus = true;
@@ -103,6 +103,7 @@ private:
 	TWeakObjectPtr<UWidget> HighlightedWidget;
 	FButtonStyle HighlightedButtonStyle;
 	FSliderStyle HighlightedSliderStyle;
+	FCheckBoxStyle HighlightedCheckBoxStyle;
 
 	/** Interactive widgets under the mouse during the last tick. */
 	TArray<TWeakObjectPtr<UWidget>> HoveredWidgets;

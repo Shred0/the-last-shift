@@ -52,6 +52,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "RHIStats.h"
+#include "Debug/FrameCapsTestScope.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
 #include "UnrealClient.h"
@@ -334,6 +335,7 @@ namespace RenderStatsDebug
 
 	static void Finish()
 	{
+		FrameCapsTest::Restore(GameWorld(), TEXT("tls.Views"));
 		Note(TEXT("===== done ====="));
 		if (GShotHandle.IsValid())
 		{
@@ -1259,12 +1261,9 @@ namespace RenderStatsDebug
 				GViews.Index = GViews.Steps.Num();
 				return 0.f;
 			}
-			if (GEngine)
-			{
-				// Uncapped, so the GPU time is that of the view and not of the cap.
-				GEngine->Exec(GameWorld(), TEXT("t.MaxFPS 0"));
-				GEngine->Exec(GameWorld(), TEXT("r.VSync 0"));
-			}
+			// Uncapped, so the GPU time is that of the view and not of the cap: the player's frame-rate limit and V-Sync are
+			// lifted for the run and put back at the end.
+			FrameCapsTest::Lift(GameWorld(), TEXT("tls.Views"));
 			Note(FString::Printf(TEXT("start, %s, viewport %s"), *CameraPose(),
 				GEngine && GEngine->GameViewport ? *GEngine->GameViewport->Viewport->GetSizeXY().ToString() : TEXT("-")));
 			return 0.5f;

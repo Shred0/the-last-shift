@@ -5,6 +5,7 @@
 #include "Components/Border.h"
 #include "Components/Button.h"
 #include "Components/ButtonSlot.h"
+#include "Components/CheckBox.h"
 #include "Components/Image.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
@@ -231,6 +232,61 @@ FSliderStyle UStdUITheme::MakeSliderStyle() const
 	return Style;
 }
 
+FCheckBoxStyle UStdUITheme::MakeCheckBoxStyle() const
+{
+	using namespace StdUIThemeDetail;
+	constexpr float BoxSize = 22.f;
+	const FLinearColor Clear = FLinearColor::Transparent;
+
+	const auto Box = [this, BoxSize](const FLinearColor& Fill, const FLinearColor& Frame)
+	{
+		FSlateBrush Brush;
+		if (IsFramed())
+		{
+			Brush = StdUIStyle::MakeFrameBrush(Fill, Frame, FrameThickness, FMath::Min(CornerCut, BoxSize * 0.3f));
+		}
+		else
+		{
+			// A filled rounded box, its outline in the frame's colour.
+			Brush = MakeRoundedBrush(Fill, CornerRadius * 0.5f);
+			Brush.OutlineSettings.Color = FSlateColor(Frame);
+			Brush.OutlineSettings.Width = FrameThickness;
+		}
+		Brush.ImageSize = FVector2D(BoxSize, BoxSize);
+		return Brush;
+	};
+
+	const FLinearColor Pressed = Darken(AccentColor, 0.78f);
+	FCheckBoxStyle Style;
+	Style.SetCheckBoxType(ESlateCheckBoxType::CheckBox);
+	Style.SetUncheckedImage(Box(Clear, FrameColor));
+	Style.SetUncheckedHoveredImage(Box(Clear, AccentColor));
+	Style.SetUncheckedPressedImage(Box(Pressed, Pressed));
+	Style.SetCheckedImage(Box(AccentColor, AccentColor));
+	Style.SetCheckedHoveredImage(Box(AccentColor, TextColor));
+	Style.SetCheckedPressedImage(Box(Pressed, Pressed));
+	Style.SetUndeterminedImage(Box(WithAlpha(AccentColor, AccentColor.A * 0.5f), FrameColor));
+	Style.SetUndeterminedHoveredImage(Box(WithAlpha(AccentColor, AccentColor.A * 0.5f), AccentColor));
+	Style.SetUndeterminedPressedImage(Box(Pressed, Pressed));
+	Style.SetPadding(FMargin(10.f, 0.f, 0.f, 0.f));
+	Style.SetForegroundColor(FSlateColor(TextColor));
+	Style.SetHoveredForegroundColor(FSlateColor(TextColor));
+	Style.SetPressedForegroundColor(FSlateColor(TextColor));
+	Style.SetCheckedForegroundColor(FSlateColor(TextColor));
+	Style.SetCheckedHoveredForegroundColor(FSlateColor(TextColor));
+	Style.SetCheckedPressedForegroundColor(FSlateColor(TextColor));
+	if (HoverSound)
+	{
+		Style.SetHoveredSound(MakeSound(HoverSound));
+	}
+	if (PressSound)
+	{
+		Style.SetCheckedSound(MakeSound(PressSound));
+		Style.SetUncheckedSound(MakeSound(PressSound));
+	}
+	return Style;
+}
+
 FTextBlockStyle UStdUITheme::MakeTextStyle(const FSlateFontInfo& Font, const FLinearColor& Color) const
 {
 	FTextBlockStyle Style;
@@ -356,6 +412,7 @@ void StdUITheme::ApplyToWidget(const UStdUITheme& Theme, UUserWidget& Widget)
 	const FButtonStyle ButtonStyle = Theme.MakeButtonStyle();
 	const FButtonStyle TabStyle = Theme.MakeTabStyle(false);
 	const FSliderStyle SliderStyle = Theme.MakeSliderStyle();
+	const FCheckBoxStyle CheckBoxStyle = Theme.MakeCheckBoxStyle();
 	const FTextBlockStyle KeyTextStyle = Theme.MakeTextStyle(Theme.ButtonFont, Theme.TextColor);
 	TArray<UTextBlock*> Titles;
 
@@ -413,6 +470,10 @@ void StdUITheme::ApplyToWidget(const UStdUITheme& Theme, UUserWidget& Widget)
 			Slider->SetWidgetStyle(SliderStyle);
 			Slider->SetSliderBarColor(FLinearColor::White);
 			Slider->SetSliderHandleColor(FLinearColor::White);
+		}
+		else if (UCheckBox* CheckBox = Cast<UCheckBox>(Child))
+		{
+			CheckBox->SetWidgetStyle(CheckBoxStyle);
 		}
 		else if (UInputKeySelector* KeySelector = Cast<UInputKeySelector>(Child))
 		{

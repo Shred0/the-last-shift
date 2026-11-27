@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Entity/EntityForm.h"
+#include "Entity/EntityWall.h"
 #include "GameFramework/Actor.h"
 #include "LidarPointSource.h"
 #include "Time/TimeState.h"
@@ -10,6 +12,7 @@
 
 class APawn;
 class UScanDirectorComponent;
+class UStaticMesh;
 class UTimeStateSubsystem;
 
 THELASTSHIFT_API DECLARE_LOG_CATEGORY_EXTERN(LogEntity, Log, All);
@@ -128,10 +131,25 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEntityPathRefreshed, int32, Beat
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnEntityContact);
 
 /**
- * The thing that closes in while time is stopped. No mesh: it exists only as points injected into lidar scans
- * (ILidarPointSource, registered through the player's scan director), in two forms: the figure (a procedural humanoid
- * refracted in RefractionCount copies around the vertical axis through its head) and the trail (the stretch of its
- * navigation path ahead of it, jittered: the tell).
+ * The thing that closes in while time is stopped. Nothing rendered: it exists only as points injected into lidar scans
+ * (ILidarPointSource, registered through the player's scan director), in two forms: the figure and the trail (the stretch
+ * of its navigation path ahead of it, jittered: the tell). Brief 29: the figure is sampled from the act's form, a modelled
+ * mesh (UTheLastShiftSettings: ActTuning's EntityForm, EntityForms' mesh and point count), its pivot at the figure's feet
+ * and its front along the direction of travel, upright; the procedural humanoid refracted in RefractionCount copies around
+ * the vertical axis through its head stays as the fallback (modelled figures off, or the form's mesh missing). Only the
+ * look depends on the form.
+ *
+ * Brief 30, its third thing a scan can show: walls. While awake, at the start of each Stop it raises up to its act's
+ * WallCount walls (ActTuning) across passages of the area (AAreaGenerator::GetPassages, filtered: never in or at the exit
+ * corridor, at a gate's door or within WallClearOfDevices of a terminal): the first strategic, at the passage the player's
+ * path crosses on the way to the nearest residue not collected or terminal still offering a payment (ahead along the route
+ * first, else behind), never the same passage two Stops in a row; the others drawn from its own wall stream among the
+ * candidates within WallRangeM of path. No wall within WallMinDistanceM of path of the player or across where they stand,
+ * none on the player's way to the regenerating residue of a gate still ahead, and one way out of the player's segment stays
+ * open; a wall the limits leave no passage for is not raised. Each is an AEntityWall: strands of the entity's points (the
+ * act's form's look, EntityForms) and a volume that blocks the player's pawn only, for that Stop only. Its points are the
+ * entity's (the same colour, shown by the latest scan only) and never part of the figure: no sighting, contact or graze.
+ * One switch, EntityForms.bEntityWalls; off, the entity is as it was without them.
  *
  * Dormant until UTimeStateSubsystem's cumulative stopped time reaches AwakenThresholdSeconds; the check runs on the
  * director's beats, so it always awakens (and first appears) on a beat. Once awake it appears on every Stop at a
@@ -275,9 +293,119 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Figure", meta = (ClampMin = "0.0", ClampMax = "60.0", Units = "deg"))
 	float RefractionTilt = 15.f;
 
-	/** Seed of the figure's point set. */
+	/** Seed of the figure's point set (the procedural figure's and a modelled form's sampling). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Entity|Figure")
 	int32 FigureSeed = 1977;
+
+	// --- Form (Brief 29) ---
+
+	/**
+	 * Resolves the figure's form now and builds its point set when it changed: the session's form (SetSessionForm) or the
+	 * act's (UTheLastShiftSettings::GetEntityFormOfAct), the procedural figure when modelled figures are off or the form's
+	 * mesh is missing or cannot be read. Runs at BeginPlay and before every scan; the points are computed once a form.
+	 */
+	void RefreshFigureShape();
+
+	/** The form the figure has (after the last RefreshFigureShape): Procedural when it fell back. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	EEntityForm GetForm() const { return ShapeForm; }
+
+	/** The form asked for (the session's or the act's), before any fallback. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	EEntityForm GetRequestedForm() const;
+
+	/** The mesh the figure is sampled from; null for the procedural figure. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	UStaticMesh* GetFormMesh() const { return ShapeMesh; }
+
+	/** Points of the figure in a scan: the form's count, or FigurePointCount x RefractionCount for the procedural figure. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	int32 GetFigurePointCountNow() const;
+
+	/** The figure's point set in its local space (one copy for the procedural figure). */
+	const TArray<FVector>& GetFigureShapePoints() const { return FigureShape; }
+
+	/**
+	 * Where a modelled form's mesh stands now: on the ground under the figure, turned to its direction of travel plus the
+	 * form's YawOffsetDeg, upright.
+	 */
+	FTransform GetFigureTransform() const;
+
+	/** The form's YawOffsetDeg (EntityForms in UTheLastShiftSettings), clamped; 0 for the procedural figure. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Figure")
+	float GetFormYawOffset() const;
+
+	/** Yaw of the figure's direction of travel. */
+	UFUNCTION(BlueprintPure, Category = "Entity")
+	float GetFigureYaw() const { return FigureYaw; }
+
+	/** The figure's points in world space now, as the next scan gathers them. */
+	void BuildFigurePoints(TArray<FVector>& OutPoints) const;
+
+	/**
+	 * Tests and tools: the figure's points the lidar keeps for Context, by the found check's own rule (inside the coverage,
+	 * not hidden by geometry by more than OcclusionTolerance), counted on the figure as it stands now. bExact counts them
+	 * all; otherwise it stops as the found check does, once more than ClearSightingShare is certain either way.
+	 */
+	bool MeasureFigureKept(const FLidarScanContext& Context, bool bExact, int32& OutKept, int32& OutTraces, int32& OutPoints) const;
+
+	/** The session's form for every entity (tls.Entity.Form, tests); unset = each act's own. */
+	static void SetSessionForm(TOptional<EEntityForm> Form);
+	static TOptional<EEntityForm> GetSessionForm();
+
+	// --- Walls (Brief 30) ---
+
+	/** True when walls are on now: the session's switch (tls.Entity.Walls) or EntityForms.bEntityWalls, and a wall count above 0. */
+	UFUNCTION(BlueprintPure, Category = "Entity|Walls")
+	bool AreWallsOn() const;
+
+	/** Walls a Stop raises at most now: the session's count, or the act's WallCount (ActTuning). */
+	UFUNCTION(BlueprintPure, Category = "Entity|Walls")
+	int32 GetWallCountNow() const;
+
+	/** Points of each wall now: the act's WallPoints (ActTuning). */
+	UFUNCTION(BlueprintPure, Category = "Entity|Walls")
+	int32 GetWallPointsNow() const;
+
+	/** The walls standing now (the current Stop's). */
+	TArray<AEntityWall*> GetWalls() const;
+
+	/** The area's candidate passages, excluded ones included with their reason (computed once a layout). */
+	const TArray<FEntityWallCandidate>& GetWallCandidates();
+
+	/** What the last choice of walls did. */
+	const FEntityWallReport& GetLastWallReport() const { return LastWallReport; }
+
+	/** Wall points returned by the last GatherLidarPoints (before the lidar's occlusion). */
+	UFUNCTION(BlueprintPure, Category = "Entity|Walls")
+	int32 GetLastGatheredWallPoints() const { return LastGatheredWallPoints; }
+
+	/** Stops the entity has seen begin (the wall reports' StopSerial). */
+	int32 GetStopSerial() const { return StopSerial; }
+
+	/** The session's switch and count for every entity (tls.Entity.Walls, tests); unset = EntityForms.bEntityWalls and each act's WallCount. */
+	static void SetSessionWalls(TOptional<bool> bOn);
+	static TOptional<bool> GetSessionWalls();
+	static void SetSessionWallCount(TOptional<int32> Count);
+	static TOptional<int32> GetSessionWallCount();
+
+	/**
+	 * Tests and tools: raises walls at these candidates now (indices into GetWallCandidates), in place of the Stop's choice,
+	 * whatever the limits say. Needs time Stopped; the Stop's end removes them as any wall.
+	 */
+	bool RaiseWallsAtForTest(const TArray<int32>& Candidates);
+
+	/** Removes every wall now (the end of a Stop does it). */
+	void ClearWalls(const TCHAR* Why);
+
+	/** True when Path crosses the opening of Passage (from its floor up to Height). */
+	static bool PathCrossesPassage(const TArray<FVector>& Path, const FAreaPassage& Passage, float Height, float* OutAlong = nullptr);
+
+	/** The entity's own navigation query (the one its movement uses): From to To on the navmesh, false when there is no full path. */
+	bool FindNavPath(const FVector& From, const FVector& To, TArray<FVector>& OutPoints, float& OutLength) const { return FindPath(From, To, OutPoints, OutLength); }
+
+	/** Height of a wall: the area generator's WallHeight (its one owner), 400 cm without one. */
+	float GetWallHeight() const;
 
 	// --- Found ---
 
@@ -426,6 +554,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Entity")
 	bool SpawnNow(float Distance = 0.f);
 
+	/**
+	 * Tools and tests (tls.Entity.Show, tls.EntityFormCheck): moves the manifested figure to the navmesh point nearest
+	 * Location, its path to the player found again and its front turned along it. With bHold it then stands still for the
+	 * rest of the Stop (its contact check still runs); the next Stop spawns and moves as always.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Entity")
+	bool PlaceFigure(const FVector& Location, bool bHold = true);
+
 	// --- Events ---
 
 	/** Once, when the cumulative stopped time first reaches the threshold. */
@@ -505,6 +641,31 @@ private:
 
 	void DrawDebug() const;
 
+	/** Brief 30: chooses the Stop's walls and raises them (once a Stop); returns the walls raised. */
+	int32 RaiseWalls(const TCHAR* Why);
+	void RefreshWallCandidates();
+	AEntityWall* SpawnWall(int32 Candidate, bool bStrategic);
+	void GatherWallPoints(const FLidarScanContext& Context, TArray<FLidarInjectedPoint>& OutPoints);
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<AEntityWall>> Walls;
+
+	TArray<FEntityWallCandidate> WallCandidates;
+	int64 WallCandidatesLayout = 0;
+	int32 WallCandidatesPassages = -1;
+	bool bWallCandidatesBuilt = false;
+	FEntityWallReport LastWallReport;
+	FRandomStream WallRng;
+	bool bWallRngInitialized = false;
+	/** The passage of the last Stop's strategic wall (INDEX_NONE when that Stop had none). */
+	int32 LastStrategicPassage = INDEX_NONE;
+	bool bWallsChosenThisStop = false;
+	int32 StopSerial = 0;
+	int32 LastGatheredWallPoints = 0;
+
+	static TOptional<bool> SessionWalls;
+	static TOptional<int32> SessionWallCount;
+
 	UPROPERTY(Transient)
 	TObjectPtr<UTimeStateSubsystem> TimeState;
 
@@ -553,10 +714,24 @@ private:
 	bool bHasPreviousSpawn = false;
 	FVector PreviousSpawnLocation = FVector::ZeroVector;
 
-	/** Figure point set and the tunables it was built from. */
+	/** Figure point set and what it was built from (form, mesh, count, seed). */
 	TArray<FVector> FigureShape;
 	int32 FigureShapeCount = -1;
+	int32 FigureShapeProceduralCount = -1;
 	int32 FigureShapeSeed = 0;
+	EEntityForm ShapeForm = EEntityForm::Procedural;
+	EEntityForm ShapeRequestedForm = EEntityForm::Procedural;
+	bool bShapeModelledOn = false;
+	FSoftObjectPath ShapeMeshPath;
+	bool bShapeBuilt = false;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMesh> ShapeMesh;
+
+	/** PlaceFigure(bHold): the figure stands still until the Stop ends. */
+	bool bHoldFigure = false;
+
+	static TOptional<EEntityForm> SessionForm;
 
 	int32 LastGatheredFigurePoints = 0;
 	int32 LastGatheredTrailPoints = 0;

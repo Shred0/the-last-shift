@@ -32,7 +32,8 @@ enum class EStdUIShape : uint8
  * key selector styles are built from them, so restyling the menus means editing this asset only.
  *
  * Applied by name and type (see StdUITheme::ApplyToWidget): buttons, tab buttons (Button_Tab*), button labels,
- * sliders, key selectors, Text_Title, Text_Heading*, Text_Version, other texts, Border_Background and Border_Panel.
+ * sliders, key selectors, check boxes, Text_Title, Text_Heading*, Text_Version, other texts, Border_Background and
+ * Border_Panel.
  */
 UCLASS(BlueprintType)
 class STDCORE_API UStdUITheme : public UDataAsset
@@ -138,6 +139,12 @@ public:
 	FButtonStyle MakeButtonStyle() const;
 	FButtonStyle MakeTabStyle(bool bSelected) const;
 	FSliderStyle MakeSliderStyle() const;
+
+	/**
+	 * A check box: a small square box. Framed, its frame line with the cut corner, filled with the accent when ticked;
+	 * Rounded, a rounded box. With the focus or the pointer its frame takes the accent (ticked: the text colour).
+	 */
+	FCheckBoxStyle MakeCheckBoxStyle() const;
 	FTextBlockStyle MakeTextStyle(const FSlateFontInfo& Font, const FLinearColor& Color) const;
 };
 

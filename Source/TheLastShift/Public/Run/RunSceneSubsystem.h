@@ -26,6 +26,7 @@ namespace RunScenes
 class URunEndingWidget;
 class URunTextSceneWidget;
 class UStdScreenWidget;
+class UStdTextSceneWidget;
 
 THELASTSHIFT_API DECLARE_LOG_CATEGORY_EXTERN(LogScenes, Log, All);
 
@@ -118,6 +119,27 @@ public:
 	/** Opens the ending (the choice, then the chosen text) as a child screen of Parent (the main menu). */
 	URunEndingWidget* OpenEnding(UStdScreenWidget* Parent);
 
+	/**
+	 * What the main menu opens for a pending ending: with an ending chosen in the battery's chamber (SetChosenEnding), that
+	 * ending's text alone (no last message, no list); else the ending's list (OpenEnding). Null when nothing was opened.
+	 */
+	UStdScreenWidget* OpenPendingEnding(UStdScreenWidget* Parent);
+
+	/**
+	 * The label of an ending (Inject: "Inject the harvest", Open: "Open the structure"; empty for any other): the one owner of
+	 * the two labels, read by the ending's list and by the chamber's choice dialog.
+	 */
+	static FText GetEndingLabel(FName Ending);
+
+	/** The prompt's label at the battery's chamber's terminal ("Choose"): a short UI label, its one owner, next to the endings'. */
+	static FText GetChooseLabel();
+
+	/** The ending chosen in the chamber, opened alone by the main menu with the pending ending (None: the list). */
+	void SetChosenEnding(FName Ending);
+
+	UFUNCTION(BlueprintPure, Category = "Scenes")
+	FName GetChosenEnding() const { return ChosenEnding; }
+
 	/** The ending's text for row Ending (Inject, Open) as a one-line Engineer scene; empty when the row has no text. */
 	TArray<FRunSceneLine> BuildEndingText(FName Ending) const;
 
@@ -132,8 +154,15 @@ public:
 
 	// --- Lines ---
 
-	/** Called by the scene screen when a line starts: logs it and broadcasts OnSceneLineStarted. */
-	void NotifyLineStarted(FName Scene, int32 Index, const FRunSceneLine& Line);
+	/**
+	 * Called by the scene screen when a line starts: logs it and broadcasts OnSceneLineStarted. Brief 35: Screen is the text
+	 * scene screen the line shows on (GetLineScreen), so that what follows the line's effect (the interruption's noise follows
+	 * the static) can read the effect's own state from it.
+	 */
+	void NotifyLineStarted(FName Scene, int32 Index, const FRunSceneLine& Line, UStdTextSceneWidget* Screen = nullptr);
+
+	/** Brief 35: the text scene screen of the line that started last (null when none, or once it has gone). */
+	UStdTextSceneWidget* GetLineScreen() const { return LineScreen.Get(); }
 
 	/** A line of a scene started on screen, with its cue name (None: none). The hook for the prologue's sound and effects. */
 	UPROPERTY(BlueprintAssignable, Category = "Scenes")
@@ -156,6 +185,12 @@ private:
 
 	bool bEndingPending = false;
 
+	/** The ending chosen in the chamber, with the pending ending; cleared with it and once opened. */
+	FName ChosenEnding;
+
 	/** The screens OpenPrologue and OpenEnding opened, and their scene, until they close. */
 	TMap<TWeakObjectPtr<UStdScreenWidget>, FName> OpenScreens;
+
+	/** Brief 35: the text scene screen of the line that started last. */
+	TWeakObjectPtr<UStdTextSceneWidget> LineScreen;
 };

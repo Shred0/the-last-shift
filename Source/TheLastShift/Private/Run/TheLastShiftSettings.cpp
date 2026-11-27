@@ -36,6 +36,11 @@ int32 UTheLastShiftSettings::GetPrologueStageOfMap(const FString& PackageName) c
 	return 0;
 }
 
+bool UTheLastShiftSettings::IsChamberMap(const FString& PackageName) const
+{
+	return !ChamberMap.IsNull() && ChamberMap.ToSoftObjectPath().GetLongPackageName() == UWorld::RemovePIEPrefix(PackageName);
+}
+
 bool UTheLastShiftSettings::IsHomeLookMap(const FString& PackageName) const
 {
 	const FString Clean = UWorld::RemovePIEPrefix(PackageName);
@@ -101,6 +106,21 @@ FRackLightsTuning UTheLastShiftSettings::GetRackLightsTuning() const
 	return T;
 }
 
+FBatteryLook UTheLastShiftSettings::GetBatteryLook() const
+{
+	FBatteryLook T;
+	T.GlowTintShare = FMath::Clamp(BatteryLook.GlowTintShare, 0.f, 1.f);
+	T.GlowLevelEmpty = FMath::Clamp(BatteryLook.GlowLevelEmpty, 0.01f, 50.f);
+	T.GlowLevelFull = FMath::Clamp(BatteryLook.GlowLevelFull, T.GlowLevelEmpty, 50.f);
+	T.PulseSpeedEmpty = FMath::Clamp(BatteryLook.PulseSpeedEmpty, 0.01f, 50.f);
+	T.PulseSpeedFull = FMath::Clamp(BatteryLook.PulseSpeedFull, T.PulseSpeedEmpty, 50.f);
+	T.PulseLengthM = FMath::Clamp(BatteryLook.PulseLengthM, 0.05f, 10.f);
+	T.PulseSpacingM = FMath::Clamp(BatteryLook.PulseSpacingM, FMath::Max(0.1f, T.PulseLengthM), 20.f);
+	T.RingDegreesPerSecond = FMath::Clamp(BatteryLook.RingDegreesPerSecond, 0.f, 90.f);
+	T.ScreenLevel = FMath::Clamp(BatteryLook.ScreenLevel, 0.f, 50.f);
+	return T;
+}
+
 FHologramTuning UTheLastShiftSettings::GetHologramTuning() const
 {
 	FHologramTuning T;
@@ -144,6 +164,16 @@ UDataTable* UTheLastShiftSettings::LoadPrologueTable() const
 	return PrologueTable.IsNull() ? nullptr : PrologueTable.LoadSynchronous();
 }
 
+UDataTable* UTheLastShiftSettings::LoadEpilogueTable() const
+{
+	return EpilogueTable.IsNull() ? nullptr : EpilogueTable.LoadSynchronous();
+}
+
+UDataTable* UTheLastShiftSettings::LoadGroupTable(FName Group) const
+{
+	return EpilogueGroups::IsEpilogueGroup(Group) ? LoadEpilogueTable() : LoadPrologueTable();
+}
+
 const FAreaRecipe* UTheLastShiftSettings::FindRecipe(int32 Act) const
 {
 	if (Act <= 0)
@@ -171,7 +201,29 @@ bool UTheLastShiftSettings::GetActTuning(int32 Act, FActTuning& OutTuning) const
 	}
 	OutTuning.JumpHomeSeconds = FMath::Clamp(Tuning->JumpHomeSeconds, 0.0, 1.0e12);
 	OutTuning.JumpBatteryDrop = FMath::Clamp(Tuning->JumpBatteryDrop, 0.0, 1.0);
+	OutTuning.EntityForm = GetEntityFormOfAct(Act);
+	OutTuning.WallCount = FMath::Clamp(Tuning->WallCount, 0, 4);
+	OutTuning.WallPoints = FMath::Clamp(Tuning->WallPoints, 10, 1000);
 	return true;
+}
+
+EEntityForm UTheLastShiftSettings::GetEntityFormOfAct(int32 Act) const
+{
+	// A map outside AreaMaps, and an act with no entry, take act 1's form: the one owner stays ActTuning's first entry.
+	if (ActTuning.IsValidIndex(Act - 1))
+	{
+		return ActTuning[Act - 1].EntityForm;
+	}
+	return ActTuning.Num() > 0 ? ActTuning[0].EntityForm : EEntityForm::Procedural;
+}
+
+const FEntityFormTuning* UTheLastShiftSettings::FindEntityForm(EEntityForm Form) const
+{
+	if (Form == EEntityForm::Procedural)
+	{
+		return nullptr;
+	}
+	return EntityForms.Forms.FindByPredicate([Form](const FEntityFormTuning& Entry) { return Entry.Form == Form; });
 }
 
 UDataTable* UTheLastShiftSettings::LoadAIMessagesTable() const

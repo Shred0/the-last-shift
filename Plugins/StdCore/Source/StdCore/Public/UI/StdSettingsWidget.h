@@ -6,6 +6,7 @@
 #include "StdSettingsWidget.generated.h"
 
 class UButton;
+class UCheckBox;
 class UPanelWidget;
 class USlider;
 class UStdKeyBindingRowWidget;
@@ -21,6 +22,13 @@ class UWidgetSwitcher;
  * Volume sliders apply while they move; window mode and quality apply on each press. Back (button, Escape,
  * gamepad B) saves and closes. The Controls tab is built at runtime from the remappable mappings: one category
  * header and one UStdKeyBindingRowWidget per entry. Key changes are saved as soon as they are made.
+ *
+ * The video options' rows are built at runtime too, after the quality row (or in Box_VideoOptions), each but the ones
+ * the project hides (UStdProjectSettings::HiddenVideoOptions): the frame-rate limit (a button that moves to the next
+ * limit of UStdProjectSettings::FrameRateLimits on each press, disabled while the Unlimited box beside it is ticked),
+ * the anti-aliasing (a button that moves to the next method) and V-Sync (a box). Each applies at once and is saved
+ * with the rest. The rows take the theme like the designer's; the tab scrolls when they do not fit, keeping the focused
+ * row in view.
  */
 UCLASS(Abstract)
 class STDCORE_API UStdSettingsWidget : public UStdScreenWidget
@@ -91,6 +99,30 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Std Core|UI", meta = (BindWidget))
 	TObjectPtr<UTextBlock> Text_Quality;
 
+	/** Optional: the panel the video options' rows are added to. Default: the panel of the quality row, after it. */
+	UPROPERTY(BlueprintReadOnly, Category = "Std Core|UI", meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> Box_VideoOptions;
+
+	// The video options' rows, built at runtime (null when the project hides the row).
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
+	TObjectPtr<UButton> Button_FrameRateLimit;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
+	TObjectPtr<UTextBlock> Text_FrameRateLimit;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
+	TObjectPtr<UCheckBox> CheckBox_FrameRateUnlimited;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
+	TObjectPtr<UButton> Button_AntiAliasing;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
+	TObjectPtr<UTextBlock> Text_AntiAliasing;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Std Core|UI")
+	TObjectPtr<UCheckBox> CheckBox_VSync;
+
 	// Controls
 
 	/** Filled at runtime (a Vertical Box, or a Scroll Box for long lists). Leave it empty in the designer. */
@@ -129,6 +161,23 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Std Core|Settings")
 	FText DefaultsRestoredText;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Std Core|Settings")
+	FText FrameRateLimitLabel;
+
+	/** Beside the box next to the frame-rate limit. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Std Core|Settings")
+	FText FrameRateUnlimitedLabel;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Std Core|Settings")
+	FText AntiAliasingLabel;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Std Core|Settings")
+	FText VSyncLabel;
+
+	/** Names of the anti-aliasing methods by r.AntiAliasingMethod's number: none, FXAA, TAA, MSAA, TSR. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Std Core|Settings")
+	TArray<FText> AntiAliasingNames;
+
 	/** Volume change per gamepad/keyboard step on the sliders. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Std Core|Settings", meta = (ClampMin = "0.01", ClampMax = "0.5"))
 	float VolumeStepSize = 0.05f;
@@ -148,6 +197,20 @@ private:
 	void SetKeyBindingMessage(const FText& Message);
 	FText GetWindowModeText(EWindowMode::Type WindowMode) const;
 	FText GetQualityText(int32 Level) const;
+	void BuildVideoRows();
+	void RefreshVideo();
+
+	UFUNCTION()
+	void HandleFrameRateLimitClicked();
+
+	UFUNCTION()
+	void HandleFrameRateUnlimitedChanged(bool bIsChecked);
+
+	UFUNCTION()
+	void HandleAntiAliasingClicked();
+
+	UFUNCTION()
+	void HandleVSyncChanged(bool bIsChecked);
 
 	UFUNCTION()
 	void HandleTabAudioVideoClicked();

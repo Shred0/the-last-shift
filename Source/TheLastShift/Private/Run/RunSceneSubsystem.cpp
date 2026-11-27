@@ -12,6 +12,7 @@
 #include "TextChannel/TextChannelComponent.h"
 #include "Time/HomeStateSubsystem.h"
 #include "UI/StdScreenWidget.h"
+#include "UI/StdTextSceneWidget.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunSceneSubsystem)
 
@@ -186,6 +187,56 @@ URunEndingWidget* URunSceneSubsystem::OpenEnding(UStdScreenWidget* Parent)
 	return Screen;
 }
 
+UStdScreenWidget* URunSceneSubsystem::OpenPendingEnding(UStdScreenWidget* Parent)
+{
+	const FName Chosen = ChosenEnding;
+	ChosenEnding = NAME_None;
+	if (Chosen.IsNone())
+	{
+		return OpenEnding(Parent);
+	}
+	// Chosen in the battery's chamber: the ending's scene on that ending's text alone.
+	const TArray<FRunSceneLine> Lines = BuildEndingText(Chosen);
+	URunTextSceneWidget* Screen = Parent && !Lines.IsEmpty() ? Cast<URunTextSceneWidget>(Parent->OpenChildScreen(URunTextSceneWidget::StaticClass())) : nullptr;
+	if (!Screen)
+	{
+		UE_LOG(LogScenes, Warning, TEXT("Ending %s chosen in the chamber: no text (%d lines); the main menu shows."), *Chosen.ToString(), Lines.Num());
+		if (URunSubsystem* Run = GetGameInstance() ? GetGameInstance()->GetSubsystem<URunSubsystem>() : nullptr)
+		{
+			Run->SetReturningHome(false, TEXT("the chosen ending has no text"));
+		}
+		return nullptr;
+	}
+	UE_LOG(LogScenes, Log, TEXT("Ending %s chosen in the chamber: its text alone."), *Chosen.ToString());
+	Screen->Play(ERunSceneKind::EndingText, Chosen, Lines);
+	TrackScreen(Screen, EndingScene());
+	return Screen;
+}
+
+FText URunSceneSubsystem::GetEndingLabel(FName Ending)
+{
+	if (Ending == TEXT("Inject"))
+	{
+		return NSLOCTEXT("TheLastShift", "EndingInject", "Inject the harvest");
+	}
+	if (Ending == TEXT("Open"))
+	{
+		return NSLOCTEXT("TheLastShift", "EndingOpen", "Open the structure");
+	}
+	return FText::GetEmpty();
+}
+
+FText URunSceneSubsystem::GetChooseLabel()
+{
+	return NSLOCTEXT("TheLastShift", "ChamberChoose", "Choose");
+}
+
+void URunSceneSubsystem::SetChosenEnding(FName Ending)
+{
+	ChosenEnding = Ending;
+	UE_LOG(LogScenes, Log, TEXT("Ending chosen in the chamber: %s."), Ending.IsNone() ? TEXT("none") : *Ending.ToString());
+}
+
 void URunSceneSubsystem::TrackScreen(UStdScreenWidget* Screen, FName Scene)
 {
 	for (auto It = OpenScreens.CreateIterator(); It; ++It)
@@ -209,6 +260,14 @@ void URunSceneSubsystem::HandleSceneScreenClosed(UStdScreenWidget* Screen)
 		return;
 	}
 	UE_LOG(LogScenes, Log, TEXT("Scene %s: its screen closed."), *Scene.ToString());
+	// Brief 31A: once the ending has closed, the run is no longer on its way home.
+	if (Scene == EndingScene())
+	{
+		if (URunSubsystem* Run = GetGameInstance() ? GetGameInstance()->GetSubsystem<URunSubsystem>() : nullptr)
+		{
+			Run->SetReturningHome(false, TEXT("the ending closed"));
+		}
+	}
 	OnSceneScreenChanged.Broadcast(Scene, false);
 }
 
@@ -247,6 +306,10 @@ void URunSceneSubsystem::SetEndingPending(bool bPending)
 		UE_LOG(LogScenes, Log, TEXT("Ending %s."), bPending ? TEXT("pending: the main menu opens it on arrival") : TEXT("no longer pending"));
 	}
 	bEndingPending = bPending;
+	if (!bPending)
+	{
+		ChosenEnding = NAME_None;
+	}
 }
 
 bool URunSceneSubsystem::ConsumePendingEnding()
@@ -256,8 +319,9 @@ bool URunSceneSubsystem::ConsumePendingEnding()
 	return bWas;
 }
 
-void URunSceneSubsystem::NotifyLineStarted(FName Scene, int32 Index, const FRunSceneLine& Line)
+void URunSceneSubsystem::NotifyLineStarted(FName Scene, int32 Index, const FRunSceneLine& Line, UStdTextSceneWidget* Screen)
 {
+	LineScreen = Screen;
 	UE_LOG(LogScenes, Log, TEXT("Scene %s: line %d (%s, %s, %s%s) started: \"%s\""), *Scene.ToString(), Index + 1, *Line.RowName.ToString(), LexToString(Line.Voice),
 		LexToString(Line.Level), Line.Cue.IsNone() ? TEXT(", no cue") : *FString::Printf(TEXT(", cue %s"), *Line.Cue.ToString()), *Line.Text);
 	OnSceneLineStarted.Broadcast(Scene, Index, Line.Voice, Line.Cue);

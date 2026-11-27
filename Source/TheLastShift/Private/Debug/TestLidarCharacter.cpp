@@ -65,7 +65,9 @@ void ATestLidarCharacter::BeginPlay()
 	// it works and starts as bFlashlightOnAtStart says.
 	ApplyFlashlightTuning();
 	bool bOnAtStart = bFlashlightOnAtStart;
-	bFlashlightAvailable = UTheLastShiftSettings::Get()->GetMapFlashlight(URunSubsystem::GetPrologueStageOf(GetWorld()), bOnAtStart);
+	// The battery's chamber is home's: what the pawn can do there is what it can do in the home map.
+	const int32 FlashlightStage = URunSubsystem::IsChamberOf(GetWorld()) ? 1 : URunSubsystem::GetPrologueStageOf(GetWorld());
+	bFlashlightAvailable = UTheLastShiftSettings::Get()->GetMapFlashlight(FlashlightStage, bOnAtStart);
 	Flashlight->SetVisibility(bFlashlightAvailable && bOnAtStart);
 	UE_LOG(LogTheLastShift, Log, TEXT("TestLidarCharacter: flashlight %s, %s."), bFlashlightAvailable ? TEXT("available") : TEXT("unavailable in this map"),
 		Flashlight->IsVisible() ? TEXT("on") : TEXT("off"));
@@ -310,6 +312,7 @@ void ATestLidarCharacter::OnInteractPressed()
 			return;
 		}
 	}
+	// The battery's chamber's terminal opens its dialog on this press (AChoiceTerminal::TryActivate); nothing is held.
 	if (APowerTerminal* Terminal = APowerTerminal::FindNearestInRange(this))
 	{
 		Terminal->TryActivate(this);

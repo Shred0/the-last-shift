@@ -151,13 +151,18 @@ namespace LookDebug
 			{
 				UMaterialInterface* M = C->GetMaterial(S);
 				Mats += (S ? TEXT(", ") : TEXT("")) + GetNameSafe(M);
-				// A surface outside the families (not MI_Surface_*, not the hologram's own materials): named, to be found.
-				const FString MatName = GetNameSafe(M);
-				if (!MatName.StartsWith(TEXT("MI_Surface_")) && !MatName.Contains(TEXT("Hologram")) && C->bRenderInMainPass)
+				// A surface outside the families (not MI_Surface_*, not a light's own material: the hologram's, the rack lights' and,
+				// Brief 36B, the battery's glow and its hall's lit screens, all hidden while Stopped): named, to be found. A material
+				// made at runtime is named by the asset it was made from.
+				const UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(M);
+				const FString MatName = Mid && Mid->Parent ? GetNameSafe(Mid->Parent) : GetNameSafe(M);
+				const FString BaseName = M && M->GetMaterial() ? M->GetMaterial()->GetName() : FString();
+				const bool bLight = BaseName.Contains(TEXT("Hologram")) || BaseName == TEXT("M_BatteryGlow") || BaseName == TEXT("M_BatteryScreen");
+				if (!MatName.StartsWith(TEXT("MI_Surface_")) && !bLight && C->bRenderInMainPass)
 				{
 					UE_LOG(LogTheLastShift, Display, TEXT("  OUTSIDE THE FAMILIES: %s on %s of %s"), *MatName, *C->GetName(), *GetNameSafe(C->GetOwner()));
 				}
-				Families.FindOrAdd(GetNameSafe(M)) += Count;
+				Families.FindOrAdd(MatName) += Count;
 				if (M && M->GetMaterial())
 				{
 					Bases.Add(M->GetMaterial());
@@ -777,7 +782,7 @@ namespace LookDebug
 				}
 			}
 		}
-		static const TCHAR* const WantedFrames[] = { TEXT("SM_HatchFrame"), TEXT("SM_KitDoorFrame") };
+		static const TCHAR* const WantedFrames[] = { TEXT("SM_HangarHatchFrame"), TEXT("SM_KitDoorFrame") };
 		for (int32 Pass = 0; Pass < 2 && !bFrame; ++Pass)
 		{
 		const FString Wanted = WantedFrames[Pass];
@@ -796,7 +801,7 @@ namespace LookDebug
 				T.Box = It->Bounds.GetBox();
 				// Its lintel, the part always in front of whoever looks at the doorway.
 				T.Look = FVector(T.Box.GetCenter().X, T.Box.GetCenter().Y, T.Box.Max.Z - 40.0);
-				if (PickSide(FVector(T.Box.GetCenter().X, T.Box.GetCenter().Y, T.Box.Min.Z), It->GetComponentTransform().GetUnitAxis(EAxis::X), Name == TEXT("SM_HatchFrame") ? 900.0 : 350.0, T.Stand,
+				if (PickSide(FVector(T.Box.GetCenter().X, T.Box.GetCenter().Y, T.Box.Min.Z), It->GetComponentTransform().GetUnitAxis(EAxis::X), Name == TEXT("SM_HangarHatchFrame") ? 900.0 : 350.0, T.Stand,
 					ShipNear ? ShipNear->GetActorLocation() : FVector::ZeroVector))
 				{
 					Out.Add(T);

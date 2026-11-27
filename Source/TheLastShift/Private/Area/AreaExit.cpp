@@ -50,7 +50,7 @@ void AAreaExit::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void AAreaExit::TryTravel()
 {
 	UWorld* World = GetWorld();
-	if (bTriggered || !World || !World->IsGameWorld())
+	if (bTriggered || !bExitEnabled || !World || !World->IsGameWorld())
 	{
 		return;
 	}
@@ -83,6 +83,15 @@ void AAreaExit::TryTravel()
 #endif
 	OnPlayerEntered.Broadcast(Pawn);
 	bTriggered = Run && Run->TravelToNextArea();
+}
+
+void AAreaExit::SetExitEnabled(bool bEnabled)
+{
+	if (bExitEnabled != bEnabled)
+	{
+		UE_LOG(LogArea, Log, TEXT("%s: switched %s."), *GetName(), bEnabled ? TEXT("on") : TEXT("off"));
+	}
+	bExitEnabled = bEnabled;
 }
 
 bool AAreaExit::IsAtOrPastExit(const APawn* Pawn) const

@@ -862,18 +862,69 @@ namespace NarrativeCsv
 	}
 
 	/**
-	 * Every problem of DT_EngineerLines.csv (empty: the structure is right), against the message and prologue tables it
-	 * points into: it parses, rows E_<Before>_<Order> matching their columns, orders 1-999, every Before the key of a row
-	 * of DT_AIMessages or DT_Prologue and never of a row shown as a label (an AreaEntry row, a Flight row), the text not
-	 * empty, no line break, only the four tokens and {jump} only before a JumpReturn row. An empty table is right: the
-	 * engineer then says nothing before a row.
+	 * Brief 31A: every problem of DT_Epilogue.csv (empty: the structure is right): it parses with the prologue's row struct,
+	 * rows <Group>_<order> matching their Group and Order columns, every Group one of Return, Landing, Passage and Chamber,
+	 * (Group, Order) unique, no line break, no empty text.
 	 */
-	static TArray<FString> CheckEngineerLines(const FString& Csv, const FString& MessagesCsv, const FString& PrologueCsv, const TCHAR* File = TEXT("DT_EngineerLines.csv"))
+	static TArray<FString> CheckEpilogue(const FString& Csv, const TCHAR* File = TEXT("DT_Epilogue.csv"))
+	{
+		TArray<FString> Problems;
+		UScriptStruct* Struct = FPrologueRow::StaticStruct();
+		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
+		if (Table->GetRowMap().IsEmpty())
+		{
+			Problems.Add(FString::Printf(TEXT("%s has no rows"), File));
+		}
+		const FRegexPattern NamePattern(TEXT("^([A-Za-z]+)_([0-9]+)$"));
+		TSet<FString> Keys;
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FString Name = Pair.Key.ToString();
+			const FPrologueRow& Row = *reinterpret_cast<const FPrologueRow*>(Pair.Value);
+			FRegexMatcher Match(NamePattern, Name);
+			if (!Match.FindNext())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not follow <Group>_<order>"), File, *Name));
+			}
+			else if (FName(*Match.GetCaptureGroup(1)) != Row.Group || FCString::Atoi(*Match.GetCaptureGroup(2)) != Row.Order)
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: the name does not match its columns (group %s, order %d)"), File, *Name, *Row.Group.ToString(), Row.Order));
+			}
+			if (!EpilogueGroups::IsEpilogueGroup(Row.Group))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: group '%s' is not Return, Landing, Passage or Chamber"), File, *Name, *Row.Group.ToString()));
+			}
+			const FString Key = FString::Printf(TEXT("%s/%d"), *Row.Group.ToString(), Row.Order);
+			if (Keys.Contains(Key))
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: group %s order %d appears twice"), File, *Name, *Row.Group.ToString(), Row.Order));
+			}
+			Keys.Add(Key);
+			const FString Text = TextCell(Struct, Pair.Value, TEXT("Text"));
+			CheckLineBreaks(File, Pair.Key, TEXT("Text"), Text, Problems);
+			if (Text.IsEmpty())
+			{
+				Problems.Add(FString::Printf(TEXT("%s, row %s: empty text"), File, *Name));
+			}
+		}
+		return Problems;
+	}
+
+	/**
+	 * Every problem of DT_EngineerLines.csv (empty: the structure is right), against the message, prologue and epilogue
+	 * tables it points into: it parses, rows E_<Before>_<Order> matching their columns, orders 1-999, every Before the key
+	 * of a row of DT_AIMessages, DT_Prologue or DT_Epilogue and never of a row shown as a label (an AreaEntry row, a Flight
+	 * row, a Return or a Passage row), the text not empty, no line break, only the four tokens and {jump} only before a
+	 * JumpReturn row. An empty table is right: the engineer then says nothing before a row.
+	 */
+	static TArray<FString> CheckEngineerLines(const FString& Csv, const FString& MessagesCsv, const FString& PrologueCsv, const FString& EpilogueCsv,
+		const TCHAR* File = TEXT("DT_EngineerLines.csv"))
 	{
 		TArray<FString> Problems;
 		TArray<FString> Ignored;
 		const UDataTable* Messages = Parse(MessagesCsv, FAIMessageRow::StaticStruct(), Ignored, TEXT("DT_AIMessages.csv"));
 		const UDataTable* Prologue = Parse(PrologueCsv, FPrologueRow::StaticStruct(), Ignored, TEXT("DT_Prologue.csv"));
+		const UDataTable* Epilogue = Parse(EpilogueCsv, FPrologueRow::StaticStruct(), Ignored, TEXT("DT_Epilogue.csv"));
 		UScriptStruct* Struct = FEngineerLineRow::StaticStruct();
 		const UDataTable* Table = Parse(Csv, Struct, Problems, File);
 		const FRegexPattern NamePattern(TEXT("^E_(.+)_([0-9]+)$"));
@@ -896,14 +947,15 @@ namespace NarrativeCsv
 			}
 			const FAIMessageRow* Message = Messages->FindRow<FAIMessageRow>(Row.Before, TEXT("Csv"), false);
 			const FPrologueRow* Line = Prologue->FindRow<FPrologueRow>(Row.Before, TEXT("Csv"), false);
-			if (!Message && !Line)
+			const FPrologueRow* Way = Epilogue->FindRow<FPrologueRow>(Row.Before, TEXT("Csv"), false);
+			if (!Message && !Line && !Way)
 			{
-				Problems.Add(FString::Printf(TEXT("%s, row %s: Before '%s' names no row of DT_AIMessages or DT_Prologue"), File, *Name, *Row.Before.ToString()));
+				Problems.Add(FString::Printf(TEXT("%s, row %s: Before '%s' names no row of DT_AIMessages, DT_Prologue or DT_Epilogue"), File, *Name, *Row.Before.ToString()));
 			}
-			else if ((Message && Message->Trigger == ETextTrigger::AreaEntry) || (Line && Line->Group == PrologueGroups::Flight))
+			else if ((Message && Message->Trigger == ETextTrigger::AreaEntry) || (Line && Line->Group == PrologueGroups::Flight) || (Way && EpilogueGroups::IsLabelGroup(Way->Group)))
 			{
 				Problems.Add(FString::Printf(TEXT("%s, row %s: Before '%s' names a row shown as a label, never typed on the channel (%s)"), File, *Name, *Row.Before.ToString(),
-					Message ? TEXT("an AreaEntry row") : TEXT("a Flight row")));
+					Message ? TEXT("an AreaEntry row") : Line ? TEXT("a Flight row") : *FString::Printf(TEXT("a %s row"), *Way->Group.ToString())));
 			}
 			const FString Text = TextCell(Struct, Pair.Value, TEXT("Text"));
 			CheckLineBreaks(File, Pair.Key, TEXT("Text"), Text, Problems);
@@ -988,9 +1040,15 @@ bool FTextChannelCsvTest::RunTest(const FString& Parameters)
 	for (const FString& Problem : PrologueProblems) { AddError(Problem); }
 	AddInfo(FString::Printf(TEXT("DT_Prologue.csv: %d data lines, %d problems."), CountDataLines(Prologue), PrologueProblems.Num()));
 	TestEqual(TEXT("DT_Prologue.csv: structure right (parse, <Group>_<order> names, groups, line breaks)"), PrologueProblems.Num(), 0);
+	const FString Epilogue = Load(TEXT("DT_Epilogue.csv"));
+	TestFalse(TEXT("Narrative/DT_Epilogue.csv is read"), Epilogue.IsEmpty());
+	const TArray<FString> EpilogueProblems = CheckEpilogue(Epilogue);
+	for (const FString& Problem : EpilogueProblems) { AddError(Problem); }
+	AddInfo(FString::Printf(TEXT("DT_Epilogue.csv: %d data lines, %d problems."), CountDataLines(Epilogue), EpilogueProblems.Num()));
+	TestEqual(TEXT("DT_Epilogue.csv: structure right (parse, <Group>_<order> names, the four groups, line breaks)"), EpilogueProblems.Num(), 0);
 	const FString EngineerLines = Load(TEXT("DT_EngineerLines.csv"));
 	TestFalse(TEXT("Narrative/DT_EngineerLines.csv is read"), EngineerLines.IsEmpty());
-	const TArray<FString> EngineerProblems = CheckEngineerLines(EngineerLines, Messages, Prologue);
+	const TArray<FString> EngineerProblems = CheckEngineerLines(EngineerLines, Messages, Prologue, Epilogue);
 	for (const FString& Problem : EngineerProblems) { AddError(Problem); }
 	AddInfo(FString::Printf(TEXT("DT_EngineerLines.csv: %d data lines, %d problems."), CountDataLines(EngineerLines), EngineerProblems.Num()));
 	TestEqual(TEXT("DT_EngineerLines.csv: structure right (parse, E_<Before>_<Order> names, Before names a row and no label row, line breaks, tokens)"), EngineerProblems.Num(), 0);
@@ -1088,18 +1146,28 @@ bool FTextChannelCsvCheckTest::RunTest(const FString& Parameters)
 	const FString EngineerBase = Load(TEXT("DT_EngineerLines.csv"));
 	const FString MessageBase = Load(TEXT("DT_AIMessages.csv"));
 	const FString PrologueBase = Load(TEXT("DT_Prologue.csv"));
-	TestEqual(TEXT("The committed DT_EngineerLines.csv has no problem before a bad row is added"), CheckEngineerLines(EngineerBase, MessageBase, PrologueBase).Num(), 0);
+	const FString EpilogueBase = Load(TEXT("DT_Epilogue.csv"));
+	TestEqual(TEXT("The committed DT_EngineerLines.csv has no problem before a bad row is added"), CheckEngineerLines(EngineerBase, MessageBase, PrologueBase, EpilogueBase).Num(), 0);
+	// Brief 31A: the epilogue's file with one bad row.
+	{
+		const FString BadGroup = WithLine(EpilogueBase, TEXT("Arrival_9,Arrival,9,\"A test line.\""));
+		const FString All = FString::Join(CheckEpilogue(BadGroup, TEXT("DT_Epilogue.csv (copy)")), TEXT(" | "));
+		AddInfo(FString::Printf(TEXT("an epilogue row of an unknown group: %s"), *All));
+		TestTrue(TEXT("an epilogue row of an unknown group fails"), All.Contains(TEXT("is not Return, Landing, Passage or Chamber")));
+	}
 	const FCase EngineerCases[] = {
-		{ TEXT("an engineer line before a row that does not exist"), TEXT("E_A1_AreaStart_99_1,A1_AreaStart_99,1,\"A test line.\""), TEXT("names no row of DT_AIMessages or DT_Prologue") },
+		{ TEXT("an engineer line before a row that does not exist"), TEXT("E_A1_AreaStart_99_1,A1_AreaStart_99,1,\"A test line.\""), TEXT("names no row of DT_AIMessages, DT_Prologue or DT_Epilogue") },
 		{ TEXT("an engineer line before the area entry label"), TEXT("E_A1_AreaEntry_1_1,A1_AreaEntry_1,1,\"A test line.\""), TEXT("names a row shown as a label") },
 		{ TEXT("an engineer line before the Flight label"), TEXT("E_Flight_1_1,Flight_1,1,\"A test line.\""), TEXT("names a row shown as a label") },
+		{ TEXT("an engineer line before the Return label (Brief 31A)"), TEXT("E_Return_1_1,Return_1,1,\"A test line.\""), TEXT("never typed on the channel (a Return row)") },
+		{ TEXT("an engineer line before the Passage label (Brief 31A)"), TEXT("E_Passage_1_1,Passage_1,1,\"A test line.\""), TEXT("never typed on the channel (a Passage row)") },
 		{ TEXT("an engineer line whose name is not its columns"), TEXT("E_A1_AreaStart_1_7,A1_AreaStart_1,8,\"A test line.\""), TEXT("does not match its columns") },
 		{ TEXT("an engineer line with {jump} before a row that is no return"), TEXT("E_A1_AreaStart_1_9,A1_AreaStart_1,9,\"A test line with {jump} in it.\""), TEXT("{jump} before a row") },
 	};
 	for (const FCase& Case : EngineerCases)
 	{
 		const FString Fixture = WithLine(EngineerBase, Case.Line);
-		const FString All = FString::Join(CheckEngineerLines(Fixture, MessageBase, PrologueBase, TEXT("DT_EngineerLines.csv (fixture)")), TEXT(" | "));
+		const FString All = FString::Join(CheckEngineerLines(Fixture, MessageBase, PrologueBase, EpilogueBase, TEXT("DT_EngineerLines.csv (fixture)")), TEXT(" | "));
 		AddInfo(FString::Printf(TEXT("%s: fixture file:\n%s\nproblems: %s"), Case.What, *Fixture, *All));
 		TestTrue(FString::Printf(TEXT("%s fails with a clear message (\"%s\" in: %s)"), Case.What, Case.Expected, *All), All.Contains(Case.Expected, ESearchCase::CaseSensitive));
 	}
@@ -1107,13 +1175,14 @@ bool FTextChannelCsvCheckTest::RunTest(const FString& Parameters)
 		// Good lines before a row in the middle of a sequence, two before the same row, before a prologue line and a return.
 		FString Good = EngineerBase;
 		for (const TCHAR* Line : { TEXT("E_A1_AreaStart_2_1,A1_AreaStart_2,1,\"A test line.\""), TEXT("E_A1_AreaStart_2_2,A1_AreaStart_2,2,\"A second test line.\""),
-			TEXT("E_Door_1_1,Door_1,1,\"A test line before a prologue line.\""), TEXT("E_A1_JumpReturn_1_1,A1_JumpReturn_1,1,\"A test line with {jump} before a return.\"") })
+			TEXT("E_Door_1_1,Door_1,1,\"A test line before a prologue line.\""), TEXT("E_A1_JumpReturn_1_1,A1_JumpReturn_1,1,\"A test line with {jump} before a return.\""),
+			TEXT("E_Landing_1_1,Landing_1,1,\"A test line before a Landing line, battery {battery}.\""), TEXT("E_Chamber_1_1,Chamber_1,1,\"A test line before a Chamber line.\"") })
 		{
 			Good = WithLine(Good, Line);
 		}
-		const TArray<FString> Problems = CheckEngineerLines(Good, MessageBase, PrologueBase, TEXT("DT_EngineerLines.csv (fixture, good rows)"));
+		const TArray<FString> Problems = CheckEngineerLines(Good, MessageBase, PrologueBase, EpilogueBase, TEXT("DT_EngineerLines.csv (fixture, good rows)"));
 		AddInfo(FString::Printf(TEXT("good engineer lines: %d problems (%s)"), Problems.Num(), *FString::Join(Problems, TEXT(" | "))));
-		TestEqual(TEXT("engineer lines in the middle of a sequence, two before one row, before a prologue line and {jump} before a return are accepted"), Problems.Num(), 0);
+		TestEqual(TEXT("engineer lines in the middle of a sequence, two before one row, before a prologue line, {jump} before a return, before a Landing and a Chamber row are accepted"), Problems.Num(), 0);
 	}
 #endif
 	return true;

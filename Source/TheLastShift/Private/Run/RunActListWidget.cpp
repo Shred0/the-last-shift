@@ -28,6 +28,14 @@ void URunActListWidget::Configure(ERunActListMode InMode)
 			NewEntries.Add(Entry);
 			EntryActs.Add(Snapshot.ActIndex);
 		}
+			// Brief 31A: the return, after act 4, once it has been reached.
+			if (Run->HasReturnEntry())
+			{
+				FStdChoiceEntry Entry;
+				Entry.Label = FText::Format(LOCTEXT("ReturnEntry", "Return — {0}%"), FText::AsNumber(FMath::RoundToInt(Run->GetReturnSnapshot().BatteryFraction * 100.0)));
+				NewEntries.Add(Entry);
+				EntryActs.Add(ReturnEntry);
+			}
 	}
 	if (Mode == ERunActListMode::RunLost)
 	{
@@ -86,6 +94,11 @@ void URunActListWidget::HandleChoice(UStdChoiceListWidget* Screen, int32 Index)
 {
 	URunSubsystem* Run = URunSubsystem::Get(this);
 	const int32 Act = GetActOfEntry(Index);
+	if (Run && Act == ReturnEntry)
+	{
+		Run->RestartFromReturn();
+		return;
+	}
 	if (!Run || Act < 0)
 	{
 		return;

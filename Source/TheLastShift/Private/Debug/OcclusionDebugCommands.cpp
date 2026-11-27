@@ -7,6 +7,7 @@
 // is measured on its pixels by the test itself and saved to Saved/Screenshots/Brief12. Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
 #include "Camera/CameraComponent.h"
 #include "Containers/Ticker.h"
 #include "Engine/Engine.h"
@@ -110,6 +111,7 @@ namespace OcclusionDebug
 			GRun.Cleanup();
 			GRun.Cleanup = nullptr;
 		}
+		EntityFormTest::Restore(*GRun.Name);
 		GRun.bRunning = false;
 		UE_LOG(LogTheLastShift, Log, TEXT("%s summary (%s): %d checks passed, %d failed%s."), *GRun.Name,
 			GRun.Failed == 0 && GRun.Next >= GRun.Steps.Num() ? TEXT("PASS") : TEXT("FAIL"), GRun.Passed, GRun.Failed, Why);
@@ -854,6 +856,8 @@ namespace OcclusionDebug
 	static void StartOcclusionTest(bool bQuit, bool bShots)
 	{
 		StartRun(TEXT("OcclusionTest"), bQuit, bShots);
+		// Brief 29: the entity's figure in area 1's form for the run (put back in Finish).
+		EntityFormTest::ForceAreaOneForm(TEXT("OcclusionTest"));
 		LinesOffForRun();
 		G = FState();
 		// Values between 0 and 1 keep working as built: they are checked at 0.2; the game's value (1) has checks of its own.

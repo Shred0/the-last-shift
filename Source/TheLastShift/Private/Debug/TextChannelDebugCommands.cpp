@@ -9,6 +9,7 @@
 #include "Debug/NarrativeFixture.h"
 #include "Debug/TextTestListener.h"
 #include "Debug/TlsDebugCommon.h"
+#include "Debug/EntityFormTestScope.h"
 #include "Area/AreaGenerator.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Blueprint/WidgetTree.h"
@@ -240,8 +241,17 @@ namespace TextDebug
 		UE_LOG(LogTheLastShift, Log, TEXT("%s   ..  %s"), *GRun.Name, *What);
 	}
 
+	/** Brief 30: this run switched the entity's walls off (EntityWallsTest), to put back at its end. */
+	static bool GWallsOff = false;
+
 	static void Finish(const TCHAR* Why)
 	{
+		// Brief 30: the walls go back to the session's switch.
+		if (GWallsOff)
+		{
+			EntityWallsTest::Restore(TEXT("tls.TextChannelTest"));
+			GWallsOff = false;
+		}
 		if (GRun.Text)
 		{
 			GRun.Text->Unbind();
@@ -1318,6 +1328,12 @@ namespace TextDebug
 			return false;
 		}
 		GRun = FRun();
+		// Brief 30: no entity wall for the run (it awakens the entity and measures contacts and grazes).
+		if (!GWallsOff)
+		{
+			EntityWallsTest::SwitchOff(TEXT("tls.TextChannelTest"));
+			GWallsOff = true;
+		}
 		GRun.Name = Name;
 		GRun.Steps = MoveTemp(Steps);
 		GRun.bRunning = true;

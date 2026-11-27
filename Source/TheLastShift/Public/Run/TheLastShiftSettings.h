@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Area/AreaTypes.h"
 #include "Engine/DeveloperSettings.h"
+#include "Entity/EntityForm.h"
 #include "LidarScanComponent.h"
 #include "Narrative/NarrativeRows.h"
 #include "TextChannel/TextDegradation.h"
@@ -17,7 +18,10 @@ class USoundBase;
 class UStaticMesh;
 class UWorld;
 
-/** Per-act size of a full time jump (a contact with response Jump or RewindAndJump). A graze is GrazeJumpFraction of it. */
+/**
+ * Per-act size of a full time jump (a contact with response Jump or RewindAndJump; a graze is GrazeJumpFraction of it), and
+ * the entity's form in the act (Brief 29).
+ */
 USTRUCT(BlueprintType)
 struct THELASTSHIFT_API FActTuning
 {
@@ -30,6 +34,109 @@ struct THELASTSHIFT_API FActTuning
 	/** Home battery fraction lost by a full jump. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	double JumpBatteryDrop = 0.0;
+
+	/**
+	 * Brief 29: the form the entity's figure takes in this act (its mesh and point count: EntityForms). The one owner of the
+	 * act's form; a map outside AreaMaps (act 0) takes act 1's.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act")
+	EEntityForm EntityForm = EEntityForm::Procedural;
+
+	/**
+	 * Brief 30: the entity's walls a Stop raises in this act, at most (the limits may leave fewer). 0 switches walls off for
+	 * the act. The first is strategic, the others random (EntityForms' wall values).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 WallCount = 2;
+
+	/**
+	 * Brief 30: points of each wall in a scan. The figure, the trail, the area's residues and WallCount walls together stay
+	 * under the lidar's cap on injected points in a scan (4096); lower this, never the figure's points, where they do not.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Act", meta = (ClampMin = "10", ClampMax = "1000"))
+	int32 WallPoints = 250;
+};
+
+/** Brief 29: one modelled form of the entity's figure: the mesh its points are sampled from and how many points it has. */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FEntityFormTuning
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")
+	EEntityForm Form = EEntityForm::Procedural;
+
+	/**
+	 * The surface the figure's points are sampled from (pivot on the ground, front +X, Z up), never placed in a level and
+	 * never rendered: it needs no surface family. Its CPU copy must be kept (bAllowCPUAccess) so that a package can read it.
+	 * None, or a mesh that cannot be read: the procedural figure.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity", meta = (AllowedClasses = "/Script/Engine.StaticMesh"))
+	TSoftObjectPtr<UStaticMesh> Mesh;
+
+	/**
+	 * Points of the figure, spread evenly by area over the mesh's surface. In every area the figure, the trail and the
+	 * area's residues together stay under the lidar's cap on injected points in a scan (4096).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity", meta = (ClampMin = "10", ClampMax = "4000"))
+	int32 PointCount = 1000;
+
+	/**
+	 * Added to the mesh's yaw at the figure's place: only the sampled points turn, about the vertical through the pivot.
+	 * The figure's place, its travel and the distances of ContactRadius and GrazeRadius are measured as without it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity", meta = (ClampMin = "-180.0", ClampMax = "180.0", Units = "deg"))
+	float YawOffsetDeg = 0.f;
+
+	/** Brief 30: strands of extension that cross a wall's opening (edge to edge, floor to ceiling, side to side). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "1", ClampMax = "32"))
+	int32 WallStrands = 9;
+
+	/** How far a strand bows from its straight line, in the opening's plane, as a share of its length (0 straight, 0.5 a half circle). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float WallBow = 0.f;
+
+	/** A strand's thickness: its points are jittered this far round its line, anew for every scan. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "50.0", Units = "cm"))
+	float WallThickness = 4.f;
+};
+
+/** Brief 29: the modelled forms of the entity's figure. The one owner of the forms' meshes and point counts. */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FEntityForms
+{
+	GENERATED_BODY()
+
+	/** Off: every act shows the procedural figure (FEntityFigureShape), with its own point count. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")
+	bool bModelledFigure = true;
+
+	/**
+	 * Brief 30: the entity's walls. Off, the entity is as it was before them: no candidate chosen, no point, no collision. On,
+	 * a Stop with the entity awake raises up to its act's WallCount walls, chosen at the start of the Stop, gone when it ends.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls")
+	bool bEntityWalls = true;
+
+	/** The random walls are drawn among the candidate passages within this path distance of the player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "1.0", ClampMax = "500.0", Units = "m"))
+	float WallRangeM = 60.f;
+
+	/** No wall closer than this path distance to the player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "100.0", Units = "m"))
+	float WallMinDistanceM = 8.f;
+
+	/** A passage closer than this to a terminal or a gate's door is never a candidate, so that no device is inside a wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "2000.0", Units = "cm"))
+	float WallClearOfDevices = 200.f;
+
+	/** Thickness of the volume that blocks the player across a wall's opening while Stopped. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "5.0", ClampMax = "200.0", Units = "cm"))
+	float WallBlockDepth = 30.f;
+
+	/** One entry for each modelled form (Procedural has no entry). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")
+	TArray<FEntityFormTuning> Forms;
 };
 
 /**
@@ -476,6 +583,57 @@ struct THELASTSHIFT_API FRackLightsTuning
 };
 
 /**
+ * Brief 36B: the battery's look in its hall, read by AChamberBattery alone (and through it by the hall's monitors). The
+ * glow (the light strips of the column's tiers and spines, MI_BatteryGlow) shows home's tint (SurfaceLook.Home.Tint, read
+ * from there) lightened toward white by GlowTintShare. Its level and the speed of the brighter pulses that run along every
+ * strip (upward on the spines) follow the run's battery, linearly from the Empty values at 0 (near empty: dim and slow,
+ * never dark and never still) to the Full ones at 1. The rings between the tiers turn at RingDegreesPerSecond, each the
+ * other way from the one below it. The glow and the lit monitors are light, not surfaces: Normal time only (hidden while
+ * Stopped), never captured by a scan, lighting nothing, still behind the pause menu (the rack lights' rule).
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FBatteryLook
+{
+	GENERATED_BODY()
+
+	/** The glow's colour: home's tint lightened toward white by this share. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GlowTintShare = 0.35f;
+
+	/** The glow's emissive level at an empty battery (above 0: never dark). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.01", ClampMax = "50.0"))
+	float GlowLevelEmpty = 0.6f;
+
+	/** The glow's emissive level at a full battery. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.01", ClampMax = "50.0"))
+	float GlowLevelFull = 3.f;
+
+	/** Metres a second the pulses travel at an empty battery (above 0: never still). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.01", ClampMax = "50.0"))
+	float PulseSpeedEmpty = 0.3f;
+
+	/** Metres a second the pulses travel at a full battery. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.01", ClampMax = "50.0"))
+	float PulseSpeedFull = 2.5f;
+
+	/** Length of one pulse along its strip, metres. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.05", ClampMax = "10.0", Units = "m"))
+	float PulseLengthM = 0.6f;
+
+	/** Distance between two pulses along a strip, metres (at least the pulse's length). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.1", ClampMax = "20.0", Units = "m"))
+	float PulseSpacingM = 3.5f;
+
+	/** Degrees a second each ring turns in Normal time. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float RingDegreesPerSecond = 3.f;
+
+	/** The lit monitors' level: the glow's colour times this. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.0", ClampMax = "50.0"))
+	float ScreenLevel = 1.2f;
+};
+
+/**
  * The flashlight (Brief 21): the pawn's spot light, the one owner of its values. Normal time only (it is off while
  * Stopped). With bInverseSquaredFalloff (the physical falloff) Intensity is in lumens; without it Intensity is the
  * engine's unitless brightness, and the light falls only as (1 - (d / AttenuationRadius)^2)^FalloffExponent, flat near
@@ -607,6 +765,8 @@ enum class EGameSound : uint8
 	Energy,
 	/** A text scene goes from a line on the paradise's white to a line on black, once in a scene. */
 	Interruption,
+	/** Brief 36B: the battery's hall's hum, one loop from the battery while the hall shows (the game's one ambience). */
+	ChamberHum,
 	/** The main menu's looping track. */
 	MenuMusic,
 	Count UMETA(Hidden)
@@ -626,6 +786,7 @@ inline const TCHAR* LexToString(EGameSound Sound)
 	case EGameSound::Door: return TEXT("Door");
 	case EGameSound::Energy: return TEXT("Energy");
 	case EGameSound::Interruption: return TEXT("Interruption");
+	case EGameSound::ChamberHum: return TEXT("ChamberHum");
 	case EGameSound::MenuMusic: return TEXT("MenuMusic");
 	default: return TEXT("Unknown");
 	}
@@ -688,6 +849,13 @@ struct THELASTSHIFT_API FGameAudio
 	FGameSoundSlot Interruption;
 
 	/**
+	 * Brief 36B: the battery's hall's hum, the one ambience of the game: one looping sound from the battery, in Normal time
+	 * only, its volume and pitch following the run's battery (the Hum values below) and each aftermath of the choice.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot ChamberHum;
+
+	/**
 	 * The main menu's track; its sound wave loops. It has no volume here: its level is the file's own, and the Music volume
 	 * of StdCore's settings acts on it (StdCore's music subsystem plays it).
 	 */
@@ -717,6 +885,32 @@ struct THELASTSHIFT_API FGameAudio
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "10.0", Units = "s"))
 	float MusicFadeOutSeconds = 2.f;
 
+	/** Brief 36B: the hum is at its full level within this distance of the battery (the terminal stands inside it). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "10000.0", Units = "cm"))
+	float ChamberHumFullRadiusCm = 600.f;
+
+	/** Brief 36B: beyond ChamberHumFullRadiusCm the hum falls linearly to nothing over this distance (low in the lock). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "100.0", ClampMax = "20000.0", Units = "cm"))
+	float ChamberHumFalloffCm = 2500.f;
+
+	/** Brief 36B: the hum fades out over this at a Stop and back in over it at the return to Normal time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.01", ClampMax = "5.0", Units = "s"))
+	float ChamberHumFadeSeconds = 0.15f;
+
+	/** Brief 36B: the hum's volume (times its slot's) at an empty battery (above 0: never silent before the choice) and at a full one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.01", ClampMax = "4.0"))
+	float HumVolumeEmpty = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.01", ClampMax = "4.0"))
+	float HumVolumeFull = 1.f;
+
+	/** Brief 36B: the hum's pitch at an empty battery (low) and at a full one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.4", ClampMax = "2.0"))
+	float HumPitchEmpty = 0.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.4", ClampMax = "2.0"))
+	float HumPitchFull = 1.f;
+
 	/** The slot of an effect; null for MenuMusic (and Count), which has no volume. */
 	const FGameSoundSlot* FindEffect(EGameSound Sound) const;
 	FGameSoundSlot* FindEffect(EGameSound Sound);
@@ -733,6 +927,15 @@ struct THELASTSHIFT_API FGameAudio
 	float GetWorldFalloffCm() const { return FMath::Clamp(WorldFalloffCm, 100.f, 20000.f); }
 	float GetMusicFadeInSeconds() const { return FMath::Clamp(MusicFadeInSeconds, 0.f, 10.f); }
 	float GetMusicFadeOutSeconds() const { return FMath::Clamp(MusicFadeOutSeconds, 0.f, 10.f); }
+	float GetChamberHumFullRadiusCm() const { return FMath::Clamp(ChamberHumFullRadiusCm, 0.f, 10000.f); }
+	float GetChamberHumFalloffCm() const { return FMath::Clamp(ChamberHumFalloffCm, 100.f, 20000.f); }
+	float GetChamberHumFadeSeconds() const { return FMath::Clamp(ChamberHumFadeSeconds, 0.01f, 5.f); }
+
+	/** Brief 36B: the hum's volume share and pitch at a battery fraction (the Hum values, clamped, linear in between). */
+	float GetHumVolumeAt(float Battery) const { return FMath::Lerp(FMath::Clamp(HumVolumeEmpty, 0.01f, 4.f), FMath::Clamp(HumVolumeFull, 0.01f, 4.f), FMath::Clamp(Battery, 0.f, 1.f)); }
+	float GetHumPitchAt(float Battery) const { return FMath::Lerp(FMath::Clamp(HumPitchEmpty, 0.4f, 2.f), FMath::Clamp(HumPitchFull, 0.4f, 2.f), FMath::Clamp(Battery, 0.f, 1.f)); }
+	float GetHumVolumeFull() const { return FMath::Clamp(HumVolumeFull, 0.01f, 4.f); }
+	float GetHumPitchFull() const { return FMath::Clamp(HumPitchFull, 0.4f, 2.f); }
 };
 
 /**
@@ -778,6 +981,10 @@ public:
 	/** Jump tuning of any map outside AreaMaps (TestLidar, AreaTest). */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Test")
 	FActTuning TestActTuning;
+
+	/** Brief 29: the modelled forms of the entity's figure (each act picks its own in ActTuning). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Entity")
+	FEntityForms EntityForms;
 
 	/** A graze (a voluntary Resume with the figure within the entity's GrazeRadius) jumps by this fraction of the act's values. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Home", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -945,6 +1152,81 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
 	TSoftObjectPtr<UDataTable> PrologueTable;
 
+	/**
+	 * Brief 31A: the home AI's lines on the way home (FPrologueRow, groups Return, Landing, Passage, Chamber: EpilogueGroups),
+	 * imported from Narrative/DT_Epilogue.csv.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Narrative", meta = (AllowedClasses = "/Script/Engine.DataTable"))
+	TSoftObjectPtr<UDataTable> EpilogueTable;
+
+	/**
+	 * Brief 31A: the way home. On: area 4's exit travels to PrologueHomeMap in its return state (the flight back), whose
+	 * corridor opens the ending; the return is a fifth entry of the run after the four areas'. Off: area 4's exit opens the
+	 * ending as before, PrologueHomeMap is only ever in its departure state, and no return entry is taken, offered or restored.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	bool bReturnHome = true;
+
+	/**
+	 * The battery's chamber. On (with the way home on and ChamberMap set): the exit of the way home's corridor travels to
+	 * ChamberMap behind the travel screen (the first Passage row of the epilogue table as its label), where the ending is
+	 * chosen in the dialog of its one terminal. Off: the corridor's exit opens the ending's list, as with the way home alone.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	bool bChoiceChamber = true;
+
+	/** The battery's chamber: one closed room of home's pieces, outside the run (no act, no snapshot of its own). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	TSoftObjectPtr<UWorld> ChamberMap;
+
+	/**
+	 * Seconds of the run's clock a button of the chamber's choice dialog is held (the mouse button kept down on it, or the
+	 * confirm key while it is focused) before its ending is chosen. Read only by the dialog's buttons.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.2", ClampMax = "10.0", Units = "s"))
+	float ChoiceHoldSeconds = 3.f;
+
+	/** Brief 36B: the reach of the chamber's terminal (AChoiceTerminal), from its centre on the floor: from 2 m in front of it. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "50.0", ClampMax = "1000.0", Units = "cm"))
+	float ChoiceTerminalReachCm = 230.f;
+
+	/** Brief 36B: the lock's panel opens by itself this long (run's clock, Normal time) after the travel screen is gone. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float LockOpenDelaySeconds = 1.f;
+
+	/** Brief 36B: the lock's panel slides open over this, then stays open. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.2", ClampMax = "30.0", Units = "s"))
+	float LockOpenSeconds = 2.f;
+
+	/**
+	 * Brief 36B: after a choice is held through, the hall answers for this long (run's clock, Normal time) before the
+	 * ending opens: Inject, the battery is fed; Open, the structure lets go. Nothing answers the player during it.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float ChoiceAftermathSeconds = 3.f;
+
+	/** Brief 36B: Inject drives the glow and the hum past their full values by this share at the aftermath's end. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float AftermathSurge = 0.5f;
+
+	/** Brief 36B: Open brings the hall's lights down to this share of their level by the aftermath's end. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AftermathLightShare = 0.15f;
+
+	/** Brief 36B: the battery's look in its hall; the one owner of its values. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	FBatteryLook BatteryLook;
+
+	/** BatteryLook, every value clamped (the Full values at least the Empty ones, the spacing at least the pulse). */
+	FBatteryLook GetBatteryLook() const;
+
+	float GetChoiceTerminalReachCm() const { return FMath::Clamp(ChoiceTerminalReachCm, 50.f, 1000.f); }
+	float GetLockOpenDelaySeconds() const { return FMath::Clamp(LockOpenDelaySeconds, 0.f, 30.f); }
+	float GetLockOpenSeconds() const { return FMath::Clamp(LockOpenSeconds, 0.2f, 30.f); }
+	float GetChoiceAftermathSeconds() const { return FMath::Clamp(ChoiceAftermathSeconds, 0.f, 30.f); }
+	float GetAftermathSurge() const { return FMath::Clamp(AftermathSurge, 0.f, 4.f); }
+	float GetAftermathLightShare() const { return FMath::Clamp(AftermathLightShare, 0.f, 1.f); }
+
 	/** Normal-time seconds the arrival hangar's hatch takes to close once the player has left the ship. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))
 	float HatchCloseSeconds = 4.f;
@@ -1011,6 +1293,18 @@ public:
 	/** bPrologueMaps, with both prologue maps set. */
 	bool ArePrologueMapsOn() const { return bPrologueMaps && !PrologueHomeMap.IsNull() && !PrologueArrivalMap.IsNull(); }
 
+	/** bReturnHome, with the home map set. */
+	bool IsReturnHomeOn() const { return bReturnHome && !PrologueHomeMap.IsNull(); }
+
+	/** bChoiceChamber, with the way home on and the chamber's map set. */
+	bool IsChoiceChamberOn() const { return bChoiceChamber && IsReturnHomeOn() && !ChamberMap.IsNull(); }
+
+	/** True for the battery's chamber's map (ChamberMap; PIE prefix ignored). */
+	bool IsChamberMap(const FString& PackageName) const;
+
+	/** ChoiceHoldSeconds, clamped. */
+	float GetChoiceHoldSeconds() const { return FMath::Clamp(ChoiceHoldSeconds, 0.2f, 10.f); }
+
 	/** 1 for the prologue's home map, 2 for its arrival map (PIE prefix ignored), 0 for any other map. */
 	int32 GetPrologueStageOfMap(const FString& PackageName) const;
 
@@ -1041,6 +1335,12 @@ public:
 
 	/** PrologueTable, loaded (null when unset or missing). */
 	UDataTable* LoadPrologueTable() const;
+
+	/** EpilogueTable, loaded (null when unset or missing). */
+	UDataTable* LoadEpilogueTable() const;
+
+	/** The table a group of home AI lines lives in: EpilogueTable for the epilogue's groups (EpilogueGroups), else PrologueTable. */
+	UDataTable* LoadGroupTable(FName Group) const;
 
 	/** Level of the home AI's text at a battery fraction, with the thresholds of TextDegradation (clamped). */
 	ETextDegradation GetTextLevel(double BatteryFraction) const;
@@ -1105,6 +1405,12 @@ public:
 
 	/** Jump tuning of Act (1-4), or the test tuning for 0, with every value clamped; false when the act has none. */
 	bool GetActTuning(int32 Act, FActTuning& OutTuning) const;
+
+	/** The entity's form in Act (ActTuning's EntityForm); act 0 (a map outside AreaMaps) and an act with no entry take act 1's. */
+	EEntityForm GetEntityFormOfAct(int32 Act) const;
+
+	/** The entry of a modelled form in EntityForms, or null (Procedural, or a form with no entry). */
+	const FEntityFormTuning* FindEntityForm(EEntityForm Form) const;
 
 	/** GrazeJumpFraction, clamped to [0, 1]. */
 	float GetGrazeJumpFraction() const { return FMath::Clamp(GrazeJumpFraction, 0.f, 1.f); }

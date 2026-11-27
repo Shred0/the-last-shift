@@ -2,6 +2,7 @@
 
 #include "Blueprint/WidgetTree.h"
 #include "Components/Button.h"
+#include "Components/CheckBox.h"
 #include "Components/InputKeySelector.h"
 #include "Components/Slider.h"
 #include "Engine/GameViewportClient.h"
@@ -169,10 +170,10 @@ namespace StdScreenFocus
 {
 	bool IsInteractive(const UWidget* Widget)
 	{
-		return Widget->IsA<UButton>() || Widget->IsA<USlider>() || Widget->IsA<UInputKeySelector>();
+		return Widget->IsA<UButton>() || Widget->IsA<USlider>() || Widget->IsA<UInputKeySelector>() || Widget->IsA<UCheckBox>();
 	}
 
-	/** Buttons, sliders and key selectors of the tree, including those inside nested user widgets (key binding rows). */
+	/** Buttons, sliders, check boxes and key selectors of the tree, including those inside nested user widgets (key binding rows). */
 	void CollectInteractive(const UWidgetTree* Tree, TArray<UWidget*>& OutWidgets)
 	{
 		if (!Tree)
@@ -270,6 +271,15 @@ void UStdScreenWidget::SetHighlighted(UWidget* Widget)
 		Style.SetNormalThumbImage(Style.HoveredThumbImage);
 		Slider->SetWidgetStyle(Style);
 	}
+	else if (UCheckBox* CheckBox = Cast<UCheckBox>(Widget))
+	{
+		HighlightedCheckBoxStyle = CheckBox->GetWidgetStyle();
+		FCheckBoxStyle Style = HighlightedCheckBoxStyle;
+		Style.SetUncheckedImage(Style.UncheckedHoveredImage);
+		Style.SetCheckedImage(Style.CheckedHoveredImage);
+		Style.SetUndeterminedImage(Style.UndeterminedHoveredImage);
+		CheckBox->SetWidgetStyle(Style);
+	}
 	HighlightedWidget = Widget;
 }
 
@@ -293,6 +303,10 @@ void UStdScreenWidget::ResetFocusHighlight()
 	else if (USlider* Slider = Cast<USlider>(Widget))
 	{
 		Slider->SetWidgetStyle(HighlightedSliderStyle);
+	}
+	else if (UCheckBox* CheckBox = Cast<UCheckBox>(Widget))
+	{
+		CheckBox->SetWidgetStyle(HighlightedCheckBoxStyle);
 	}
 }
 
