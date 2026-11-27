@@ -121,6 +121,38 @@ FBatteryLook UTheLastShiftSettings::GetBatteryLook() const
 	return T;
 }
 
+FMenuBackdropTuning UTheLastShiftSettings::GetMenuBackdropTuning() const
+{
+	const FMenuBackdropTuning& In = MenuBackdrop;
+	FMenuBackdropTuning T;
+	T.bMenuBackdrop = In.bMenuBackdrop;
+	T.PulseSeconds = FMath::Clamp(In.PulseSeconds, 1.f, 60.f);
+	T.FirstPulseSeconds = FMath::Clamp(In.FirstPulseSeconds, 0.f, 60.f);
+	T.ParticleCount = FMath::Clamp(In.ParticleCount, 0, 4000);
+	T.FieldRadius = FMath::Clamp(In.FieldRadius, 1.5f, 40.f);
+	T.StepShare = FMath::Clamp(In.StepShare, 0.01f, 5.f);
+	// Every particle answers a pulse before the next: the wave crosses the field within half a pulse, and what a pulse
+	// starts (a step, a glow, a fade) lasts at most 0.45 of a pulse after the wave reaches it.
+	T.WaveSpeed = FMath::Max(FMath::Clamp(In.WaveSpeed, 0.1f, 200.f), T.FieldRadius / (0.5f * T.PulseSeconds));
+	const float Most = 0.45f * T.PulseSeconds;
+	T.StepSeconds = FMath::Clamp(In.StepSeconds, 0.01f, Most);
+	T.ParticleGlowSeconds = FMath::Clamp(In.ParticleGlowSeconds, 0.01f, Most);
+	T.StructureGlowSeconds = FMath::Clamp(In.StructureGlowSeconds, 0.01f, Most);
+	T.FadeSeconds = FMath::Clamp(In.FadeSeconds, 0.01f, Most);
+	T.SpinDegreesPerSecond = FMath::Clamp(In.SpinDegreesPerSecond, -360.f, 360.f);
+	T.TiltDegrees = FMath::Clamp(In.TiltDegrees, -90.f, 90.f);
+	T.RollDegrees = FMath::Clamp(In.RollDegrees, -180.f, 180.f);
+	T.StructureScreenShare = FMath::Clamp(In.StructureScreenShare, 0.01f, 0.5f);
+	T.PointsPerEdge = FMath::Clamp(In.PointsPerEdge, 2, 200);
+	T.PointSize = FMath::Clamp(In.PointSize, 1.f, 20.f);
+	T.ParticleRestLevel = FMath::Clamp(In.ParticleRestLevel, 0.f, 1.f);
+	T.ParticlePeakLevel = FMath::Clamp(In.ParticlePeakLevel, T.ParticleRestLevel, 1.f);
+	T.StructureRestLevel = FMath::Clamp(In.StructureRestLevel, 0.f, 1.f);
+	T.StructurePeakLevel = FMath::Clamp(In.StructurePeakLevel, T.StructureRestLevel, 1.f);
+	T.Seed = FMath::Clamp(In.Seed, 0, 1000000);
+	return T;
+}
+
 FHologramTuning UTheLastShiftSettings::GetHologramTuning() const
 {
 	FHologramTuning T;

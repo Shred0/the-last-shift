@@ -634,6 +634,111 @@ struct THELASTSHIFT_API FBatteryLook
 };
 
 /**
+ * The main menu's moving background (the one owner of its values): the structure, an octahedron of points along its
+ * twelve edges, turning in the void at the centre of the picture, and a field of particles round it, still between two
+ * pulses. Every PulseSeconds (the first FirstPulseSeconds after the menu shows) a pulse leaves the structure: its points
+ * brighten to StructurePeakLevel and settle back over StructureGlowSeconds, and a wave, never drawn, grows from the centre
+ * at WaveSpeed; as it reaches a particle the particle brightens to ParticlePeakLevel (back to ParticleRestLevel over
+ * ParticleGlowSeconds) and takes one step of StepShare toward the centre over StepSeconds, quick at first, then
+ * settling. A particle whose next step would take it into the structure (its distance under 1) fades out where it stands
+ * over FadeSeconds while it comes back at the field's outer edge fading in over the same time. Lengths are in the
+ * structure's radius (its vertices at 1), the field reaches FieldRadius; the picture's scale is StructureScreenShare of the
+ * picture's height. Levels multiply home's tint (SurfaceLook.Home.Tint, read from there). The picture depends on these
+ * values and on the time since the menu showed only (URunMainMenuWidget's UMenuBackdropWidget). With bMenuBackdrop off
+ * the main menu is as it was before the background existed.
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FMenuBackdropTuning
+{
+	GENERATED_BODY()
+
+	/** The background behind the main menu and the screens opened from it; off: the menu as before. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop")
+	bool bMenuBackdrop = true;
+
+	/** Seconds from a pulse to the next. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "1.0", ClampMax = "60.0", Units = "s"))
+	float PulseSeconds = 5.f;
+
+	/** Seconds from the menu showing to the first pulse. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.0", ClampMax = "60.0", Units = "s"))
+	float FirstPulseSeconds = 1.f;
+
+	/**
+	 * How fast the wave grows, in structure radii a second. Raised, if needed, so that it crosses the field within half a
+	 * pulse (each particle answers each pulse before the next).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.1", ClampMax = "200.0"))
+	float WaveSpeed = 3.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0", ClampMax = "4000"))
+	int32 ParticleCount = 340;
+
+	/** The field's outer edge, in structure radii. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "1.5", ClampMax = "40.0"))
+	float FieldRadius = 6.2f;
+
+	/** A particle's step toward the centre at each pulse, in structure radii. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.01", ClampMax = "5.0"))
+	float StepShare = 0.38f;
+
+	/** Seconds a step takes (at most 0.45 of a pulse). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.01", ClampMax = "27.0", Units = "s"))
+	float StepSeconds = 0.9f;
+
+	/** The structure's turn about its own upright axis, constant. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "-360.0", ClampMax = "360.0"))
+	float SpinDegreesPerSecond = 9.f;
+
+	/** The structure's upright axis leaned toward the viewer by this, then turned in the picture's plane by RollDegrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "-90.0", ClampMax = "90.0"))
+	float TiltDegrees = 24.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "-180.0", ClampMax = "180.0"))
+	float RollDegrees = 12.f;
+
+	/** The structure's radius on screen, as a share of the picture's height. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.01", ClampMax = "0.5"))
+	float StructureScreenShare = 0.085f;
+
+	/** Points along each of the twelve edges, its two vertices included. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "2", ClampMax = "200"))
+	int32 PointsPerEdge = 15;
+
+	/** A point's side, in pixels of a 1080 pixel high picture (scaled with the picture). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "1.0", ClampMax = "20.0"))
+	float PointSize = 3.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ParticleRestLevel = 0.14f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ParticlePeakLevel = 0.9f;
+
+	/** Seconds from a particle's peak back to its rest (at most 0.45 of a pulse). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.01", ClampMax = "27.0", Units = "s"))
+	float ParticleGlowSeconds = 1.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StructureRestLevel = 0.42f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StructurePeakLevel = 0.7f;
+
+	/** Seconds from the structure's brightening at a pulse back to its rest (at most 0.45 of a pulse). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.01", ClampMax = "27.0", Units = "s"))
+	float StructureGlowSeconds = 1.2f;
+
+	/** Seconds a particle that reaches the structure takes to fade out, and its successor at the edge to fade in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0.01", ClampMax = "27.0", Units = "s"))
+	float FadeSeconds = 0.8f;
+
+	/** The field's draw: the same seed, the same field. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MenuBackdrop", meta = (ClampMin = "0", ClampMax = "1000000"))
+	int32 Seed = 42;
+};
+
+/**
  * The flashlight (Brief 21): the pawn's spot light, the one owner of its values. Normal time only (it is off while
  * Stopped). With bInverseSquaredFalloff (the physical falloff) Intensity is in lumens; without it Intensity is the
  * engine's unitless brightness, and the light falls only as (1 - (d / AttenuationRadius)^2)^FalloffExponent, flat near
@@ -1219,6 +1324,13 @@ public:
 
 	/** BatteryLook, every value clamped (the Full values at least the Empty ones, the spacing at least the pulse). */
 	FBatteryLook GetBatteryLook() const;
+
+	/** The main menu's moving background: the one owner of its values. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Menu")
+	FMenuBackdropTuning MenuBackdrop;
+
+	/** MenuBackdrop, every value clamped; the wave crossing the field within half a pulse, the step, the glows and the fade each within 0.45 of a pulse. */
+	FMenuBackdropTuning GetMenuBackdropTuning() const;
 
 	float GetChoiceTerminalReachCm() const { return FMath::Clamp(ChoiceTerminalReachCm, 50.f, 1000.f); }
 	float GetLockOpenDelaySeconds() const { return FMath::Clamp(LockOpenDelaySeconds, 0.f, 30.f); }

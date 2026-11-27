@@ -11,9 +11,11 @@
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
+#include "Run/MenuBackdropWidget.h"
 #include "Run/RunActListWidget.h"
 #include "Run/RunSceneSubsystem.h"
 #include "Run/RunSubsystem.h"
+#include "Run/TheLastShiftSettings.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunMainMenuWidget)
 
@@ -109,6 +111,28 @@ void URunMainMenuWidget::NativeConstruct()
 		Run->OnSnapshotsChanged.AddUniqueDynamic(this, &URunMainMenuWidget::RefreshEntries);
 	}
 	RefreshEntries();
+	RefreshBackdrop();
+}
+
+void URunMainMenuWidget::RefreshBackdrop()
+{
+	const bool bOn = UTheLastShiftSettings::Get()->GetMenuBackdropTuning().bMenuBackdrop;
+	if (bOn && !Backdrop)
+	{
+		Backdrop = CreateWidget<UMenuBackdropWidget>(GetOwningPlayer(), UMenuBackdropWidget::StaticClass());
+		if (Backdrop)
+		{
+			Backdrop->SetMenu(this);
+			// Under every screen: the menu and what opens from it stand on it.
+			Backdrop->AddToViewport(UMenuBackdropWidget::ViewportZOrder);
+		}
+	}
+	else if (!bOn && Backdrop)
+	{
+		// Gives the screens' backdrops back as it goes.
+		Backdrop->RemoveFromParent();
+		Backdrop = nullptr;
+	}
 }
 
 void URunMainMenuWidget::NativeDestruct()
@@ -116,6 +140,11 @@ void URunMainMenuWidget::NativeDestruct()
 	if (URunSubsystem* Run = URunSubsystem::Get(this))
 	{
 		Run->OnSnapshotsChanged.RemoveDynamic(this, &URunMainMenuWidget::RefreshEntries);
+	}
+	if (Backdrop)
+	{
+		Backdrop->RemoveFromParent();
+		Backdrop = nullptr;
 	}
 	Super::NativeDestruct();
 }
