@@ -32,6 +32,7 @@
 #include "Settings/StdProjectSettings.h"
 #include "UI/StdMainMenuWidget.h"
 #include "TheLastShift.h"
+#include "Time/HomeStateSubsystem.h"
 #include "Time/TimeStateSubsystem.h"
 
 #if !UE_BUILD_SHIPPING
@@ -304,8 +305,16 @@ namespace RunDebug
 		double PhaseReal = 0.0;
 		/** Arrivals in the main menu that press Play again instead of ending the test. */
 		int32 ReplaysLeft = 0;
-		/** The pending travel leaves the last area: the main menu must open the ending (Brief 9). */
+		/** The pending travel leaves the last area: the main menu must open the ending (Brief 9), or, with the way home on, home's map in its return state (Brief 35). */
 		bool bFromLastArea = false;
+		/** Brief 35: the arrival in home's return state ends the test. */
+		bool bEndAtReturn = false;
+		/** Brief 35: the run's state as it was on leaving the last area (battery, home time, banked energy, entity found, first contact). */
+		double LeftBattery = 0.0;
+		double LeftHomeSeconds = 0.0;
+		int32 LeftBanked = 0;
+		bool bLeftFound = false;
+		bool bLeftContact = false;
 	};
 	static FChain GChain;
 
@@ -354,6 +363,32 @@ namespace RunDebug
 		const int32 Act = Run ? Run->GetActIndex() : -1;
 		const AAreaGenerator* Gen = AAreaGenerator::Find(World);
 		++GChain.Arrivals;
+		// Brief 35: since the way home (Brief 31A), with bReturnHome on the last area's exit flies to home's map in its return
+		// state. The test checks that arrival, with the run's state as it was on leaving the last area, and ends there (the rest of
+		// the way is tls.ReturnCheck's).
+		if (!Gen && GChain.bFromLastArea && UTheLastShiftSettings::Get()->IsReturnHomeOn())
+		{
+			const FString Home = UTheLastShiftSettings::Get()->PrologueHomeMap.ToSoftObjectPath().GetLongPackageName();
+			const UHomeStateSubsystem* HomeState = UHomeStateSubsystem::Get(World);
+			const UEnergySubsystem* Energy = UEnergySubsystem::Get(World);
+			ChainCheck(Map == Home && Act == 0 && Run && Run->IsReturningHome() && URunSubsystem::IsReturnStateOf(World),
+				FString::Printf(TEXT("arrival %d: %s, act %d, on its way home %d, return state %d (expected %s in its return state: bReturnHome on)"), GChain.Arrivals, *Map, Act,
+					Run && Run->IsReturningHome() ? 1 : 0, URunSubsystem::IsReturnStateOf(World) ? 1 : 0, *Home));
+			const double Battery = HomeState ? HomeState->GetBatteryFraction() : -1.0;
+			const double HomeSeconds = HomeState ? HomeState->GetHomeSecondsElapsed() : -1.0;
+			const int32 Banked = Energy ? Energy->GetBankedEnergy() : -1;
+			const bool bFound = Run && Run->IsEntityFound();
+			const bool bContact = Run && Run->HasFirstContact();
+			ChainCheck(FMath::IsNearlyEqual(Battery, GChain.LeftBattery, 1e-6) && FMath::IsNearlyEqual(HomeSeconds, GChain.LeftHomeSeconds, 1e-3) && Banked == GChain.LeftBanked
+				&& bFound == GChain.bLeftFound && bContact == GChain.bLeftContact,
+				FString::Printf(TEXT("arrival %d: the run's state as it was on leaving the last area (battery %.4f / %.4f, home time %.1f / %.1f s, banked %d / %d, found %d / %d, first contact %d / %d)"),
+					GChain.Arrivals, Battery, GChain.LeftBattery, HomeSeconds, GChain.LeftHomeSeconds, Banked, GChain.LeftBanked, bFound ? 1 : 0, GChain.bLeftFound ? 1 : 0,
+					bContact ? 1 : 0, GChain.bLeftContact ? 1 : 0));
+			CheckInput(World, true, FString::Printf(TEXT("arrival %d (%s, return state)"), GChain.Arrivals, *Map));
+			GChain.bFromLastArea = false;
+			GChain.bEndAtReturn = true;
+			return;
+		}
 		if (!Gen)
 		{
 			const FString Menu = UStdProjectSettings::Get()->MainMenuMap.ToSoftObjectPath().GetLongPackageName();
@@ -441,6 +476,11 @@ namespace RunDebug
 			GChain.ArrivedReal = Now;
 			ReportArrival(World);
 			GChain.PausePhase = 0;
+			if (GChain.bEndAtReturn)
+			{
+				FinishChain(TEXT("home's map in its return state reached"));
+				return false;
+			}
 			if (!Gen)
 			{
 				if (GChain.ReplaysLeft > 0)
@@ -506,10 +546,21 @@ namespace RunDebug
 		const int32 Act = Run ? Run->GetActIndex() : -1;
 		GChain.ExpectedAct = Act >= UTheLastShiftSettings::Get()->AreaMaps.Num() ? 0 : Act + 1;
 		GChain.bFromLastArea = GChain.ExpectedAct == 0;
+		if (GChain.bFromLastArea)
+		{
+			const UHomeStateSubsystem* HomeState = UHomeStateSubsystem::Get(World);
+			const UEnergySubsystem* Energy = UEnergySubsystem::Get(World);
+			GChain.LeftBattery = HomeState ? HomeState->GetBatteryFraction() : -1.0;
+			GChain.LeftHomeSeconds = HomeState ? HomeState->GetHomeSecondsElapsed() : -1.0;
+			GChain.LeftBanked = Energy ? Energy->GetBankedEnergy() : -1;
+			GChain.bLeftFound = Run && Run->IsEntityFound();
+			GChain.bLeftContact = Run && Run->HasFirstContact();
+		}
 		--GChain.TravelsLeft;
 		GChain.StartReal = Now;
 		UE_LOG(LogTheLastShift, Display, TEXT("tls.RunChainTest: tls.Travel.Next from act %d (expecting %s)."), Act,
-			GChain.ExpectedAct > 0 ? *FString::Printf(TEXT("act %d"), GChain.ExpectedAct) : TEXT("the main menu"));
+			GChain.ExpectedAct > 0 ? *FString::Printf(TEXT("act %d"), GChain.ExpectedAct)
+				: (UTheLastShiftSettings::Get()->IsReturnHomeOn() ? TEXT("home's map in its return state") : TEXT("the main menu")));
 		if (!Run || !Run->TravelToNextArea())
 		{
 			ChainCheck(false, FString::Printf(TEXT("travel from act %d accepted"), Act));
@@ -662,7 +713,7 @@ namespace RunDebug
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsRunChainTestCommand(
 	TEXT("tls.RunChainTest"),
-	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0] [PauseCheck=1] [Replays=0]: FromMenu=1 first clicks the main menu's New game once no transition is running (this clears the saved run). On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, and checks the input state (game input in an area, menu input in the menu); with PauseCheck=1 it then opens and closes the pause menu, checking the input each way; then calls tls.Travel.Next until Travels are done; a travel after the last area must reach the main menu and open the ending there (the test chooses its first entry and skips its text, then checks the main menu and its input), where Replays>0 clicks New game again that many times. New game skips the prologue at once. Quit=1 exits the game at the end (packaged builds)."),
+	TEXT("tls.RunChainTest [Travels=4] [FromMenu=0] [Quit=0] [PauseCheck=1] [Replays=0]: FromMenu=1 first clicks the main menu's New game once no transition is running (this clears the saved run). On every arrival (area ready, transition over) logs map, act, seed, hash, route, PCG instances, time to ready, validation and the entity's ContactResponse, and checks the input state (game input in an area, menu input in the menu); with PauseCheck=1 it then opens and closes the pause menu, checking the input each way; then calls tls.Travel.Next until Travels are done; a travel after the last area must reach, with the way home on (bReturnHome), home's map in its return state with the run's state as it was on leaving the last area and game input, where the test ends (Brief 35; the rest of the way is tls.ReturnCheck's), and with it off the main menu with the ending open there (the test chooses its first entry and skips its text, then checks the main menu and its input), where Replays>0 clicks New game again that many times. New game skips the prologue at once. Quit=1 exits the game at the end (packaged builds)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		UWorld* World = TimeStateDebug::ResolveGameWorld(InWorld);

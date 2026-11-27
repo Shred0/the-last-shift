@@ -8,6 +8,7 @@
 #include "Run/TheLastShiftSettings.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "TextChannel/TextChannelComponent.h"
+#include "Containers/Ticker.h"
 #include "Time/TimeState.h"
 #include "GameAudioSubsystem.generated.h"
 
@@ -16,6 +17,7 @@ class UAudioComponent;
 class ALogTerminal;
 class APowerTerminal;
 class UScanDirectorComponent;
+class UStdTextSceneWidget;
 class UWorld;
 struct FActorsInitializedParams;
 
@@ -75,7 +77,11 @@ struct THELASTSHIFT_API FGameSoundRequest
  *   pitch 1), APrologueSlidingPanel and APrologueHatch (Door at HatchPitch), APowerTerminal::OnAnyActivated and
  *   ALogTerminal::OnRead (Terminal).
  * - The suit's: AResidue::OnCollected (Energy), UTextChannelComponent::OnTypingStarted (Line), the text scenes' lines
- *   (Line) and their first change from the paradise's white to black (Interruption, once in a scene).
+ *   (Line) and their first change from the paradise's white to black (Interruption, once in a scene). Brief 35: the
+ *   interruption's noise lasts as long as the static at that cut: it starts with it, is held (played again while it lasts
+ *   when shorter) for the static's StaticSeconds and fades out with the static's own fade over StaticFadeSeconds (its volume
+ *   follows the static's strength, read from the text scene screen: UStdTextSceneWidget::GetEffectOpacity), and stops
+ *   with it whenever the static ends early (the next line, the scene skipped or closed).
  * - The main menu's music (MenuMusic, through StdCore's music subsystem): on while the main menu map shows its menu, off
  *   (faded over MusicFadeOutSeconds) when a text scene's screen opens over it (the opening scene, the ending), when a
  *   travel leaves it, and in every other map.
@@ -134,6 +140,18 @@ public:
 
 	/** Times the sound of Mover's current or last timed motion was played (1 + its loops). */
 	int32 GetMotionPlays(const AActor* Mover) const { return MotionPlays.FindRef(Mover); }
+
+	/** Brief 35: the interruption's noise is held now (from the static's start to the end of its fade, or until it ends early). */
+	bool IsInterruptionHeld() const { return bInterruptionHeld; }
+
+	/** Brief 35: the interruption's noise is playing now. */
+	bool IsInterruptionPlaying() const;
+
+	/** Brief 35: times the current or last interruption's noise was played (1 + its loops). */
+	int32 GetInterruptionPlays() const { return InterruptionPlays; }
+
+	/** Brief 35: the share of its slot's volume the interruption's noise plays at now (the static's strength). */
+	float GetInterruptionShare() const { return InterruptionShare; }
 
 private:
 	void HandleWorldInitializedActors(const FActorsInitializedParams& Params);
@@ -196,6 +214,18 @@ private:
 	/** Starts or stops the menu's music to match the state now. */
 	void UpdateMusic(const TCHAR* Why);
 
+	/** Brief 35: holds the interruption's noise with the static of Screen's line Index (its sound already asked for). */
+	void HoldInterruption(UStdTextSceneWidget* Screen, int32 Index, const FString& Source);
+
+	/** Brief 35: follows the static every frame: its strength sets the noise's volume; its end, or the line's, stops it. */
+	bool TickInterruption(float DeltaSeconds);
+
+	/** Brief 35: a held interruption's noise finished before the static: played again while the static lasts. */
+	void HandleInterruptionFinished(UAudioComponent* Component);
+
+	/** Brief 35: stops the interruption's noise (recorded as a stop with Why). */
+	void ReleaseInterruption(const TCHAR* Why);
+
 	/** The world is the main menu map (StdCore's MainMenuMap). */
 	static bool IsMenuWorld(const UWorld* World);
 
@@ -216,6 +246,18 @@ private:
 	FName SceneName;
 	bool bSceneLastWhite = false;
 	bool bSceneInterrupted = false;
+
+	/** Brief 35: the interruption's noise held with the static: its component, the screen and line it follows, its plays. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> InterruptionSound;
+	TWeakObjectPtr<UStdTextSceneWidget> InterruptionScreen;
+	int32 InterruptionIndex = INDEX_NONE;
+	int32 InterruptionPlays = 0;
+	float InterruptionShare = 0.f;
+	float InterruptionVolume = 1.f;
+	double InterruptionStartReal = 0.0;
+	bool bInterruptionHeld = false;
+	FTSTicker::FDelegateHandle InterruptionTicker;
 
 	bool bMusicOn = false;
 

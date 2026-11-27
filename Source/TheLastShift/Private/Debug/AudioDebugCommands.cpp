@@ -393,8 +393,12 @@ namespace AudioDebug
 	/** Brief 30: this run switched the entity's walls off (EntityWallsTest), to put back at its end. */
 	static bool GWallsOff = false;
 
+	static void RestoreStaticValues();
+
 	static void Finish(const TCHAR* Why)
 	{
+		// Brief 35: the static's values back to the settings', when a case set them for the session.
+		RestoreStaticValues();
 		// Brief 30: the walls go back to the session's switch.
 		if (GWallsOff)
 		{
@@ -822,9 +826,17 @@ namespace AudioDebug
 			MarkRecord();
 			return 0.f;
 		}));
+		// The director's cooldown ends on the run's clock; the ready signal goes out from the director's own tick, which may
+		// come after this test's in the frame the cooldown ends: the check waits for the end of the director's cooldown, then
+		// a margin of a quarter of a second (several frames) after it.
 		S.Add(WaitFor(TEXT("menu: the cooldown goes on after the menu"), []() { return Director()->IsScanReady(); }, 8.f, []()
 		{
-			Check(Count(EGameSound::ScanReady) == 1, FString::Printf(TEXT("menu: the run's sounds come back with it: the ready signal once the cooldown ends after the menu: %s"),
+			Note(FString::Printf(TEXT("menu: the director's cooldown has ended (%.3f s left); the check waits 0.25 s more"), Director()->GetCooldownRemaining()));
+			return 0.25f;
+		}));
+		S.Add(Do(TEXT("menu: the ready signal after the cooldown"), []()
+		{
+			Check(Count(EGameSound::ScanReady) == 1, FString::Printf(TEXT("menu: the run's sounds come back with it: the ready signal once the cooldown ends after the menu (checked 0.25 s after the director's cooldown ended): %s"),
 				*Describe(Since())));
 			return 0.f;
 		}));
@@ -1373,6 +1385,151 @@ namespace AudioDebug
 		}));
 	}
 
+	/** Brief 35: the interruption's noise held with the static of a fixture scene's cut, on the static's two values. */
+	struct FStaticSound
+	{
+		double StartReal = 0.0;
+		float Hold = 0.f;
+		float Fade = 0.f;
+		float SavedHold = 0.f;
+		float SavedFade = 0.f;
+		bool bSaved = false;
+	};
+	static FStaticSound GStatic;
+
+	static void RestoreStaticValues()
+	{
+		if (GStatic.bSaved)
+		{
+			UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+			Settings->StaticSeconds = GStatic.SavedHold;
+			Settings->StaticFadeSeconds = GStatic.SavedFade;
+			GStatic.bSaved = false;
+		}
+	}
+
+	static void AddStaticSound(TArray<FStep>& S, const FString& Label, float Hold, float Fade, bool bSkip)
+	{
+		S.Add(Do(Label + TEXT(": open"), [Hold, Fade]()
+		{
+			UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+			if (Hold >= 0.f)
+			{
+				GStatic.SavedHold = Settings->StaticSeconds;
+				GStatic.SavedFade = Settings->StaticFadeSeconds;
+				GStatic.bSaved = true;
+				Settings->StaticSeconds = Hold;
+				Settings->StaticFadeSeconds = Fade;
+			}
+			TArray<FRunSceneLine> Lines;
+			const ESceneVoice Voices[] = { ESceneVoice::Paradise, ESceneVoice::HomeAI, ESceneVoice::HomeAI };
+			for (int32 I = 0; I < 3; ++I)
+			{
+				FRunSceneLine& Line = Lines.AddDefaulted_GetRef();
+				Line.RowName = *FString::Printf(TEXT("AudioStatic_%d"), I + 1);
+				Line.Voice = Voices[I];
+				Line.Text = FString::Printf(TEXT("Fixture line %d of the static's scene."), I + 1);
+			}
+			MarkRecord();
+			UStdMainMenuWidget* Menu = MainMenu();
+			URunTextSceneWidget* Screen = Menu ? Cast<URunTextSceneWidget>(Menu->OpenChildScreen(URunTextSceneWidget::StaticClass())) : nullptr;
+			if (!Screen)
+			{
+				return -1.f;
+			}
+			Screen->Play(ERunSceneKind::EndingText, TEXT("AudioStatic"), Lines);
+			return 0.2f;
+		}));
+		S.Add(WaitFor(Label + TEXT(": the cut from white to black (line 2)"), []()
+		{
+			URunTextSceneWidget* Scene = TopScene();
+			if (Scene && Scene->GetCurrentIndex() < 1)
+			{
+				Scene->Confirm();
+				return false;
+			}
+			return Scene && Scene->GetCurrentIndex() == 1;
+		}, 10.f, [Label, bSkip]()
+		{
+			const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+			GStatic.StartReal = FPlatformTime::Seconds();
+			GStatic.Hold = Settings->GetStaticSeconds();
+			GStatic.Fade = Settings->GetStaticFadeSeconds();
+			const TArray<FGameSoundRequest> Cuts = SinceOf(EGameSound::Interruption);
+			Check(Cuts.Num() == 1 && Audio()->IsInterruptionHeld() && Audio()->IsInterruptionPlaying(),
+				FString::Printf(TEXT("%s: the interruption's noise starts with the static (StaticSeconds %.2f, StaticFadeSeconds %.2f): held %d, playing %d, %s"), *Label, GStatic.Hold,
+					GStatic.Fade, Audio()->IsInterruptionHeld() ? 1 : 0, Audio()->IsInterruptionPlaying() ? 1 : 0, *Describe(Cuts)));
+			return bSkip ? 0.5f : FMath::Max(GStatic.Hold - 0.25f, 0.05f);
+		}));
+		if (bSkip)
+		{
+			S.Add(Do(Label + TEXT(": skipped during the static"), [Label]()
+			{
+				URunTextSceneWidget* Scene = TopScene();
+				Check(Scene && Audio()->IsInterruptionPlaying(), FString::Printf(TEXT("%s: 0.5 s into the static the noise still plays"), *Label));
+				if (Scene)
+				{
+					Scene->Skip();
+				}
+				return 0.2f;
+			}));
+			S.Add(Do(Label + TEXT(": after the skip"), [Label]()
+			{
+				const TArray<FGameSoundRequest> Stops = SinceOf(EGameSound::Interruption, true);
+				Check(!Audio()->IsInterruptionHeld() && !Audio()->IsInterruptionPlaying() && Stops.Num() == 2 && Stops[1].bStop,
+					FString::Printf(TEXT("%s: skipping the scene during the static stops the noise with it (0.2 s later: held %d, playing %d): %s"), *Label, Audio()->IsInterruptionHeld() ? 1 : 0,
+						Audio()->IsInterruptionPlaying() ? 1 : 0, *Describe(Stops)));
+				return 0.f;
+			}));
+		}
+		else
+		{
+			S.Add(Do(Label + TEXT(": at the end of the hold"), [Label]()
+			{
+				const double At = FPlatformTime::Seconds() - GStatic.StartReal;
+				Check(Audio()->IsInterruptionHeld() && Audio()->IsInterruptionPlaying() && Audio()->GetInterruptionShare() >= 0.99f,
+					FString::Printf(TEXT("%s: %.2f s in (StaticSeconds %.2f) the noise still plays at full strength (share %.2f, played %d times)"), *Label, At, GStatic.Hold,
+						Audio()->GetInterruptionShare(), Audio()->GetInterruptionPlays()));
+				return 0.25f + 0.5f * GStatic.Fade;
+			}));
+			S.Add(Do(Label + TEXT(": in the fade"), [Label]()
+			{
+				const double At = FPlatformTime::Seconds() - GStatic.StartReal;
+				const float Share = Audio()->GetInterruptionShare();
+				Check(GStatic.Fade <= 0.f || (Audio()->IsInterruptionPlaying() && Share > 0.05f && Share < 0.95f),
+					FString::Printf(TEXT("%s: %.2f s in, halfway through the fade (StaticFadeSeconds %.2f), the noise fades with the static (share %.2f)"), *Label, At, GStatic.Fade, Share));
+				return 0.5f * GStatic.Fade + 0.3f;
+			}));
+			S.Add(Do(Label + TEXT(": after the fade"), [Label]()
+			{
+				const double At = FPlatformTime::Seconds() - GStatic.StartReal;
+				const TArray<FGameSoundRequest> Stops = SinceOf(EGameSound::Interruption, true);
+				const USoundBase* Sound = UTheLastShiftSettings::Get()->Audio.GetSound(EGameSound::Interruption).LoadSynchronous();
+				const float Length = Sound ? Sound->GetDuration() : 0.f;
+				Check(!Audio()->IsInterruptionHeld() && !Audio()->IsInterruptionPlaying() && Stops.Num() == 2 && Stops[1].bStop && SinceOf(EGameSound::Interruption).Num() == 1,
+					FString::Printf(TEXT("%s: %.2f s in, past StaticSeconds + StaticFadeSeconds (%.2f) by 0.3 s, the noise has stopped; asked for once: %s"), *Label, At, GStatic.Hold + GStatic.Fade,
+						*Describe(Stops)));
+				Check(Length <= 0.f || Length >= GStatic.Hold + GStatic.Fade || Audio()->GetInterruptionPlays() >= 2,
+					FString::Printf(TEXT("%s: the sound (%.2f s) shorter than the static (%.2f s) loops: played %d times"), *Label, Length, GStatic.Hold + GStatic.Fade,
+						Audio()->GetInterruptionPlays()));
+				return 0.f;
+			}));
+		}
+		S.Add(WaitFor(Label + TEXT(": the scene closed"), []()
+		{
+			if (URunTextSceneWidget* Scene = TopScene())
+			{
+				Scene->Confirm();
+				return false;
+			}
+			return InMenu();
+		}, 20.f, []()
+		{
+			RestoreStaticValues();
+			return 0.2f;
+		}));
+	}
+
 	static void AddMenu(TArray<FStep>& S)
 	{
 		S.Add(WaitFor(TEXT("setup: the main menu"), []() { return InMenu() && Audio(); }, 30.f, []()
@@ -1414,6 +1571,11 @@ namespace AudioDebug
 		AddScene(S, TEXT("scenes: white, white, black, black"), TEXT("AudioCut"), { ESceneVoice::Paradise, ESceneVoice::EngineerParadise, ESceneVoice::HomeAI, ESceneVoice::Engineer }, 3);
 		AddScene(S, TEXT("scenes: white, black, white, black"), TEXT("AudioBack"), { ESceneVoice::Paradise, ESceneVoice::HomeAI, ESceneVoice::EngineerParadise, ESceneVoice::HomeAI }, 2);
 		AddScene(S, TEXT("scenes: black only"), TEXT("AudioBlack"), { ESceneVoice::HomeAI, ESceneVoice::Engineer, ESceneVoice::HomeAI }, -1);
+
+		// --- Brief 35, criterion 5: the interruption's noise lasts as long as the static ---
+		AddStaticSound(S, TEXT("static"), -1.f, -1.f, false);
+		AddStaticSound(S, TEXT("static, 1 s and 1 s for the session"), 1.f, 1.f, false);
+		AddStaticSound(S, TEXT("static, the scene skipped"), -1.f, -1.f, true);
 
 		// --- New game: the music fades as the opening scene opens; the scene's lines and its interruption ---
 		S.Add(Do(TEXT("new game: New game"), []()

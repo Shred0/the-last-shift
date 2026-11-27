@@ -326,9 +326,79 @@ namespace EntityFormDebug
 		return Latest;
 	}
 
+	/** Brief 35: the captured and injected particles alive in the slot holding ScanIndex (the GPU's counts, read back a few frames late). */
+	static FString DescribeSlots()
+	{
+		FString Out;
+		if (const ULidarScanComponent* L = Lidar())
+		{
+			for (const FLidarScanSlotStats& S : L->GetScanSlotStats())
+			{
+				if (S.ScanIndex != INDEX_NONE)
+				{
+					Out += FString::Printf(TEXT("%sscan %d: captured %d, injected %d%s"), Out.IsEmpty() ? TEXT("") : TEXT("; "), S.ScanIndex, S.CapturedParticles, S.InjectedParticles,
+						S.bFadingOut ? TEXT(" (fading out)") : TEXT(""));
+				}
+			}
+		}
+		return Out.IsEmpty() ? FString(TEXT("no scan alive")) : Out;
+	}
+
+	static int32 InjectedAliveOf(int32 ScanIndex)
+	{
+		if (const ULidarScanComponent* L = Lidar())
+		{
+			for (const FLidarScanSlotStats& S : L->GetScanSlotStats())
+			{
+				if (S.ScanIndex == ScanIndex)
+				{
+					return S.InjectedParticles;
+				}
+			}
+		}
+		return -1;
+	}
+
+	/** Brief 35: the screen rectangle (shot pixels) of the figure's mesh bounds as it stands now, grown by Margin pixels; empty off screen. */
+	static FIntRect FigureRect(int32 ShotWidth, int32 ShotHeight, int32 Margin = 12)
+	{
+		const AEntity* E = FindEntity();
+		const APlayerController* C = PC();
+		if (!E || !C)
+		{
+			return FIntRect();
+		}
+		const UStaticMesh* Mesh = E->GetFormMesh();
+		const FBox Local = Mesh ? Mesh->GetBoundingBox() : FBox(FVector(-50.f, -50.f, 0.f), FVector(50.f, 50.f, 180.f));
+		const FTransform T = E->GetFigureTransform();
+		int32 ViewX = 0, ViewY = 0;
+		C->GetViewportSize(ViewX, ViewY);
+		if (ViewX <= 0 || ViewY <= 0)
+		{
+			return FIntRect();
+		}
+		const double SX = static_cast<double>(ShotWidth) / ViewX;
+		const double SY = static_cast<double>(ShotHeight) / ViewY;
+		FBox2D Box(ForceInit);
+		for (int32 I = 0; I < 8; ++I)
+		{
+			const FVector Corner((I & 1) ? Local.Max.X : Local.Min.X, (I & 2) ? Local.Max.Y : Local.Min.Y, (I & 4) ? Local.Max.Z : Local.Min.Z);
+			FVector2D Screen;
+			if (C->ProjectWorldLocationToScreen(T.TransformPosition(Corner), Screen, false))
+			{
+				Box += FVector2D(Screen.X * SX, Screen.Y * SY);
+			}
+		}
+		if (!Box.bIsValid)
+		{
+			return FIntRect();
+		}
+		return FIntRect(FMath::FloorToInt32(Box.Min.X) - Margin, FMath::FloorToInt32(Box.Min.Y) - Margin, FMath::CeilToInt32(Box.Max.X) + Margin, FMath::CeilToInt32(Box.Max.Y) + Margin);
+	}
+
 	// --- Shots ---
 
-	enum class EHue : uint8 { Scan, Entity };
+	enum class EHue : uint8 { Scan, Entity, Residue };
 
 	struct FShot
 	{
@@ -340,8 +410,10 @@ namespace EntityFormDebug
 	static FShot GShot;
 	static bool bShotReady = false;
 	static FDelegateHandle GShotHandle;
+	/** The folder under Saved/Screenshots the next shots go to (Brief 35's own shots go to Brief35). */
+	static FString GShotFolder = TEXT("Brief29");
 
-	/** The hue classes of the Brief 20 tests (8-bit sRGB after tonemapping): the scan's cyan, the entity's red. */
+	/** The hue classes of the Brief 20 tests (8-bit sRGB after tonemapping): the scan's cyan, the entity's red; Brief 35: the residues' magenta. */
 	static bool IsHue(const FColor& C, EHue Hue)
 	{
 		const int32 R = C.R, G = C.G, B = C.B;
@@ -349,6 +421,7 @@ namespace EntityFormDebug
 		{
 		case EHue::Scan: return B > 6 && G * 10 >= B * 6 && R * 10 < G * 8;
 		case EHue::Entity: return R > 12 && R * 10 > G * 25 && R * 10 > B * 25;
+		case EHue::Residue: return R > 12 && B > 12 && G * 10 < R * 6 && G * 10 < B * 6;
 		}
 		return false;
 	}
@@ -363,6 +436,20 @@ namespace EntityFormDebug
 		return Count;
 	}
 
+	/** Pixels of Hue inside Rect (shot pixels, Max exclusive). */
+	static int32 CountHueIn(const FShot& Shot, EHue Hue, const FIntRect& Rect)
+	{
+		int32 Count = 0;
+		for (int32 Y = FMath::Max(0, Rect.Min.Y); Y < FMath::Min(Shot.Height, Rect.Max.Y); ++Y)
+		{
+			for (int32 X = FMath::Max(0, Rect.Min.X); X < FMath::Min(Shot.Width, Rect.Max.X); ++X)
+			{
+				Count += IsHue(Shot.Pixels[Y * Shot.Width + X], Hue) ? 1 : 0;
+			}
+		}
+		return Count;
+	}
+
 	static void HandleShot(int32 Width, int32 Height, const TArray<FColor>& Pixels)
 	{
 		GShot.Width = Width;
@@ -370,7 +457,7 @@ namespace EntityFormDebug
 		GShot.Pixels = Pixels;
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief29"), GShot.Label + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), GShotFolder, GShot.Label + TEXT(".png")));
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 		FFileHelper::SaveArrayToFile(Png, *Path);
 		Note(FString::Printf(TEXT("shot %s saved (%d x %d): %s"), *GShot.Label, Width, Height, *Path));
@@ -447,6 +534,12 @@ namespace EntityFormDebug
 		int32 FoundEntityHue = 0;
 		int32 NotFoundEntityHue = -1;
 		int32 ContactPhase = 0;
+		/** Brief 35: the yaw-90 scan's index and the figure's rectangle on its shot; the three scans' rectangles and the entity's trail reach. */
+		int32 YawScan = INDEX_NONE;
+		float SavedTrailReach = 0.f;
+		bool bTrailSaved = false;
+		TArray<FIntRect> ThreeRects;
+		int32 ThreeScan = INDEX_NONE;
 	};
 	static FCheck G;
 
@@ -647,8 +740,14 @@ namespace EntityFormDebug
 		if (AEntity* E = FindEntity())
 		{
 			E->Speed = G.SavedSpeed;
+			if (G.bTrailSaved)
+			{
+				E->TrailReach = G.SavedTrailReach;
+				G.bTrailSaved = false;
+			}
 			E->RefreshFigureShape();
 		}
+		GShotFolder = TEXT("Brief29");
 		if (URunSubsystem* R = Run())
 		{
 			R->SetEntityFound(G.bSavedFound, TEXT("tls.EntityFormCheck: end"));
@@ -880,13 +979,41 @@ namespace EntityFormDebug
 			Check(YawError < 0.01f && E->GetFigureLocation().Equals(PlaceBefore, 0.01) && E->GetFigureYaw() == YawBefore && FMath::IsNearlyEqual(E->GetPathDistanceToPlayer(), PathBefore, 1.f),
 				FString::Printf(TEXT("yaw offset %.0f: the mesh's yaw is the travel's plus the offset (%.1f = %.1f + %.0f); the figure's place, its travel's yaw and its path distance unchanged (%.1f cm, then %.1f cm)"),
 					Offset, Transform.Rotator().Yaw, YawBefore, Offset, PathBefore, E->GetPathDistanceToPlayer()));
+			// Brief 35: the shot is measured. The figure in the entity's own colour (found, for this case only) and no trail, so
+			// that the pixels of the figure can be counted inside its rectangle on screen.
+			Run()->SetEntityFound(true, TEXT("tls.EntityFormCheck: the yaw-90 shot"));
+			G.SavedTrailReach = E->TrailReach;
+			G.bTrailSaved = true;
+			E->TrailReach = 0.f;
+			G.YawScan = Lidar()->GetScanCount();
 			Lidar()->Scan();
-			return 0.4f;
+			const FLidarInjectionStats Stats = Lidar()->GetLastInjectionStats();
+			Note(FString::Printf(TEXT("yaw offset 90: scan %d: %d figure points gathered, %d uploaded (%d outside the coverage, %d over the cap); slots now: %s"), G.YawScan,
+				E->GetLastGatheredFigurePoints(), Stats.Uploaded, Stats.OutsideCoverage, Stats.OverCap, *DescribeSlots()));
+			return 0.1f;
 		}));
-		AddShot(S, []() { return FString::Printf(TEXT("%s_%s_Corridor8m_Yaw90"), *MapShort(), *FormName()); }, nullptr);
+		S.Add(Do(TEXT("yaw offset 90: the slots"), []()
+		{
+			Note(FString::Printf(TEXT("yaw offset 90: 0.1 s after scan %d: %s"), G.YawScan, *DescribeSlots()));
+			return 0.3f;
+		}));
+		AddShot(S, []() { return FString::Printf(TEXT("%s_%s_Corridor8m_Yaw90"), *MapShort(), *FormName()); }, [](const FShot& Shot)
+		{
+			const FIntRect Rect = FigureRect(Shot.Width, Shot.Height);
+			const int32 In = CountHueIn(Shot, EHue::Entity, Rect);
+			Note(FString::Printf(TEXT("yaw offset 90: at the shot (scan %d): %s"), G.YawScan, *DescribeSlots()));
+			Check(In >= 40, FString::Printf(TEXT("yaw offset 90: the shot holds the figure in the entity's colour inside its rectangle on screen (%d pixels in (%d, %d)-(%d, %d), %d in the whole shot; scan %d's injected points alive: %d)"),
+				In, Rect.Min.X, Rect.Min.Y, Rect.Max.X, Rect.Max.Y, CountHue(Shot, EHue::Entity), G.YawScan, InjectedAliveOf(G.YawScan)));
+		});
 		S.Add(Do(TEXT("yaw offset back"), []()
 		{
 			AEntity* E = FindEntity();
+			Run()->SetEntityFound(false, TEXT("tls.EntityFormCheck: the yaw-90 shot taken"));
+			if (G.bTrailSaved)
+			{
+				E->TrailReach = G.SavedTrailReach;
+				G.bTrailSaved = false;
+			}
 			GetMutableDefault<UTheLastShiftSettings>()->EntityForms = G.SavedForms;
 			Check(E->GetLastGatheredFigurePoints() == G.Tuning.PointCount, FString::Printf(TEXT("yaw offset 90: the scan gathered %d figure points; the session's offset back to %.0f"),
 				E->GetLastGatheredFigurePoints(), E->GetFormYawOffset()));
@@ -1054,6 +1181,102 @@ namespace EntityFormDebug
 		});
 		S.Add(Do(TEXT("open: Resume"), []()
 		{
+			TS()->Resume();
+			return 0.3f;
+		}));
+		AddResetRunState(S);
+
+		// --- Brief 35, Part E: three scans as the player sees them. Stopped, the entity awake and in sight in the corridor, found
+		// (its own colour), no trail, two residues in the coverage beside it: a scan; a second one a second later from the same
+		// pose; a third after turning away and back. Between the scans the figure is placed 90 cm to one side, then to the other,
+		// as an entity that moves, so that a snapshot left behind would show at its old place. After each, a shot: the figure on
+		// screen once, inside its rectangle where it stands now (nothing of it outside), and the residues shown. Shots to
+		// Saved/Screenshots/Brief35.
+		AddStopAt(S, TEXT("three scans"), []() { return G.Corridor.Figure; }, []() { return G.Corridor.Player; });
+		S.Add(Do(TEXT("three scans: setup"), []()
+		{
+			AEntity* E = FindEntity();
+			Run()->SetEntityFound(true, TEXT("tls.EntityFormCheck: three scans"));
+			G.SavedTrailReach = E->TrailReach;
+			G.bTrailSaved = true;
+			E->TrailReach = 0.f;
+			G.ThreeRects.Reset();
+			GShotFolder = TEXT("Brief35");
+			// Two residues 4 m ahead, 1.4 m to each side of the line to the figure, at the figure's waist.
+			const FVector Eye = EyeOf(Pawn());
+			const FVector Figure = E->GetFigureLocation() + FVector(0.f, 0.f, 100.f);
+			const FVector Along = (Figure - Eye).GetSafeNormal2D();
+			const FVector Side = FVector::CrossProduct(Along, FVector::UpVector).GetSafeNormal();
+			int32 Index = 0;
+			for (TActorIterator<AResidue> It(W()); It && Index < 2; ++It)
+			{
+				if (It->GetState() != EResidueState::Available)
+				{
+					continue;
+				}
+				G.MovedResidues.Emplace(*It, It->GetActorLocation());
+				It->SetActorLocation(FVector(Eye.X, Eye.Y, Figure.Z) + Along * 400.f + Side * (Index == 0 ? 140.f : -140.f));
+				++Index;
+			}
+			Note(FString::Printf(TEXT("three scans: %d residues 4 m ahead beside the line to the figure; the figure held at %s, found, no trail"), Index, *E->GetFigureLocation().ToString()));
+			return 0.2f;
+		}));
+		for (int32 K = 0; K < 3; ++K)
+		{
+			static const TCHAR* Names[] = { TEXT("first scan"), TEXT("second scan, 1 s later, same pose"), TEXT("third scan, after turning away and back") };
+			if (K == 2)
+			{
+				S.Add(Do(TEXT("three scans: turn away"), []() { PC()->SetControlRotation(PC()->GetControlRotation() + FRotator(0.f, 180.f, 0.f)); return 0.4f; }));
+				S.Add(Do(TEXT("three scans: turn back"), []() { PC()->SetControlRotation(PC()->GetControlRotation() + FRotator(0.f, 180.f, 0.f)); return 0.2f; }));
+			}
+			S.Add(Do(FString::Printf(TEXT("three scans: %s"), Names[K]), [K]()
+			{
+				AEntity* E = FindEntity();
+				if (K > 0)
+				{
+					const FVector Along = (E->GetFigureLocation() - EyeOf(Pawn())).GetSafeNormal2D();
+					const FVector Side = FVector::CrossProduct(Along, FVector::UpVector).GetSafeNormal();
+					const bool bPlaced = E->PlaceFigure(G.Corridor.Figure + Side * (K == 1 ? 90.f : -90.f), true);
+					Check(bPlaced, FString::Printf(TEXT("three scans: the figure moved to %s before the %s"), *E->GetFigureLocation().ToString(), Names[K]));
+				}
+				G.ThreeScan = Lidar()->GetScanCount();
+				Lidar()->Scan();
+				const FLidarInjectionStats Stats = Lidar()->GetLastInjectionStats();
+				Note(FString::Printf(TEXT("three scans: %s = scan %d: %d figure points gathered, %d uploaded (%d outside the coverage, %d over the cap)"), Names[K], G.ThreeScan,
+					E->GetLastGatheredFigurePoints(), Stats.Uploaded, Stats.OutsideCoverage, Stats.OverCap));
+				return 0.5f;
+			}));
+			AddShot(S, [K]() { return FString::Printf(TEXT("%s_%s_ThreeScans_%d"), *MapShort(), *FormName(), K + 1); }, [K](const FShot& Shot)
+			{
+				const FIntRect Rect = FigureRect(Shot.Width, Shot.Height);
+				const int32 In = CountHueIn(Shot, EHue::Entity, Rect);
+				const int32 All = CountHue(Shot, EHue::Entity);
+				const int32 Out = All - In;
+				int32 Old = 0;
+				for (const FIntRect& Before : G.ThreeRects)
+				{
+					const FIntRect Both(FMath::Max(Before.Min.X, Rect.Min.X), FMath::Max(Before.Min.Y, Rect.Min.Y), FMath::Min(Before.Max.X, Rect.Max.X), FMath::Min(Before.Max.Y, Rect.Max.Y));
+					Old += CountHueIn(Shot, EHue::Entity, Before) - (Both.Min.X < Both.Max.X && Both.Min.Y < Both.Max.Y ? CountHueIn(Shot, EHue::Entity, Both) : 0);
+				}
+				G.ThreeRects.Add(Rect);
+				const int32 Residue = CountHue(Shot, EHue::Residue);
+				Note(FString::Printf(TEXT("three scans: after the %s (scan %d): %s"), Names[K], G.ThreeScan, *DescribeSlots()));
+				Check(In >= 40 && Out <= FMath::Max(15, In / 10),
+					FString::Printf(TEXT("three scans: after the %s the figure is on screen once, where it stands now, in the entity's colour: %d pixels inside its rectangle (%d, %d)-(%d, %d), %d outside it (%d where it stood before)"),
+						Names[K], In, Rect.Min.X, Rect.Min.Y, Rect.Max.X, Rect.Max.Y, Out, Old));
+				Check(Residue >= 40, FString::Printf(TEXT("three scans: after the %s the residues in the coverage are shown (%d pixels in their colour)"), Names[K], Residue));
+			});
+		}
+		S.Add(Do(TEXT("three scans: Resume"), []()
+		{
+			AEntity* E = FindEntity();
+			if (G.bTrailSaved)
+			{
+				E->TrailReach = G.SavedTrailReach;
+				G.bTrailSaved = false;
+			}
+			GShotFolder = TEXT("Brief29");
+			RestoreResidues();
 			TS()->Resume();
 			return 0.3f;
 		}));

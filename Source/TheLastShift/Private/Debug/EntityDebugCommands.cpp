@@ -26,6 +26,7 @@
 #include "Residue/Residue.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
+#include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
@@ -820,10 +821,21 @@ namespace EntityDebug
 		int32 CapturedA0 = -1;
 		int32 Phase = 0;
 		int32 Failures = 0;
+		/** Brief 35: frames polled after PointVanishSeconds + 0.1 s for the GPU's particle count of scan A to drop. */
+		int32 VanishPolls = 0;
+		/** Brief 35: the scan memory's values of the settings, switched off for the run and put back at its end. */
+		FScanMemory SavedMemory;
+		bool bMemorySaved = false;
 		FTimerHandle Timer;
 		bool bRunning = false;
 	};
 	static FLatestScanTest GLatestScanTest;
+
+	/**
+	 * Frames the test allows past PointVanishSeconds for the GPU's count of a slot's particles to show a kill: the count is read
+	 * back from the GPU a few frames late (the points themselves are at alpha 0 from PointVanishSeconds on, by the contract).
+	 */
+	static constexpr int32 LatestScanReadbackFrames = 12;
 
 	static void LatestScanTestStep();
 
@@ -906,6 +918,17 @@ namespace EntityDebug
 	static void LatestScanTestEnd(const TCHAR* Why)
 	{
 		EntityFormTest::Restore(TEXT("LatestScanTest"));
+		if (GLatestScanTest.bMemorySaved)
+		{
+			GetMutableDefault<UTheLastShiftSettings>()->ScanMemory = GLatestScanTest.SavedMemory;
+			if (UScanDirectorComponent* D = GLatestScanTest.Director.Get())
+			{
+				D->ApplyScanMemory();
+			}
+			GLatestScanTest.bMemorySaved = false;
+			UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest: the scan memory back to the settings' values (ScanMemory=(Ratio=%.1f,ToleranceCm=%.1f))."),
+				GLatestScanTest.SavedMemory.Ratio, GLatestScanTest.SavedMemory.ToleranceCm);
+		}
 		UWorld* World = GLatestScanTest.World.Get();
 		if (World)
 		{
@@ -1062,8 +1085,18 @@ namespace EntityDebug
 				LatestScanSchedule(GLatestScanTest.Phase == 6 ? 0.1f : VanishSeconds + 0.1f - SinceB);
 				return;
 			}
+			// Brief 35: from PointVanishSeconds + 0.1 s on, the count is polled every frame for at most LatestScanReadbackFrames
+			// frames: the GPU's particle count reaches the CPU a few frames after the kill (at about 20 frames per second after a
+			// screenshot, the night pass's single sample at +0.45 s came before it).
+			if (InjectedA != GLatestScanTest.ResidueA && GLatestScanTest.VanishPolls < LatestScanReadbackFrames)
+			{
+				++GLatestScanTest.VanishPolls;
+				LatestScanSchedule(0.f);
+				return;
+			}
 			LatestScanCheck(InjectedA == GLatestScanTest.ResidueA,
-				FString::Printf(TEXT("scan A's entity points gone within VanishSeconds %.2f, its residue points kept: %s"), VanishSeconds, *Line));
+				FString::Printf(TEXT("scan A's entity points gone within VanishSeconds %.2f (+0.1 s, then at most %d frames for the GPU's count to read back: %d polled), its residue points kept: %s"),
+					VanishSeconds, LatestScanReadbackFrames, GLatestScanTest.VanishPolls, *Line));
 			LatestScanCheck(CapturedA == GLatestScanTest.CapturedA0,
 				FString::Printf(TEXT("scan A's captured points unchanged (%d -> %d)"), GLatestScanTest.CapturedA0, CapturedA));
 			const int32 EntityB = InjectedB - GLatestScanTest.ResidueB;
@@ -1721,7 +1754,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsEntityContactResponseCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsLatestScanTestCommand(
 	TEXT("tls.LatestScanTest"),
-	TEXT("tls.LatestScanTest [Hidden=0] [Screenshots=1]: stops time, makes the entity appear at MinSpawnDistance, waits until the figure is in view, freezes it, moves the nearest available residue 3 m in front of the camera and every other one out of the way, waits for the automatic first scan, clears the scans and fires scan A directly on the lidar (cooldown bypassed). Checks at +0.4, +3.0 and +4.4 s that every injected point of A is alive; fires scan B at +4.5 s (with Hidden=1 the figure first reappears out of sight and the trail is off); checks at +PointVanishSeconds + 0.1 s that A's entity points are gone and its captured and residue points kept, and that B holds entity points (Hidden=0) or none (Hidden=1); logs A's injected count again at +1.5 s after B. HighResShot at every checkpoint, then resumes and restores the residue."),
+	TEXT("tls.LatestScanTest [Hidden=0] [Screenshots=1]: stops time, makes the entity appear at MinSpawnDistance, waits until the figure is in view, freezes it, moves the nearest available residue 3 m in front of the camera and every other one out of the way, waits for the automatic first scan, clears the scans and fires scan A directly on the lidar (cooldown bypassed). Checks at +0.4, +3.0 and +4.4 s that every injected point of A is alive; fires scan B at +4.5 s (with Hidden=1 the figure first reappears out of sight and the trail is off); with the scan memory off for its run (ratio 0, put back at the end: scan B shares A's pose), checks from +PointVanishSeconds + 0.1 s (and at most 12 frames more, for the GPU's particle count to read back) that A's entity points are gone and its captured and residue points kept, and that B holds entity points (Hidden=0) or none (Hidden=1); logs A's injected count again at +1.5 s after B. HighResShot at every checkpoint, then resumes and restores the residue."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
 	{
 		using namespace EntityDebug;
@@ -1774,6 +1807,19 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsLatestScanTestCommand(
 			}
 		}
 		GLatestScanTest.WaitStart = World->GetRealTimeSeconds();
+		// Brief 35: scan B is taken from scan A's pose, and the scan memory (Brief 25) replaces the older points of the surfaces
+		// a newer scan captures: by design it would remove scan A's captured points. The check that they stay is a check of the
+		// latest-scan rule for injected points against captured ones, so the memory is off for the run (ratio 0, as tls.LinksTest
+		// and tls.ReadabilityTest do), and put back at the end.
+		GLatestScanTest.SavedMemory = UTheLastShiftSettings::GetScanMemory();
+		GLatestScanTest.bMemorySaved = true;
+		{
+			FScanMemory Off = GLatestScanTest.SavedMemory;
+			Off.Ratio = 0.f;
+			GetMutableDefault<UTheLastShiftSettings>()->ScanMemory = Off;
+			Director->ApplyScanMemory();
+			UE_LOG(LogTheLastShift, Log, TEXT("LatestScanTest: the scan memory is off for the run (ratio 0; the settings' %.1f is put back at the end)."), GLatestScanTest.SavedMemory.Ratio);
+		}
 		EntityFormTest::ForceAreaOneForm(TEXT("LatestScanTest"));
 		GLatestScanTest.bRunning = true;
 		if (!Entity->IsManifested())

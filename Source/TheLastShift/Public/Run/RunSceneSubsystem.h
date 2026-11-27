@@ -26,6 +26,7 @@ namespace RunScenes
 class URunEndingWidget;
 class URunTextSceneWidget;
 class UStdScreenWidget;
+class UStdTextSceneWidget;
 
 THELASTSHIFT_API DECLARE_LOG_CATEGORY_EXTERN(LogScenes, Log, All);
 
@@ -150,8 +151,15 @@ public:
 
 	// --- Lines ---
 
-	/** Called by the scene screen when a line starts: logs it and broadcasts OnSceneLineStarted. */
-	void NotifyLineStarted(FName Scene, int32 Index, const FRunSceneLine& Line);
+	/**
+	 * Called by the scene screen when a line starts: logs it and broadcasts OnSceneLineStarted. Brief 35: Screen is the text
+	 * scene screen the line shows on (GetLineScreen), so that what follows the line's effect (the interruption's noise follows
+	 * the static) can read the effect's own state from it.
+	 */
+	void NotifyLineStarted(FName Scene, int32 Index, const FRunSceneLine& Line, UStdTextSceneWidget* Screen = nullptr);
+
+	/** Brief 35: the text scene screen of the line that started last (null when none, or once it has gone). */
+	UStdTextSceneWidget* GetLineScreen() const { return LineScreen.Get(); }
 
 	/** A line of a scene started on screen, with its cue name (None: none). The hook for the prologue's sound and effects. */
 	UPROPERTY(BlueprintAssignable, Category = "Scenes")
@@ -179,4 +187,7 @@ private:
 
 	/** The screens OpenPrologue and OpenEnding opened, and their scene, until they close. */
 	TMap<TWeakObjectPtr<UStdScreenWidget>, FName> OpenScreens;
+
+	/** Brief 35: the text scene screen of the line that started last. */
+	TWeakObjectPtr<UStdTextSceneWidget> LineScreen;
 };

@@ -12,6 +12,7 @@
 #include "TextChannel/TextChannelComponent.h"
 #include "Time/HomeStateSubsystem.h"
 #include "UI/StdScreenWidget.h"
+#include "UI/StdTextSceneWidget.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(RunSceneSubsystem)
 
@@ -313,8 +314,9 @@ bool URunSceneSubsystem::ConsumePendingEnding()
 	return bWas;
 }
 
-void URunSceneSubsystem::NotifyLineStarted(FName Scene, int32 Index, const FRunSceneLine& Line)
+void URunSceneSubsystem::NotifyLineStarted(FName Scene, int32 Index, const FRunSceneLine& Line, UStdTextSceneWidget* Screen)
 {
+	LineScreen = Screen;
 	UE_LOG(LogScenes, Log, TEXT("Scene %s: line %d (%s, %s, %s%s) started: \"%s\""), *Scene.ToString(), Index + 1, *Line.RowName.ToString(), LexToString(Line.Voice),
 		LexToString(Line.Level), Line.Cue.IsNone() ? TEXT(", no cue") : *FString::Printf(TEXT(", cue %s"), *Line.Cue.ToString()), *Line.Text);
 	OnSceneLineStarted.Broadcast(Scene, Index, Line.Voice, Line.Cue);

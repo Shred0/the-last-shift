@@ -2629,8 +2629,11 @@ namespace AreaGen
 			const FVector2D Size = G.DressGateFrameSize.ComponentMax(FVector2D(1.0, 1.0));
 			const double Across = Seg.Width + 4.0 * T;
 			FrameF.Add(Across / Size.X, Seg.DoorPos);
+			// Brief 35: 2 cm taller than the wall, so that its top stands 2 cm above the ceiling plates' top (out of sight, above
+			// the ceiling) instead of in the plane of their top face (two faces in one plane). Its lintel rises about 1.4 cm and
+			// still covers the door's panel, which reaches into it.
 			Out.GateFrames.Add(FTransform(FRotator(0.0, Yaw, 0.0), FVector(Seg.DoorPos.X, Seg.DoorPos.Y, 0.0),
-				FVector(1.0, Across / Size.X, (WallTop + FT) / Size.Y)));
+				FVector(1.0, Across / Size.X, (WallTop + FT + 2.0) / Size.Y)));
 		}
 		// The parts of [A, B] along a run that a gate frame does not take.
 		auto Spans = [&](bool bAlongY, double Mid, double A, double B)

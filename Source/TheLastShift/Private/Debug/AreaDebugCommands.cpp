@@ -912,7 +912,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaProbeCommand(
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsAreaDressCheckCommand(
 	TEXT("tls.Area.DressCheck"),
-	TEXT("tls.Area.DressCheck: measures the dressing as placed (its instances and their meshes' bounds) against the plan's boxes: floor plate tops against the floor's top, wall panel and curb faces against their boxes' faces, curb tops against CurbHeight; counts dressing pieces inside the walkable space (over a floor, from 1 cm to 2.2 m above it)."),
+	TEXT("tls.Area.DressCheck: measures the dressing as placed (its instances and their meshes' bounds) against the plan's boxes: floor plate tops against the floor's top, wall panel and curb faces against their boxes' faces, curb tops against CurbHeight; counts dressing pieces inside the walkable space (over a floor, from 1 cm to 2.2 m above it), and apart from them (Brief 35) the pieces placed to lie on a floor (the twin AI's room's conduits and cables: underside on the floor's top or set into it, at most 60 cm above it), with their collision and navigation; PASS with no piece inside the walkable space, none not over a box and none of those on the floor colliding or affecting navigation."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld*)
 	{
 		UWorld* World = nullptr;
@@ -957,6 +957,12 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaDressCheckCommand(
 		int32 Plates = 0, Panels = 0, CurbsN = 0, Unmatched = 0, Intrusions = 0, Pieces = 0;
 		FString Worst;
 		double WorstIntrusion = 0.0;
+		// Brief 35: the pieces placed to lie on a floor (the twin AI's room runs its conduits and cables across the floor to the
+		// terminal, Brief 26) are counted apart: a twin room piece whose underside is on the floor's top or below it (resting on
+		// it or set into it) and that rises at most 60 cm above it. Any other piece inside the walkable space is an intrusion, as
+		// before.
+		int32 OnFloor = 0, OnFloorColliding = 0, OnFloorNav = 0;
+		double OnFloorTallest = 0.0;
 		TArray<UInstancedStaticMeshComponent*> All;
 		Gen->GetComponents(All);
 		for (const UInstancedStaticMeshComponent* C : All)
@@ -967,6 +973,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaDressCheckCommand(
 			}
 			const FBox Local = C->GetStaticMesh()->GetBoundingBox();
 			const bool bPlates = C->ComponentHasTag(TEXT("AreaDressFloorPlates"));
+			const bool bTwinRun = C->ComponentHasTag(TEXT("AreaDressTwinConduits")) || C->ComponentHasTag(TEXT("AreaDressTwinBends")) || C->ComponentHasTag(TEXT("AreaDressTwinCables"));
 			const bool bPanels = C->ComponentHasTag(TEXT("AreaDressWallPanels"));
 			const bool bCurbs = C->ComponentHasTag(TEXT("AreaDressCurbs"));
 			for (int32 I = 0; I < C->GetInstanceCount(); ++I)
@@ -1006,6 +1013,7 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaDressCheckCommand(
 				{
 					continue;
 				}
+				bool bCountedOnFloor = false;
 				for (const FAreaFloorRect& R : Info->FloorRects)
 				{
 					const FBox Walk(FVector(R.Box.Min.X + 1.0, R.Box.Min.Y + 1.0, R.Box.Max.Z + 1.0), FVector(R.Box.Max.X - 1.0, R.Box.Max.Y - 1.0, R.Box.Max.Z + 220.0));
@@ -1013,6 +1021,18 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaDressCheckCommand(
 					{
 						const FBox O = B.Overlap(Walk);
 						const double Depth = FMath::Min3(O.GetSize().X, O.GetSize().Y, O.GetSize().Z);
+						if (Depth > 0.5 && bTwinRun && B.Min.Z <= R.Box.Max.Z + 2.0 && B.Max.Z - R.Box.Max.Z <= 60.0)
+						{
+							if (!bCountedOnFloor)
+							{
+								bCountedOnFloor = true;
+								++OnFloor;
+								OnFloorTallest = FMath::Max(OnFloorTallest, B.Max.Z - R.Box.Max.Z);
+								OnFloorColliding += C->GetCollisionEnabled() != ECollisionEnabled::NoCollision ? 1 : 0;
+								OnFloorNav += C->CanEverAffectNavigation() ? 1 : 0;
+							}
+							continue;
+						}
 						if (Depth > 0.5)
 						{
 							++Intrusions;
@@ -1026,8 +1046,12 @@ static FAutoConsoleCommandWithWorldAndArgs GTlsAreaDressCheckCommand(
 				}
 			}
 		}
-		UE_LOG(LogArea, Display, TEXT("tls.Area.DressCheck: %d dressing pieces; floor plates %d, largest |top - floor| %.2f cm; wall panels %d, largest face distance from their box %.2f cm; curbs %d, largest face distance %.2f cm, largest |top - CurbHeight| %.2f cm; pieces not over a box %d; pieces inside the walkable space (deeper than 0.5 cm) %d%s"),
-			Pieces, Plates, FloorTop, Panels, WallFace, CurbsN, CurbFace, CurbTop, Unmatched, Intrusions, Worst.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", deepest %s"), *Worst));
+		UE_LOG(LogArea, Display, TEXT("tls.Area.DressCheck: %d dressing pieces; floor plates %d, largest |top - floor| %.2f cm; wall panels %d, largest face distance from their box %.2f cm; curbs %d, largest face distance %.2f cm, largest |top - CurbHeight| %.2f cm; pieces not over a box %d; pieces inside the walkable space (deeper than 0.5 cm) %d%s; placed to lie on a floor (the twin AI's room's conduits and cables, counted apart) %d, the tallest %.1f cm, %d of them with collision, %d affecting navigation"),
+			Pieces, Plates, FloorTop, Panels, WallFace, CurbsN, CurbFace, CurbTop, Unmatched, Intrusions, Worst.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", deepest %s"), *Worst),
+			OnFloor, OnFloorTallest, OnFloorColliding, OnFloorNav);
+		const bool bPass = Intrusions == 0 && Unmatched == 0 && OnFloorColliding == 0 && OnFloorNav == 0;
+		UE_LOG(LogArea, Display, TEXT("tls.Area.DressCheck: %s: %d pieces inside the walkable space (0 needed), %d not over a box (0 needed), %d placed on a floor counted apart (%d colliding and %d affecting navigation: 0 needed, so none stops the pawn or makes it step)"),
+			bPass ? TEXT("PASS") : TEXT("FAIL"), Intrusions, Unmatched, OnFloor, OnFloorColliding, OnFloorNav);
 	}));
 
 namespace TerminalCheck

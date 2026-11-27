@@ -53,7 +53,7 @@ void URunTextSceneWidget::HandleEntryStarted(UStdTextSceneWidget* Screen, int32 
 {
 	if (URunSceneSubsystem* Scenes = URunSceneSubsystem::Get(this); Scenes && Lines.IsValidIndex(Index))
 	{
-		Scenes->NotifyLineStarted(SceneName, Index, Lines[Index]);
+		Scenes->NotifyLineStarted(SceneName, Index, Lines[Index], this);
 	}
 }
 

@@ -15,7 +15,7 @@
 // message when there is one, EntityContact, EntityFound, and the entity's colour at the next Stop. A clear sighting and the
 // first contact in one Stop: the contact's sequence. tls.StillCheck [Quit] (Area2_ServerHalls): the {still} number of a
 // contact jump and of a graze jump against the Stop's length on the run's clock and in real time. tls.FoundRunTest [Quit]
-// (MainMenu): both states across travel, in the snapshots and the save (version 4), with Continue, restarts and New game;
+// (MainMenu): both states across travel, in the snapshots and the save (its current version, URunSaveGame::CurrentVersion), with Continue, restarts and New game;
 // a version 3 file, a version 2 file and a file with no Version load with the first contact not happened. The messages are
 // the test's fixture rows. Shots go to Saved/Screenshots/Brief20. Development builds only.
 
@@ -1861,11 +1861,11 @@ namespace EntityFoundDebug
 				bDisk3 |= Snap.ActIndex == 3 && Snap.bEntityFound && !Snap.bFirstContact;
 				bDisk4 |= Snap.ActIndex == 4 && Snap.bEntityFound && Snap.bFirstContact;
 			}
-			Check(Save && Save->Version == 4 && URunSaveGame::CurrentVersion == 4 && GetDefault<URunSaveGame>()->Version == 1 && bDisk3 && bDisk4,
-				FString::Printf(TEXT("the save on disk is version %d with area 3's snapshot found and area 4's found with the first contact (class default %d)"), Save ? Save->Version : -1,
-					GetDefault<URunSaveGame>()->Version));
+			Check(Save && Save->Version == URunSaveGame::CurrentVersion && GetDefault<URunSaveGame>()->Version == 1 && bDisk3 && bDisk4,
+				FString::Printf(TEXT("the save on disk is the current version %d (%d) with area 3's snapshot found and area 4's found with the first contact (class default %d)"),
+					URunSaveGame::CurrentVersion, Save ? Save->Version : -1, GetDefault<URunSaveGame>()->Version));
 			// Continue reads the save: forget the state in memory first.
-			Check(Run()->LoadSave() && Run()->GetLoadedSaveVersion() == 4, FString::Printf(TEXT("the save reads back (version %d)"), Run()->GetLoadedSaveVersion()));
+			Check(Run()->LoadSave() && Run()->GetLoadedSaveVersion() == URunSaveGame::CurrentVersion, FString::Printf(TEXT("the save reads back at the current version %d (%d)"), URunSaveGame::CurrentVersion, Run()->GetLoadedSaveVersion()));
 			Run()->SetEntityFound(false, TEXT("tls.FoundRunTest: before Continue"));
 			Run()->SetFirstContact(false, TEXT("tls.FoundRunTest: before Continue"));
 			Check(Run()->ContinueRun(), TEXT("Continue"));
@@ -1947,7 +1947,7 @@ namespace EntityFoundDebug
 
 	static FAutoConsoleCommandWithWorldAndArgs GFoundRunTestCommand(
 		TEXT("tls.FoundRunTest"),
-		TEXT("tls.FoundRunTest [Quit]: Brief 20, the entity-found state and the first contact across travel, snapshots, the save (version 4), Continue, restarts, old saves (3, 2, none) and New game (MainMenu). Clears the save slot."),
+		TEXT("tls.FoundRunTest [Quit]: Brief 20, the entity-found state and the first contact across travel, snapshots, the save (at URunSaveGame::CurrentVersion), Continue, restarts, old saves (3, 2, none) and New game (MainMenu). Clears the save slot."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic([](const TArray<FString>& Args, UWorld*)
 		{
 			StartFoundRunTest(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);
