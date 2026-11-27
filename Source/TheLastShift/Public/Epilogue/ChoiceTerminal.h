@@ -24,6 +24,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnChoiceDialogChanged, AChoiceTerm
  * asks for (URunSceneSubsystem::IsOpenEndingOffered). A button held through calls Choose: OnChoiceMade with the ending,
  * and the terminal's OnActivated and OnAnyActivated with cost 0 (the terminal sound; no spending comment). Closed without
  * choosing, the terminal offers again.
+ *
+ * Brief 36B: its reach (InteractRadius) is UTheLastShiftSettings::ChoiceTerminalReachCm, its one owner, read every frame.
  */
 UCLASS(Blueprintable)
 class THELASTSHIFT_API AChoiceTerminal : public APowerTerminal
@@ -85,6 +87,8 @@ public:
 	virtual bool OffersRead() const override { return false; }
 	virtual int32 GetCost() const override { return 0; }
 	virtual EPaymentKind GetPaymentKind() const override { return EPaymentKind::Other; }
+
+	virtual void Tick(float DeltaSeconds) override;
 
 protected:
 	virtual void BeginPlay() override;

@@ -12,6 +12,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Entity/Entity.h"
+#include "Epilogue/ChamberBattery.h"
 #include "Prologue/PrologueHatch.h"
 #include "Prologue/PrologueSlidingPanel.h"
 #include "Residue/Residue.h"
@@ -42,6 +43,7 @@ const FGameSoundSlot* FGameAudio::FindEffect(EGameSound Sound) const
 	case EGameSound::Door: return &Door;
 	case EGameSound::Energy: return &Energy;
 	case EGameSound::Interruption: return &Interruption;
+	case EGameSound::ChamberHum: return &ChamberHum;
 	default: return nullptr;
 	}
 }
@@ -134,6 +136,7 @@ void UGameAudioSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 void UGameAudioSubsystem::Deinitialize()
 {
 	ReleaseInterruption(TEXT("the game instance ends"));
+	StopHum(TEXT("the game instance ends"));
 	FWorldDelegates::OnWorldInitializedActors.Remove(InitializedActorsHandle);
 	FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
 	UScanDirectorComponent::OnDirectorBeganPlay.Remove(DirectorBeganHandle);
@@ -215,6 +218,10 @@ void UGameAudioSubsystem::HandleWorldCleanup(UWorld* World, bool bSessionEnded, 
 		}
 	}
 	HeldComponents.RemoveAll([World](const TObjectPtr<UAudioComponent>& C) { return !C || C->GetWorld() == World; });
+	if ((HumSound && HumSound->GetWorld() == World) || (HumBattery.IsValid() && HumBattery->GetWorld() == World))
+	{
+		StopHum(TEXT("the hall's map ends"));
+	}
 	if (const FDelegateHandle* Handle = SpawnHandles.Find(World))
 	{
 		World->RemoveOnActorSpawnedHandler(*Handle);
@@ -235,6 +242,120 @@ void UGameAudioSubsystem::HandleWorldBeganPlay(UWorld* World)
 	}
 	bLeavingMenu = false;
 	UpdateMusic(IsMenuWorld(World) ? TEXT("the main menu map began") : TEXT("a map began"));
+	if (AChamberBattery* Battery = AChamberBattery::Find(World))
+	{
+		StartHum(Battery);
+	}
+}
+
+void UGameAudioSubsystem::StartHum(AChamberBattery* Battery)
+{
+	StopHum(TEXT("a hall begins"));
+	if (!Battery)
+	{
+		return;
+	}
+	const FGameAudio& Audio = UTheLastShiftSettings::Get()->Audio;
+	const FVector Location = Battery->GetActorLocation();
+	FGameSoundRequest& Request = AddRequest(EGameSound::ChamberHum, FString::Printf(TEXT("the hall's hum: %s"), *Battery->GetName()));
+	Request.bInWorld = true;
+	Request.Location = Location;
+	Request.Pitch = 1.f;
+	++HumStarts;
+	HumBattery = Battery;
+	UAudioComponent* Component = CreateSoundComponent(EGameSound::ChamberHum, &Location, 1.f, Request);
+	if (!Component)
+	{
+		// An empty slot: nothing plays, and that is not an error.
+		return;
+	}
+	// From the battery: at its full level within ChamberHumFullRadiusCm, falling to nothing over ChamberHumFalloffCm.
+	Component->AttenuationOverrides.AttenuationShapeExtents = FVector(Audio.GetChamberHumFullRadiusCm(), 0.f, 0.f);
+	Component->AttenuationOverrides.FalloffDistance = Audio.GetChamberHumFalloffCm();
+	Component->bAutoDestroy = false;
+	HumSound = Component;
+	const UTimeStateSubsystem* Time = Battery->GetWorld() ? Battery->GetWorld()->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+	HumFade = Time && Time->IsStopped() ? 0.f : 1.f;
+	TickHum(0.f);
+	Component->Play();
+	HumTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this, &UGameAudioSubsystem::TickHum));
+	UE_LOG(LogGameAudio, Log, TEXT("Audio: the hall's hum from %s (volume %.2f, pitch %.2f)."), *Location.ToCompactString(), HumVolume, HumPitch);
+}
+
+bool UGameAudioSubsystem::TickHum(float DeltaSeconds)
+{
+	AChamberBattery* Battery = HumBattery.Get();
+	UAudioComponent* Component = HumSound;
+	if (!Battery || !Component)
+	{
+		return true;
+	}
+	const UWorld* World = Battery->GetWorld();
+	const UTimeStateSubsystem* Time = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
+	// Behind the pause menu it pauses with the game and keeps its values.
+	if (Time && Time->IsRunFrozen())
+	{
+		return true;
+	}
+	const FGameAudio& Audio = UTheLastShiftSettings::Get()->Audio;
+	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
+	// Normal time only: out at a Stop and back at the return to Normal time, over ChamberHumFadeSeconds (real time).
+	const float Target = Time && Time->IsStopped() ? 0.f : 1.f;
+	const float Step = DeltaSeconds / Audio.GetChamberHumFadeSeconds();
+	HumFade = Target > HumFade ? FMath::Min(Target, HumFade + Step) : FMath::Max(Target, HumFade - Step);
+
+	// The battery the hall shows, and the aftermath of the choice.
+	const float B = Battery->GetBatteryShown();
+	float Volume = Audio.GetHumVolumeAt(B);
+	float Pitch = Audio.GetHumPitchAt(B);
+	const FName Ending = Battery->GetAftermathEnding();
+	const float A = FMath::Clamp(Battery->GetAftermathAlpha(), 0.f, 1.f);
+	const float Ease = A * A * (3.f - 2.f * A);
+	if (Ending == TEXT("Open"))
+	{
+		// The structure lets go: volume and pitch sink to nothing with the glow; silent at the aftermath's end.
+		Volume *= 1.f - Ease;
+		Pitch = FMath::Lerp(Pitch, 0.4f, Ease);
+	}
+	else if (Ending == TEXT("Inject"))
+	{
+		const float Surge = 1.f + Settings->GetAftermathSurge();
+		Volume = FMath::Lerp(Volume, Audio.GetHumVolumeFull() * Surge, Ease);
+		Pitch = FMath::Lerp(Pitch, FMath::Min(Audio.GetHumPitchFull() * Surge, 2.f), Ease);
+	}
+	HumVolume = Audio.GetVolume(EGameSound::ChamberHum) * Volume * HumFade;
+	HumPitch = Pitch;
+	Component->SetVolumeMultiplier(HumVolume);
+	Component->SetPitchMultiplier(HumPitch);
+	if (!Component->IsPlaying() && HumVolume > 0.f)
+	{
+		Component->Play();
+	}
+	return true;
+}
+
+void UGameAudioSubsystem::StopHum(const TCHAR* Why)
+{
+	if (HumTicker.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(HumTicker);
+		HumTicker.Reset();
+	}
+	if (UAudioComponent* Component = HumSound)
+	{
+		Component->Stop();
+		Component->DestroyComponent();
+		UE_LOG(LogGameAudio, Log, TEXT("Audio: the hall's hum stops (%s)."), Why);
+	}
+	HumSound = nullptr;
+	HumBattery = nullptr;
+	HumVolume = 0.f;
+	HumFade = 0.f;
+}
+
+bool UGameAudioSubsystem::IsHumPlaying() const
+{
+	return HumSound && HumSound->IsPlaying();
 }
 
 void UGameAudioSubsystem::HandleActorSpawned(AActor* Actor)

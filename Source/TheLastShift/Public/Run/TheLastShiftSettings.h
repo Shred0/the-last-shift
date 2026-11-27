@@ -583,6 +583,57 @@ struct THELASTSHIFT_API FRackLightsTuning
 };
 
 /**
+ * Brief 36B: the battery's look in its hall, read by AChamberBattery alone (and through it by the hall's monitors). The
+ * glow (the light strips of the column's tiers and spines, MI_BatteryGlow) shows home's tint (SurfaceLook.Home.Tint, read
+ * from there) lightened toward white by GlowTintShare. Its level and the speed of the brighter pulses that run along every
+ * strip (upward on the spines) follow the run's battery, linearly from the Empty values at 0 (near empty: dim and slow,
+ * never dark and never still) to the Full ones at 1. The rings between the tiers turn at RingDegreesPerSecond, each the
+ * other way from the one below it. The glow and the lit monitors are light, not surfaces: Normal time only (hidden while
+ * Stopped), never captured by a scan, lighting nothing, still behind the pause menu (the rack lights' rule).
+ */
+USTRUCT(BlueprintType)
+struct THELASTSHIFT_API FBatteryLook
+{
+	GENERATED_BODY()
+
+	/** The glow's colour: home's tint lightened toward white by this share. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GlowTintShare = 0.35f;
+
+	/** The glow's emissive level at an empty battery (above 0: never dark). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.01", ClampMax = "50.0"))
+	float GlowLevelEmpty = 0.6f;
+
+	/** The glow's emissive level at a full battery. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.01", ClampMax = "50.0"))
+	float GlowLevelFull = 3.f;
+
+	/** Metres a second the pulses travel at an empty battery (above 0: never still). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.01", ClampMax = "50.0"))
+	float PulseSpeedEmpty = 0.3f;
+
+	/** Metres a second the pulses travel at a full battery. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.01", ClampMax = "50.0"))
+	float PulseSpeedFull = 2.5f;
+
+	/** Length of one pulse along its strip, metres. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.05", ClampMax = "10.0", Units = "m"))
+	float PulseLengthM = 0.6f;
+
+	/** Distance between two pulses along a strip, metres (at least the pulse's length). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.1", ClampMax = "20.0", Units = "m"))
+	float PulseSpacingM = 3.5f;
+
+	/** Degrees a second each ring turns in Normal time. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float RingDegreesPerSecond = 3.f;
+
+	/** The lit monitors' level: the glow's colour times this. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "BatteryLook", meta = (ClampMin = "0.0", ClampMax = "50.0"))
+	float ScreenLevel = 1.2f;
+};
+
+/**
  * The flashlight (Brief 21): the pawn's spot light, the one owner of its values. Normal time only (it is off while
  * Stopped). With bInverseSquaredFalloff (the physical falloff) Intensity is in lumens; without it Intensity is the
  * engine's unitless brightness, and the light falls only as (1 - (d / AttenuationRadius)^2)^FalloffExponent, flat near
@@ -714,6 +765,8 @@ enum class EGameSound : uint8
 	Energy,
 	/** A text scene goes from a line on the paradise's white to a line on black, once in a scene. */
 	Interruption,
+	/** Brief 36B: the battery's hall's hum, one loop from the battery while the hall shows (the game's one ambience). */
+	ChamberHum,
 	/** The main menu's looping track. */
 	MenuMusic,
 	Count UMETA(Hidden)
@@ -733,6 +786,7 @@ inline const TCHAR* LexToString(EGameSound Sound)
 	case EGameSound::Door: return TEXT("Door");
 	case EGameSound::Energy: return TEXT("Energy");
 	case EGameSound::Interruption: return TEXT("Interruption");
+	case EGameSound::ChamberHum: return TEXT("ChamberHum");
 	case EGameSound::MenuMusic: return TEXT("MenuMusic");
 	default: return TEXT("Unknown");
 	}
@@ -795,6 +849,13 @@ struct THELASTSHIFT_API FGameAudio
 	FGameSoundSlot Interruption;
 
 	/**
+	 * Brief 36B: the battery's hall's hum, the one ambience of the game: one looping sound from the battery, in Normal time
+	 * only, its volume and pitch following the run's battery (the Hum values below) and each aftermath of the choice.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot ChamberHum;
+
+	/**
 	 * The main menu's track; its sound wave loops. It has no volume here: its level is the file's own, and the Music volume
 	 * of StdCore's settings acts on it (StdCore's music subsystem plays it).
 	 */
@@ -824,6 +885,32 @@ struct THELASTSHIFT_API FGameAudio
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "10.0", Units = "s"))
 	float MusicFadeOutSeconds = 2.f;
 
+	/** Brief 36B: the hum is at its full level within this distance of the battery (the terminal stands inside it). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "10000.0", Units = "cm"))
+	float ChamberHumFullRadiusCm = 600.f;
+
+	/** Brief 36B: beyond ChamberHumFullRadiusCm the hum falls linearly to nothing over this distance (low in the lock). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "100.0", ClampMax = "20000.0", Units = "cm"))
+	float ChamberHumFalloffCm = 2500.f;
+
+	/** Brief 36B: the hum fades out over this at a Stop and back in over it at the return to Normal time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.01", ClampMax = "5.0", Units = "s"))
+	float ChamberHumFadeSeconds = 0.15f;
+
+	/** Brief 36B: the hum's volume (times its slot's) at an empty battery (above 0: never silent before the choice) and at a full one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.01", ClampMax = "4.0"))
+	float HumVolumeEmpty = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.01", ClampMax = "4.0"))
+	float HumVolumeFull = 1.f;
+
+	/** Brief 36B: the hum's pitch at an empty battery (low) and at a full one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.4", ClampMax = "2.0"))
+	float HumPitchEmpty = 0.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.4", ClampMax = "2.0"))
+	float HumPitchFull = 1.f;
+
 	/** The slot of an effect; null for MenuMusic (and Count), which has no volume. */
 	const FGameSoundSlot* FindEffect(EGameSound Sound) const;
 	FGameSoundSlot* FindEffect(EGameSound Sound);
@@ -840,6 +927,15 @@ struct THELASTSHIFT_API FGameAudio
 	float GetWorldFalloffCm() const { return FMath::Clamp(WorldFalloffCm, 100.f, 20000.f); }
 	float GetMusicFadeInSeconds() const { return FMath::Clamp(MusicFadeInSeconds, 0.f, 10.f); }
 	float GetMusicFadeOutSeconds() const { return FMath::Clamp(MusicFadeOutSeconds, 0.f, 10.f); }
+	float GetChamberHumFullRadiusCm() const { return FMath::Clamp(ChamberHumFullRadiusCm, 0.f, 10000.f); }
+	float GetChamberHumFalloffCm() const { return FMath::Clamp(ChamberHumFalloffCm, 100.f, 20000.f); }
+	float GetChamberHumFadeSeconds() const { return FMath::Clamp(ChamberHumFadeSeconds, 0.01f, 5.f); }
+
+	/** Brief 36B: the hum's volume share and pitch at a battery fraction (the Hum values, clamped, linear in between). */
+	float GetHumVolumeAt(float Battery) const { return FMath::Lerp(FMath::Clamp(HumVolumeEmpty, 0.01f, 4.f), FMath::Clamp(HumVolumeFull, 0.01f, 4.f), FMath::Clamp(Battery, 0.f, 1.f)); }
+	float GetHumPitchAt(float Battery) const { return FMath::Lerp(FMath::Clamp(HumPitchEmpty, 0.4f, 2.f), FMath::Clamp(HumPitchFull, 0.4f, 2.f), FMath::Clamp(Battery, 0.f, 1.f)); }
+	float GetHumVolumeFull() const { return FMath::Clamp(HumVolumeFull, 0.01f, 4.f); }
+	float GetHumPitchFull() const { return FMath::Clamp(HumPitchFull, 0.4f, 2.f); }
 };
 
 /**
@@ -1089,6 +1185,47 @@ public:
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.2", ClampMax = "10.0", Units = "s"))
 	float ChoiceHoldSeconds = 3.f;
+
+	/** Brief 36B: the reach of the chamber's terminal (AChoiceTerminal), from its centre on the floor: from 2 m in front of it. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "50.0", ClampMax = "1000.0", Units = "cm"))
+	float ChoiceTerminalReachCm = 230.f;
+
+	/** Brief 36B: the lock's panel opens by itself this long (run's clock, Normal time) after the travel screen is gone. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float LockOpenDelaySeconds = 1.f;
+
+	/** Brief 36B: the lock's panel slides open over this, then stays open. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.2", ClampMax = "30.0", Units = "s"))
+	float LockOpenSeconds = 2.f;
+
+	/**
+	 * Brief 36B: after a choice is held through, the hall answers for this long (run's clock, Normal time) before the
+	 * ending opens: Inject, the battery is fed; Open, the structure lets go. Nothing answers the player during it.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float ChoiceAftermathSeconds = 3.f;
+
+	/** Brief 36B: Inject drives the glow and the hum past their full values by this share at the aftermath's end. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float AftermathSurge = 0.5f;
+
+	/** Brief 36B: Open brings the hall's lights down to this share of their level by the aftermath's end. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AftermathLightShare = 0.15f;
+
+	/** Brief 36B: the battery's look in its hall; the one owner of its values. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue")
+	FBatteryLook BatteryLook;
+
+	/** BatteryLook, every value clamped (the Full values at least the Empty ones, the spacing at least the pulse). */
+	FBatteryLook GetBatteryLook() const;
+
+	float GetChoiceTerminalReachCm() const { return FMath::Clamp(ChoiceTerminalReachCm, 50.f, 1000.f); }
+	float GetLockOpenDelaySeconds() const { return FMath::Clamp(LockOpenDelaySeconds, 0.f, 30.f); }
+	float GetLockOpenSeconds() const { return FMath::Clamp(LockOpenSeconds, 0.2f, 30.f); }
+	float GetChoiceAftermathSeconds() const { return FMath::Clamp(ChoiceAftermathSeconds, 0.f, 30.f); }
+	float GetAftermathSurge() const { return FMath::Clamp(AftermathSurge, 0.f, 4.f); }
+	float GetAftermathLightShare() const { return FMath::Clamp(AftermathLightShare, 0.f, 1.f); }
 
 	/** Normal-time seconds the arrival hangar's hatch takes to close once the player has left the ship. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))

@@ -151,13 +151,18 @@ namespace LookDebug
 			{
 				UMaterialInterface* M = C->GetMaterial(S);
 				Mats += (S ? TEXT(", ") : TEXT("")) + GetNameSafe(M);
-				// A surface outside the families (not MI_Surface_*, not the hologram's own materials): named, to be found.
-				const FString MatName = GetNameSafe(M);
-				if (!MatName.StartsWith(TEXT("MI_Surface_")) && !MatName.Contains(TEXT("Hologram")) && C->bRenderInMainPass)
+				// A surface outside the families (not MI_Surface_*, not a light's own material: the hologram's, the rack lights' and,
+				// Brief 36B, the battery's glow and its hall's lit screens, all hidden while Stopped): named, to be found. A material
+				// made at runtime is named by the asset it was made from.
+				const UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(M);
+				const FString MatName = Mid && Mid->Parent ? GetNameSafe(Mid->Parent) : GetNameSafe(M);
+				const FString BaseName = M && M->GetMaterial() ? M->GetMaterial()->GetName() : FString();
+				const bool bLight = BaseName.Contains(TEXT("Hologram")) || BaseName == TEXT("M_BatteryGlow") || BaseName == TEXT("M_BatteryScreen");
+				if (!MatName.StartsWith(TEXT("MI_Surface_")) && !bLight && C->bRenderInMainPass)
 				{
 					UE_LOG(LogTheLastShift, Display, TEXT("  OUTSIDE THE FAMILIES: %s on %s of %s"), *MatName, *C->GetName(), *GetNameSafe(C->GetOwner()));
 				}
-				Families.FindOrAdd(GetNameSafe(M)) += Count;
+				Families.FindOrAdd(MatName) += Count;
 				if (M && M->GetMaterial())
 				{
 					Bases.Add(M->GetMaterial());

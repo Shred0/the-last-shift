@@ -6,6 +6,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Run/RunSceneSubsystem.h"
+#include "Run/TheLastShiftSettings.h"
 #include "TheLastShift.h"
 #include "Time/TimeStateSubsystem.h"
 #include "UI/ChoiceDialogWidget.h"
@@ -16,8 +17,10 @@ AChoiceTerminal::AChoiceTerminal()
 {
 	bModelledBody = true;
 	Cost = 0;
-	// Reaches a player standing 2 m in front of its front face (the reach is measured from its centre, on the floor).
-	InteractRadius = 230.f;
+	// Brief 36B: the reach has one owner, UTheLastShiftSettings::ChoiceTerminalReachCm (230 cm: a player standing 2 m in
+	// front of its front face; the reach is measured from its centre, on the floor), read when play begins and every frame.
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = true;
 }
 
 void AChoiceTerminal::BeginPlay()
@@ -27,6 +30,14 @@ void AChoiceTerminal::BeginPlay()
 	TimeState = World ? World->GetSubsystem<UTimeStateSubsystem>() : nullptr;
 	bOffering = bChosen = false;
 	Dialog = nullptr;
+	InteractRadius = UTheLastShiftSettings::Get()->GetChoiceTerminalReachCm();
+}
+
+void AChoiceTerminal::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	// A value set for the session is followed at once.
+	InteractRadius = UTheLastShiftSettings::Get()->GetChoiceTerminalReachCm();
 }
 
 void AChoiceTerminal::EndPlay(const EEndPlayReason::Type EndPlayReason)

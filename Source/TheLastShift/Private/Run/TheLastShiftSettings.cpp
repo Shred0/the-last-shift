@@ -106,6 +106,21 @@ FRackLightsTuning UTheLastShiftSettings::GetRackLightsTuning() const
 	return T;
 }
 
+FBatteryLook UTheLastShiftSettings::GetBatteryLook() const
+{
+	FBatteryLook T;
+	T.GlowTintShare = FMath::Clamp(BatteryLook.GlowTintShare, 0.f, 1.f);
+	T.GlowLevelEmpty = FMath::Clamp(BatteryLook.GlowLevelEmpty, 0.01f, 50.f);
+	T.GlowLevelFull = FMath::Clamp(BatteryLook.GlowLevelFull, T.GlowLevelEmpty, 50.f);
+	T.PulseSpeedEmpty = FMath::Clamp(BatteryLook.PulseSpeedEmpty, 0.01f, 50.f);
+	T.PulseSpeedFull = FMath::Clamp(BatteryLook.PulseSpeedFull, T.PulseSpeedEmpty, 50.f);
+	T.PulseLengthM = FMath::Clamp(BatteryLook.PulseLengthM, 0.05f, 10.f);
+	T.PulseSpacingM = FMath::Clamp(BatteryLook.PulseSpacingM, FMath::Max(0.1f, T.PulseLengthM), 20.f);
+	T.RingDegreesPerSecond = FMath::Clamp(BatteryLook.RingDegreesPerSecond, 0.f, 90.f);
+	T.ScreenLevel = FMath::Clamp(BatteryLook.ScreenLevel, 0.f, 50.f);
+	return T;
+}
+
 FHologramTuning UTheLastShiftSettings::GetHologramTuning() const
 {
 	FHologramTuning T;

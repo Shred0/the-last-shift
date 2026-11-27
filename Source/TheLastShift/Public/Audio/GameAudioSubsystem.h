@@ -13,6 +13,7 @@
 #include "GameAudioSubsystem.generated.h"
 
 class AActor;
+class AChamberBattery;
 class UAudioComponent;
 class ALogTerminal;
 class APowerTerminal;
@@ -86,6 +87,12 @@ struct THELASTSHIFT_API FGameSoundRequest
  *   (faded over MusicFadeOutSeconds) when a text scene's screen opens over it (the opening scene, the ending), when a
  *   travel leaves it, and in every other map.
  *
+ * - Brief 36B: the battery's hall's hum (ChamberHum), the game's one ambience: one looping sound asked for once when a map
+ *   with the hall's battery (AChamberBattery) begins, from the battery's place, at full level within ChamberHumFullRadiusCm
+ *   and falling to nothing over ChamberHumFalloffCm beyond it. Every frame it follows what the battery announces: its
+ *   level (volume and pitch between the Hum values), the time state (out over ChamberHumFadeSeconds at a Stop, back the
+ *   same way at the return to Normal time) and the aftermath of the choice (Open: volume and pitch sinking to nothing with
+ *   the glow; Inject: rising past their full values by AftermathSurge). Behind the pause menu it pauses with the game.
  * The effects play in StdCore's SFX sound class and are no UI sounds: they pause with the game behind the pause menu.
  * An empty slot plays nothing and logs nothing. Every request is recorded (GetRecord) for the tests.
  */
@@ -152,6 +159,20 @@ public:
 
 	/** Brief 35: the share of its slot's volume the interruption's noise plays at now (the static's strength). */
 	float GetInterruptionShare() const { return InterruptionShare; }
+
+	/** Brief 36B: the hall's hum: its component while the hall's map shows (null otherwise or with an empty slot). */
+	UAudioComponent* GetHumComponent() const { return HumSound; }
+
+	/** Brief 36B: the hum is playing now (it plays on, silent, while Stopped). */
+	bool IsHumPlaying() const;
+
+	/** Brief 36B: the volume multiplier and pitch the hum is given now, and its fade share (0 while Stopped, 1 in Normal time). */
+	float GetHumVolume() const { return HumVolume; }
+	float GetHumPitch() const { return HumPitch; }
+	float GetHumFade() const { return HumFade; }
+
+	/** Brief 36B: times the hum was asked for since the game instance began (once a hall). */
+	int32 GetHumStarts() const { return HumStarts; }
 
 private:
 	void HandleWorldInitializedActors(const FActorsInitializedParams& Params);
@@ -226,6 +247,11 @@ private:
 	/** Brief 35: stops the interruption's noise (recorded as a stop with Why). */
 	void ReleaseInterruption(const TCHAR* Why);
 
+	/** Brief 36B: starts the hall's hum from Battery's place (recorded once), and follows the battery every frame. */
+	void StartHum(AChamberBattery* Battery);
+	bool TickHum(float DeltaSeconds);
+	void StopHum(const TCHAR* Why);
+
 	/** The world is the main menu map (StdCore's MainMenuMap). */
 	static bool IsMenuWorld(const UWorld* World);
 
@@ -260,6 +286,16 @@ private:
 	FTSTicker::FDelegateHandle InterruptionTicker;
 
 	bool bMusicOn = false;
+
+	/** Brief 36B: the hall's hum. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> HumSound;
+	TWeakObjectPtr<AChamberBattery> HumBattery;
+	FTSTicker::FDelegateHandle HumTicker;
+	float HumVolume = 0.f;
+	float HumPitch = 1.f;
+	float HumFade = 0.f;
+	int32 HumStarts = 0;
 
 	/** The held sounds of the timed motions under way, by mover; the components kept alive while held. */
 	TMap<TWeakObjectPtr<AActor>, TWeakObjectPtr<UAudioComponent>> MotionSounds;

@@ -7,6 +7,7 @@
 #include "Time/TimeState.h"
 #include "PrologueMonitorRoom.generated.h"
 
+class AChamberBattery;
 class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
@@ -24,6 +25,14 @@ class UTimeStateSubsystem;
  *    They show in Normal time only, are hidden while Stopped, are never captured by a scan and stand still behind the
  *    pause menu, like the hologram of the room. They light nothing.
  * The monitors' and servers' places are those of the two meshes (their own frames); nothing of either mesh changes.
+ *
+ * Brief 36B, with bBatteryScreens (the battery's hall): the two screens of every control bank (ControlBankMesh) get a
+ * black plate too, and every monitor and bank screen gets a lit plate in front of its black one (ScreenLitMaterial: bars,
+ * columns and segmented gauges, four layouts shared out by the monitor's place, no word and no digit), filled to the
+ * level the hall's battery shows (AChamberBattery::GetGaugeLevel) in the glow's colour, the one owner of both. A lit
+ * plate is light: shown in Normal time only (while Stopped the black plate under it is the screen), never captured by a
+ * scan, lighting nothing, still behind the pause menu. In Open's aftermath the lit plates go out one after another across
+ * the wall (AChamberBattery::GetScreenOutShare), leaving the black plates.
  */
 UCLASS()
 class THELASTSHIFT_API APrologueMonitorRoom : public AActor
@@ -46,6 +55,36 @@ public:
 	/** The lights' look: unlit, its "Color" parameter the emissive colour (the hologram's material). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Monitor Room")
 	TObjectPtr<UMaterialInterface> LightMaterial;
+
+	/** Brief 36B: the battery's hall: lit plates showing the battery's level on the monitors and the control banks. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Monitor Room")
+	bool bBatteryScreens = false;
+
+	/** Brief 36B: the mesh whose two screens (the desk's and the upright's) get plates with bBatteryScreens. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Monitor Room")
+	TObjectPtr<UStaticMesh> ControlBankMesh;
+
+	/** Brief 36B: the lit screens' look (M_BatteryScreen: unlit; Layout, Level, Color, Brightness). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Monitor Room")
+	TObjectPtr<UMaterialInterface> ScreenLitMaterial;
+
+	/** Brief 36B: the lit plates (bBatteryScreens), in their order across the wall. */
+	UFUNCTION(BlueprintPure, Category = "Monitor Room")
+	TArray<UStaticMeshComponent*> GetLitPlates() const;
+
+	/** Brief 36B: the layout (0 to 3) of lit plate Index, and whether it sits on a control bank. */
+	int32 GetLitLayout(int32 Index) const { return LitLayouts.IsValidIndex(Index) ? LitLayouts[Index] : -1; }
+	bool IsLitOnBank(int32 Index) const { return LitOnBank.IsValidIndex(Index) && LitOnBank[Index]; }
+
+	/** Brief 36B: the level the lit screens show now (0 to 1), and the lit plates shown now. */
+	UFUNCTION(BlueprintPure, Category = "Monitor Room")
+	float GetScreenLevel() const { return ScreenLevel; }
+
+	UFUNCTION(BlueprintPure, Category = "Monitor Room")
+	int32 GetLitShownCount() const;
+
+	/** Brief 36B: the material of each layout (tests read its parameters). */
+	UMaterialInstanceDynamic* GetLayoutMaterial(int32 Layout) const { return LayoutMids.IsValidIndex(Layout) ? LayoutMids[Layout].Get() : nullptr; }
 
 	/** Plates laid over monitors. */
 	UFUNCTION(BlueprintPure, Category = "Monitor Room")
@@ -101,6 +140,8 @@ private:
 	void HandleTimeStateChanged(ETimeState NewState, ETimeState OldState, EStopExitReason Reason);
 
 	void BuildPlates();
+	void BuildLitPlate(UStaticMeshComponent* Owner, int32 Index, const FVector& Centre, const FVector& Normal, const FVector& Up, const FVector2D& Size, bool bBank);
+	void UpdateScreens();
 	void BuildLights();
 	void UpdateBlink(bool bForce);
 	void UpdateVisibility();
@@ -117,6 +158,19 @@ private:
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UStaticMeshComponent>> Plates;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UStaticMeshComponent>> LitPlates;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> LayoutMids;
+
+	TArray<int32> LitLayouts;
+	TArray<bool> LitOnBank;
+	/** Each lit plate's place across the wall, 0 at one end and 1 at the other (the order in which they go out). */
+	TArray<float> LitOrder;
+	TWeakObjectPtr<AChamberBattery> Battery;
+	float ScreenLevel = 0.f;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> HomeMaterial;
