@@ -113,14 +113,14 @@ struct THELASTSHIFT_API FAreaBackdropRecipe
 	bool bLayers = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "0", ClampMax = "4"))
-	int32 LayerCountAbove = 2;
+	int32 LayerCountAbove = 4;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "0", ClampMax = "4"))
-	int32 LayerCountBelow = 2;
+	int32 LayerCountBelow = 4;
 
 	/** Height between two levels (the walked level's floor at 0). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "4.0", ClampMax = "60.0", Units = "m"))
-	float LayerSpacingM = 12.f;
+	float LayerSpacingM = 16.f;
 
 	/** Each level is the walked one enlarged by this about the segment's centre (and turned a quarter turn more per level). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Area|Backdrop", meta = (ClampMin = "1.0", ClampMax = "4.0"))
