@@ -12,11 +12,12 @@
 //  - the route drawn by the briefing terminal typing fixture rows: none before the Hologram group, the share of the text
 //    typed (rows weighted by their length), still between two rows and behind the pause menu, whole after the briefing and
 //    still whole later; with two rows (45 and 140 characters), four rows (20, 90, 35 and 60) and none;
-//  - the route's colour measured on a shot from the doorway, with and without the beams;
+//  - the route's colour measured on a shot from the doorway, with and without the beams, and the beams seen there: the
+//    pixels inside their place on screen that the beams change by 6 levels or more (at least 2000);
 //  - nothing of it while Stopped (each part's component hidden; a shot before the first scan), and none of its parts in the
 //    scan's capture: from two poses, the scan's depth with each part shown while Stopped (test only) is the depth without
 //    the hologram, texel by texel.
-// Shots to Saved/Screenshots/Brief18. The fixture rows replace the prologue table for the run and are put back at the end.
+// Shots to Saved/Screenshots/Brief44 (Brief18 before). The fixture rows replace the prologue table for the run and are put back at the end.
 
 #include "CoreMinimal.h"
 
@@ -205,7 +206,7 @@ namespace HologramTest
 		G.Shots.Add(G.ShotName, G.Shot);
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief18"), TEXT("HologramTest_") + G.ShotName + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"), TEXT("HologramTest_") + G.ShotName + TEXT(".png")));
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 		FFileHelper::SaveArrayToFile(Png, *Path);
 		Note(FString::Printf(TEXT("shot %s (%d x %d): %s"), *G.ShotName, Width, Height, *Path));
@@ -876,6 +877,61 @@ namespace HologramTest
 			Check(N > 200 && bHue && D <= 10.0,
 				FString::Printf(TEXT("the route is in the entity's colour on the shot from the doorway: %d pixels, mean (%.0f, %.0f, %.0f) through the beams, (%.0f, %.0f, %.0f) without them (largest difference %.1f levels)"),
 					N, N ? SW[0] / N : 0.0, N ? SW[1] / N : 0.0, N ? SW[2] / N : 0.0, N ? SN[0] / N : 0.0, N ? SN[1] / N : 0.0, N ? SN[2] / N : 0.0, D));
+
+			// What the player sees of the beams: the same two shots, the motion held, so that only the beams differ. Inside the
+			// beams' place on screen (each cone's tip and the rim of its far end, projected) the pixels the beams change, by how
+			// many levels (8-bit, the largest channel). A step of 6 levels on the room's mid grey (about 2.5% of its level) is
+			// above what a person tells apart on a flat patch (about 1 to 2%); 2000 such pixels are a patch, not a speck.
+			FVector2D Lo(1.e9, 1.e9), Hi(-1.e9, -1.e9);
+			for (int32 I = 0; I < H->GetBeamCount(); ++I)
+			{
+				FVector A, B;
+				float Spread = 0.f, Far = 0.f, Level = 0.f;
+				H->GetBeam(I, A, B, Spread, Far, Level);
+				const FVector Axis = (B - A).GetSafeNormal();
+				const float Radius = FVector::Dist(A, B) * FMath::Tan(FMath::DegreesToRadians(Spread));
+				const FVector U = FVector::CrossProduct(Axis, FVector::UpVector).GetSafeNormal();
+				const FVector V = FVector::CrossProduct(Axis, U);
+				for (const FVector& P : { A, B + U * Radius, B - U * Radius, B + V * Radius, B - V * Radius })
+				{
+					FVector2D S2;
+					if (PC()->ProjectWorldLocationToScreen(P, S2, false))
+					{
+						Lo = FVector2D(FMath::Min(Lo.X, S2.X), FMath::Min(Lo.Y, S2.Y));
+						Hi = FVector2D(FMath::Max(Hi.X, S2.X), FMath::Max(Hi.Y, S2.Y));
+					}
+				}
+			}
+			TArray<int32> Diffs;
+			int32 Visible = 0;
+			if (With && Without && With->Pixels.Num() == Without->Pixels.Num() && Hi.X > Lo.X)
+			{
+				for (int32 Y = FMath::Max(0, int32(Lo.Y)); Y < FMath::Min(With->Height, int32(Hi.Y)); ++Y)
+				{
+					for (int32 X = FMath::Max(0, int32(Lo.X)); X < FMath::Min(With->Width, int32(Hi.X)); ++X)
+					{
+						const FColor& P = With->Pixels[Y * With->Width + X];
+						const FColor& Q = Without->Pixels[Y * With->Width + X];
+						const int32 Diff = FMath::Max3(FMath::Abs(P.R - Q.R), FMath::Abs(P.G - Q.G), FMath::Abs(P.B - Q.B));
+						if (Diff > 0)
+						{
+							Diffs.Add(Diff);
+							Visible += Diff >= 6 ? 1 : 0;
+						}
+					}
+				}
+			}
+			Diffs.Sort();
+			double Mean = 0.0;
+			for (const int32 Diff : Diffs)
+			{
+				Mean += Diff;
+			}
+			Mean = Diffs.Num() ? Mean / Diffs.Num() : 0.0;
+			Check(Visible >= 2000,
+				FString::Printf(TEXT("the beams are seen from the doorway: inside their place on screen (%.0f, %.0f)-(%.0f, %.0f) %d pixels differ with the beams shown and hidden by 6 levels or more (2000 needed); of the %d that differ at all: mean %.1f, median %d, 90th percentile %d, largest %d levels (BeamLevel %.3f, BeamFadePower %.1f)"),
+					Lo.X, Lo.Y, Hi.X, Hi.Y, Visible, Diffs.Num(), Mean, Diffs.Num() ? Diffs[Diffs.Num() / 2] : 0, Diffs.Num() ? Diffs[Diffs.Num() * 9 / 10] : 0, Diffs.Num() ? Diffs.Last() : 0,
+					UTheLastShiftSettings::Get()->GetHologramTuning().BeamLevel, UTheLastShiftSettings::Get()->GetHologramTuning().BeamFadePower));
 			return 0.f;
 		}));
 
@@ -957,7 +1013,7 @@ namespace HologramTest
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsHologramTestCommand(
 	TEXT("tls.HologramTest"),
-	TEXT("tls.HologramTest [Quit=0]: (fresh PIE or a package, in Prologue_Home) Brief 18's hologram: parts and colours, the turn, the drift, the beams, behind the pause menu, the route's colour on a shot, nothing while Stopped or in the scan's capture (each part, two poses), the route drawn by the briefing with fixture rows (two rows, four rows, none). Shots to Saved/Screenshots/Brief18."),
+	TEXT("tls.HologramTest [Quit=0]: (fresh PIE or a package, in Prologue_Home) Brief 18's hologram: parts and colours, the turn, the drift, the beams, behind the pause menu, the route's colour on a shot and the beams seen on it, nothing while Stopped or in the scan's capture (each part, two poses), the route drawn by the briefing with fixture rows (two rows, four rows, none). Shots to Saved/Screenshots/Brief44."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		HologramTest::Start(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);

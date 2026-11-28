@@ -28,7 +28,8 @@ class UTimeStateSubsystem;
  *   it; they stand still while Stopped and behind the pause menu. A scan shows a ring where it stands.
  * - The aftermath of the choice (AEpilogueChamber): Inject, the pulses run faster and faster, the glow rises to
  *   GlowLevelFull and past it by AftermathSurge, the gauges climb to full; Open, the glow sinks to nothing, the pulses stop,
- *   the rings slow to a stand and the monitors go out one after another across the wall.
+ *   the rings slow to a stand and the monitors go out one after another across the wall; each reaches its end state at
+ *   the aftermath's end, and holds it through the hold that follows.
  *
  * It knows nothing of sound: the audio reads what it announces (GetBatteryShown, GetAftermathEnding, GetAftermathAlpha).
  */
@@ -45,6 +46,13 @@ public:
 	/** The glow's look (MI_BatteryGlow). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Battery")
 	TObjectPtr<UMaterialInterface> GlowMaterial;
+
+	/**
+	 * The rings' surface, made when play begins from the ring mesh's own material (the battery's family) with its
+	 * ObjectSpace set: the rings move, and what moves is mapped in its own space ("Rendering"), so that every detail of
+	 * the surface turns with the ring. Null before play or without a ring.
+	 */
+	UMaterialInstanceDynamic* GetRingMaterial() const { return RingMid; }
 
 	/** The battery the hall shows now: the session's (tls.Chamber.Battery) or the run's, 0 to 1. */
 	UFUNCTION(BlueprintPure, Category = "Battery")
@@ -73,7 +81,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Battery")
 	float GetGaugeLevel() const;
 
-	/** The share of the monitors gone out across the wall (0; Open's aftermath: rising to 1 before its end). */
+	/** The share of the monitors gone out across the wall (0; Open's aftermath: rising to 1 at its end). */
 	UFUNCTION(BlueprintPure, Category = "Battery")
 	float GetScreenOutShare() const;
 
@@ -133,6 +141,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> SpineMid;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> RingMid;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTimeStateSubsystem> TimeState;

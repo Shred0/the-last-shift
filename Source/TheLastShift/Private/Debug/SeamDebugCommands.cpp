@@ -12,7 +12,11 @@
 //      overlaps (another piece's, or its own doubled); faces that touch back to back, and faces that face down onto a floor's
 //      top, are listed (they cannot show); and on 30 frames while the camera moves 1 cm a frame, from 3 m and from 10 m, each
 //      captured with the frame hidden and drawn, no pixel alternates between the frame and another surface;
-// with shots (Tag in their names: Before, After) to Saved/Screenshots/Brief35. Development builds only.
+// and, in the hand-built maps, their doorways (a door frame with no door) counted as openings, and every opening the player
+// passes seen as the player sees it: shut and open, from 2 m at eye height on each side looking down at its threshold (no
+// pixel of it shows nothing or a surface below the floor plates' base, the bottom of their bevelled joints) and, shut, from
+// 3 m on each side looking at the wall round and above its frame (no pixel shows nothing);
+// with shots (Tag in their names: Before, After) to Saved/Screenshots/Brief44 (Brief35 before). Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
 #include "Debug/TestLidarCharacter.h"
@@ -456,6 +460,8 @@ namespace SeamDebug
 		bool bHangarHatch = false;
 		/** A panel that slides down into its own sill (the ship's hatch): sampled through its own thickness only. */
 		bool bSlidesDown = false;
+		/** A doorway of a hand-built map: a door frame with no door or panel in it (no actor to move). */
+		bool bDoorway = false;
 		/** The panel's travel, closed to open (world box; invalid for an opening whose panel is not moved by this check). */
 		FBox Travel = FBox(ForceInit);
 	};
@@ -1075,7 +1081,7 @@ namespace SeamDebug
 		{
 			TArray64<uint8> Png;
 			FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
-			const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief35"), GShotSave + TEXT(".png")));
+			const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"), GShotSave + TEXT(".png")));
 			IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 			FFileHelper::SaveArrayToFile(Png, *Path);
 			Note(FString::Printf(TEXT("shot %s saved: %s"), *GShotSave, *Path));
@@ -1300,7 +1306,7 @@ namespace SeamDebug
 	{
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Mask.GetData(), Mask.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief35"), MaskName + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"), MaskName + TEXT(".png")));
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 		FFileHelper::SaveArrayToFile(Png, *Path);
 		Note(FString::Printf(TEXT("mask %s saved (red: void; orange: the plates' joints; grey: depth): %s"), *MaskName, *Path));
@@ -1664,7 +1670,7 @@ namespace SeamDebug
 			{
 				TArray64<uint8> Png;
 				FImageUtils::PNGCompressImageArray(GShot.Width, GShot.Height, TArrayView64<const FColor>(Mask.GetData(), Mask.Num()), Png);
-				const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief35"),
+				const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"),
 					FString::Printf(TEXT("%s_%s_FlickerMask_%s.png"), *MapShort(), *Label, *GRun.Tag)));
 				FFileHelper::SaveArrayToFile(Png, *Path);
 				Note(FString::Printf(TEXT("C: %s: the mask of the flickering pixels (red; the frame's pixels dim yellow): %s"), *Label, *Path));
@@ -1687,6 +1693,274 @@ namespace SeamDebug
 		FRotator ControlBefore;
 	};
 	static FCheckState G;
+
+	// --- The hand-built maps, as the player sees them (follow-up of the battery's hall): the threshold from 2 m and the wall
+	// round the frame from 3 m, on each side of every opening ---
+
+	/**
+	 * The hand-built maps' doorways: a door frame (SM_KitDoorFrame) with no door or panel in it, like the monitor room's at
+	 * home. Each is an opening with nothing to move (no actor), its frame's place and size: X through it, Y across it.
+	 */
+	static void AddDoorways(const TArray<FFrameRef>& Frames, TArray<FOpening>& Out)
+	{
+		for (const FFrameRef& F : Frames)
+		{
+			const UStaticMeshComponent* C = F.Piece.Component.Get();
+			if (!C || GetNameSafe(C->GetStaticMesh()) != TEXT("SM_KitDoorFrame"))
+			{
+				continue;
+			}
+			bool bHasOpening = false;
+			for (const FOpening& O : Out)
+			{
+				bHasOpening |= F.Piece.Box.ExpandBy(FVector(5.0, 5.0, 50.0)).IsInsideOrOnXY(O.Frame.GetLocation());
+			}
+			if (bHasOpening)
+			{
+				continue;
+			}
+			FOpening& O = Out.AddDefaulted_GetRef();
+			O.Label = FString::Printf(TEXT("Doorway_%s"), *GetNameSafe(C->GetOwner()));
+			O.bDoorway = true;
+			const FVector Centre = F.Piece.Box.GetCenter();
+			O.Frame = FTransform(F.Piece.Transform.GetRotation(), FVector(Centre.X, Centre.Y, F.Piece.Box.Min.Z));
+			const FBox Local = F.Piece.Box.InverseTransformBy(O.Frame);
+			O.Depth = Local.GetSize().X;
+			// The kit's door frame: 25 cm jambs on either side of its opening, its head at 300 cm.
+			O.Width = FMath::Max(Local.GetSize().Y - 50.0, 50.0);
+			O.Height = 300.0;
+		}
+		Out.Sort([](const FOpening& A, const FOpening& B) { return A.Label < B.Label; });
+	}
+
+	/**
+	 * How deep the floor plates' own relief goes below their top (the bottom of their bevelled joints): read from the floors'
+	 * mesh (SM_KitFloorPlate, LOD 0) as the lowest point of its faces turned up and slanted (the bevels). 2.5 cm when unread.
+	 */
+	static double PlateBaseDepth()
+	{
+		const UStaticMesh* Plate = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/TheLastShift/Art/Kit/SM_KitFloorPlate.SM_KitFloorPlate"));
+		TArray<FVector> V;
+		TArray<uint32> I;
+		if (!Plate || !FEntityFigureShape::ReadMeshTriangles(Plate, V, I) || V.Num() == 0)
+		{
+			return 2.5;
+		}
+		const double Top = Plate->GetBoundingBox().Max.Z;
+		double Lowest = Top;
+		for (int32 K = 0; K + 2 < I.Num(); K += 3)
+		{
+			const FVector& A = V[I[K]];
+			const FVector& B = V[I[K + 1]];
+			const FVector& C = V[I[K + 2]];
+			const FVector N = -FVector::CrossProduct(B - A, C - A).GetSafeNormal();
+			if (N.Z > 0.2 && N.Z < 0.98)
+			{
+				Lowest = FMath::Min(Lowest, static_cast<double>(FMath::Min3(A.Z, B.Z, C.Z)));
+			}
+		}
+		return Lowest < Top ? Top - Lowest : 2.5;
+	}
+
+	/** A depth capture against an opening's threshold and the wall round its frame. */
+	struct FViewCount
+	{
+		/** Pixels whose ray comes down to the floor's level inside the threshold's area, and of those: nothing drawn, or deeper. */
+		int32 Threshold = 0;
+		int32 ThresholdNothing = 0;
+		int32 ThresholdDeep = 0;
+		double Deepest = 0.0;
+		/** Of the threshold's pixels below the plates' base: those on a plate's own relief (its grooves), not counted. */
+		int32 Relief = 0;
+		/** Every pixel of the capture that shows nothing, and of those the ones seen through the wall round the frame. */
+		int32 Nothing = 0;
+		int32 WallHoles = 0;
+		TArray<FColor> Mask;
+	};
+
+	/**
+	 * Counts a depth capture (Width x Height, FovDeg across) against opening O.
+	 * - The threshold: the pixels whose ray crosses the floor's level within 1 m of the frame through it and within its
+	 *   jambs' outer faces across it (the door's own floor, not the foot of the walls beside it), and of those the ones that show nothing or a surface deeper than PlateBase below the floor's top
+	 *   (0.5 cm of tolerance). A hit on a floor plate's own relief is not that: inside the plate's footprint (0.2 cm of
+	 *   tolerance) and no deeper than half its thickness (the kit's plate is 10 cm thick, its bevels 2.5 cm and its grooves
+	 *   5 cm deep; the hangars' plates are the same mesh at twice the thickness). A plate's side seen in a gap below half its
+	 *   thickness, and anything under the plates, still counts.
+	 * - The wall round the frame: the pixels that show nothing and whose ray crosses the wall's middle plane within 1 m of the
+	 *   frame across and up to 7 m, outside the opening itself (through the opening the room beyond is seen, not the wall).
+	 */
+	static FViewCount CountView(const FOpening& O, const FVector& Eye, const FRotator& Rotation, float FovDeg, int32 Width, int32 Height, const TArray<float>& Depth, double PlateBase)
+	{
+		FViewCount R;
+		R.Mask.Init(FColor::Black, Width * Height);
+		const double Floor = O.Frame.GetLocation().Z;
+		const FVector Forward = Rotation.Vector();
+		const FBox FrameBox = LocalFrameBox(O);
+		const double HalfThrough = (FrameBox.IsValid ? FMath::Max(FMath::Abs(FrameBox.Min.X), FMath::Abs(FrameBox.Max.X)) : 0.5 * O.Depth) + 100.0;
+		const double HalfAcross = FrameBox.IsValid ? FMath::Max(FMath::Abs(FrameBox.Min.Y), FMath::Abs(FrameBox.Max.Y)) : 0.5 * O.Width;
+		// The floor plates near the opening: shown, at most 60 cm thick, their top within 3 cm of its floor.
+		TArray<FBox> Plates;
+		for (const FPiece& P : G.Pieces)
+		{
+			const FVector At = O.Frame.GetLocation();
+			const FBox Flat(FVector(P.Box.Min.X, P.Box.Min.Y, At.Z), FVector(P.Box.Max.X, P.Box.Max.Y, At.Z));
+			if (P.Box.Max.Z - P.Box.Min.Z <= 60.0 && FMath::Abs(P.Box.Max.Z - Floor) <= 3.0 && Flat.ComputeSquaredDistanceToPoint(At) <= 800.0 * 800.0)
+			{
+				Plates.Add(P.Box);
+			}
+		}
+		auto OnOwnRelief = [&Plates](const FVector& Hit)
+		{
+			for (const FBox& B : Plates)
+			{
+				if (Hit.X >= B.Min.X - 0.2 && Hit.X <= B.Max.X + 0.2 && Hit.Y >= B.Min.Y - 0.2 && Hit.Y <= B.Max.Y + 0.2 && Hit.Z >= B.Max.Z - 0.5 * (B.Max.Z - B.Min.Z) - 0.5)
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+		const FVector LocalEye = O.Frame.InverseTransformPosition(Eye);
+		for (int32 Y = 0; Y < Height; ++Y)
+		{
+			for (int32 X = 0; X < Width; ++X)
+			{
+				const int32 I = Y * Width + X;
+				const FVector Ray = PixelRay(Rotation, FovDeg, Width, Height, X, Y);
+				const double D = Depth[I];
+				const bool bNothing = D > 1.0e7;
+				const double Along = FMath::Max(FVector::DotProduct(Ray, Forward), 1e-3);
+				const FVector Hit = bNothing ? FVector::ZeroVector : Eye + Ray * (D / Along);
+				const double HitZ = bNothing ? -1.0e9 : Hit.Z;
+				R.Nothing += bNothing ? 1 : 0;
+				bool bWallHole = false;
+				if (bNothing)
+				{
+					const FVector LocalRay = O.Frame.InverseTransformVector(Ray);
+					if (FMath::Abs(LocalRay.X) > 1e-4)
+					{
+						const double T = -LocalEye.X / LocalRay.X;
+						const FVector At = LocalEye + LocalRay * T;
+						bWallHole = T > 0.0 && FMath::Abs(At.Y) <= HalfAcross + 100.0 && At.Z >= -20.0 && At.Z <= 700.0
+							&& !(FMath::Abs(At.Y) <= 0.5 * O.Width && At.Z >= 0.0 && At.Z <= O.Height);
+					}
+				}
+				R.WallHoles += bWallHole ? 1 : 0;
+				bool bThreshold = false;
+				if (Ray.Z < -1e-4 && Eye.Z > Floor)
+				{
+					const FVector Local = O.Frame.InverseTransformPosition(Eye + Ray * ((Eye.Z - Floor) / -Ray.Z));
+					bThreshold = FMath::Abs(Local.X) <= HalfThrough && FMath::Abs(Local.Y) <= HalfAcross;
+				}
+				const bool bBelow = bThreshold && !bNothing && HitZ < Floor - PlateBase - 0.5;
+				const bool bRelief = bBelow && OnOwnRelief(Hit);
+				const bool bDeep = bBelow && !bRelief;
+				if (bThreshold)
+				{
+					++R.Threshold;
+					R.ThresholdNothing += bNothing ? 1 : 0;
+					R.ThresholdDeep += bDeep ? 1 : 0;
+					R.Relief += bRelief ? 1 : 0;
+					if (!bNothing && !bRelief)
+					{
+						R.Deepest = FMath::Max(R.Deepest, Floor - HitZ);
+					}
+				}
+				const uint8 Grey = bNothing ? 0 : static_cast<uint8>(FMath::Clamp(255.0 - D / 10.0, 30.0, 255.0));
+				R.Mask[I] = bNothing ? (bWallHole ? FColor(255, 0, 255) : FColor(255, 0, 0)) : bDeep ? FColor(255, 160, 0) : bRelief ? FColor(0, 120, 255)
+					: bThreshold ? FColor(Grey / 2, Grey, Grey / 2) : FColor(Grey, Grey, Grey);
+			}
+		}
+		return R;
+	}
+
+	/** The openings the player passes, for the views: not a hangar's hatch, not a panel that slides down into its sill. */
+	static bool IsViewedOpening(const FOpening& O)
+	{
+		return !O.bHangarHatch && !O.bSlidesDown;
+	}
+
+	/** True when the player can stand 2 m out on side Sign of the opening (a floor there); a door's far side may have none. */
+	static bool HasFloorOnSide(const FOpening& O, double Sign)
+	{
+		return IsFloorCovered(G.Pieces, O.Frame.TransformPosition(FVector(Sign * 200.0, 0.0, 0.0)), O.Actor.Get());
+	}
+
+	/**
+	 * The views of every opening the player passes in a hand-built map, its door shut (bOpen false: doorways included) or
+	 * open: from 2 m at eye height on each side looking down at its threshold (A: no pixel of the threshold shows nothing or a
+	 * surface below the plates' base) and, shut, from 3 m on each side looking at the wall round and above its frame (B: no
+	 * pixel shows nothing). A side with no floor 2 m out is not a place the player stands: left out, noted.
+	 */
+	static void CheckViews(bool bOpen)
+	{
+		const double PlateBase = PlateBaseDepth();
+		Note(FString::Printf(TEXT("views (%s): the floor plates' base, the bottom of their bevelled joints, %.2f cm below their top (SM_KitFloorPlate)"), bOpen ? TEXT("open") : TEXT("shut"), PlateBase));
+		for (const FOpening& O : G.Openings)
+		{
+			if (!IsViewedOpening(O) || (bOpen && O.bDoorway))
+			{
+				continue;
+			}
+			const bool bBothSides = HasFloorOnSide(O, 1.0) && HasFloorOnSide(O, -1.0);
+			if (bOpen && !bBothSides && !O.bDoorway)
+			{
+				Note(FString::Printf(TEXT("A: %s has floor on one side only: no one passes it, so it is never open; seen shut only"), *O.Label));
+				continue;
+			}
+			const TCHAR* State = O.bDoorway ? TEXT("a doorway") : bOpen ? TEXT("open") : TEXT("shut");
+			for (const double Side : { 1.0, -1.0 })
+			{
+				if (!HasFloorOnSide(O, Side))
+				{
+					Note(FString::Printf(TEXT("A: %s, side %+.0f: no floor 2 m out, no one stands there: left out"), *O.Label, Side));
+					continue;
+				}
+				const TCHAR* SideName = Side > 0.0 ? TEXT("PlusX") : TEXT("MinusX");
+				// A: the threshold from 2 m at eye height.
+				{
+					const FVector Eye = O.Frame.TransformPosition(FVector(Side * 200.0, 0.0, 165.0));
+					const FRotator Rotation = (O.Frame.GetLocation() - Eye).Rotation();
+					TArray<float> Depth;
+					const int32 W = 960, H = 540;
+					if (!CaptureDepth(Eye, Rotation, 90.f, W, H, Depth))
+					{
+						Check(false, FString::Printf(TEXT("A, view: %s (%s), side %s: the depth capture failed"), *O.Label, State, SideName));
+						continue;
+					}
+					const FViewCount R = CountView(O, Eye, Rotation, 90.f, W, H, Depth, PlateBase);
+					Check(R.Threshold > 1000 && R.ThresholdNothing == 0 && R.ThresholdDeep == 0,
+						FString::Printf(TEXT("A, view: %s (%s), from 2 m on its %s side at eye height looking down at its threshold (960 x 540, 90 degrees): of %d threshold pixels, %d show nothing and %d a surface more than %.1f cm below the floor's top (the plates' base), %d more on the plates' own grooves (not counted); the deepest seen off them %.1f cm; in the whole view %d pixels show nothing (noted)"),
+							*O.Label, State, SideName, R.Threshold, R.ThresholdNothing, R.ThresholdDeep, PlateBase, R.Relief, R.Deepest, R.Nothing));
+					if (O.bDoorway || R.ThresholdNothing + R.ThresholdDeep > 0)
+					{
+						SaveMask(FString::Printf(TEXT("%s_%s_%s_Threshold2m_%s_Mask_%s"), *MapShort(), *O.Label, bOpen ? TEXT("Open") : TEXT("Shut"), SideName, *GRun.Tag), W, H, R.Mask);
+					}
+				}
+				// B: the wall round and above the frame from 3 m (shut only: the frame and the wall do not move).
+				if (!bOpen)
+				{
+					const FVector Eye = O.Frame.TransformPosition(FVector(Side * 300.0, 0.0, 165.0));
+					const FRotator Rotation = (O.Frame.TransformPosition(FVector(0.0, 0.0, 300.0)) - Eye).Rotation();
+					TArray<float> Depth;
+					const int32 W = 720, H = 720;
+					if (!CaptureDepth(Eye, Rotation, 100.f, W, H, Depth))
+					{
+						Check(false, FString::Printf(TEXT("B, view: %s, side %s: the depth capture failed"), *O.Label, SideName));
+						continue;
+					}
+					const FViewCount R = CountView(O, Eye, Rotation, 100.f, W, H, Depth, PlateBase);
+					Check(R.WallHoles == 0,
+						FString::Printf(TEXT("B, view: %s (%s), from 3 m on its %s side looking at the wall round and above its frame (720 x 720, 100 degrees): %d pixels show nothing through the wall round the frame (%d in the whole view, the others seen through the opening, beyond it)"),
+							*O.Label, State, SideName, R.WallHoles, R.Nothing));
+					if (O.bDoorway || R.Nothing > 0)
+					{
+						SaveMask(FString::Printf(TEXT("%s_%s_Wall3m_%s_Mask_%s"), *MapShort(), *O.Label, SideName, *GRun.Tag), W, H, R.Mask);
+					}
+				}
+			}
+		}
+	}
 
 	static const FFrameRef* FirstFrame()
 	{
@@ -1766,6 +2040,11 @@ namespace SeamDebug
 			GatherOpenings(World, G.Openings);
 			GatherFrames(G.Pieces, G.Frames);
 			GFramesForVoid = G.Frames;
+			// A hand-built map's doorways (a frame with no door) are openings too: the player passes under them.
+			if (!AAreaGenerator::Find(World))
+			{
+				AddDoorways(G.Frames, G.Openings);
+			}
 			// In an area: the samples test the rendered floor only (follow-up of Brief 35).
 			bRenderedFloorOnly = AAreaGenerator::Find(World) != nullptr;
 			G.PawnBefore = Pawn()->GetActorTransform();
@@ -1938,6 +2217,95 @@ namespace SeamDebug
 			});
 		}
 
+		// Follow-up of the battery's hall, the hand-built maps: every opening the player passes (their doorways added at setup),
+		// as the player sees it: shut, the threshold from 2 m and the wall from 3 m on each side; open, the threshold again.
+		S.Add(Do(TEXT("A/B, hand-built: every door shut"), []()
+		{
+			if (AAreaGenerator::Find(W()))
+			{
+				return 0.f;
+			}
+			for (const FOpening& O : G.Openings)
+			{
+				if (IsViewedOpening(O) && O.Actor.IsValid())
+				{
+					SetOpening(O, false);
+				}
+			}
+			return 0.6f;
+		}));
+		S.Add(Do(TEXT("A/B, hand-built: the views, shut"), []()
+		{
+			if (!AAreaGenerator::Find(W()))
+			{
+				CheckViews(false);
+			}
+			return 0.f;
+		}));
+		S.Add(Do(TEXT("A, hand-built: every door open"), []()
+		{
+			if (AAreaGenerator::Find(W()))
+			{
+				return 0.f;
+			}
+			for (const FOpening& O : G.Openings)
+			{
+				if (IsViewedOpening(O) && O.Actor.IsValid() && HasFloorOnSide(O, 1.0) && HasFloorOnSide(O, -1.0))
+				{
+					SetOpening(O, true);
+				}
+			}
+			return 0.6f;
+		}));
+		S.Add(Do(TEXT("A, hand-built: the views, open"), []()
+		{
+			if (!AAreaGenerator::Find(W()))
+			{
+				CheckViews(true);
+			}
+			return 0.f;
+		}));
+		// The shots: the map's first doorway (at home, the monitor room's) from both sides, at its threshold and at the wall above.
+		auto FirstDoorway = []() -> const FOpening*
+		{
+			for (const FOpening& O : G.Openings)
+			{
+				if (O.bDoorway)
+				{
+					return &O;
+				}
+			}
+			return nullptr;
+		};
+		for (int32 View = 0; View < 4; ++View)
+		{
+			S.Add(Do(TEXT("A/B, hand-built: the doorway's pose"), [FirstDoorway, View]()
+			{
+				const FOpening* D = AAreaGenerator::Find(W()) ? nullptr : FirstDoorway();
+				if (!D)
+				{
+					return 0.f;
+				}
+				const double Side = View % 2 == 0 ? 1.0 : -1.0;
+				if (View < 2)
+				{
+					PlaceEye(D->Frame.TransformPosition(FVector(Side * 200.0, 0.0, 165.0)), D->Frame.GetLocation());
+				}
+				else
+				{
+					PlaceEye(D->Frame.TransformPosition(FVector(Side * 300.0, 0.0, 165.0)), D->Frame.TransformPosition(FVector(0.0, 0.0, 300.0)));
+				}
+				FlashlightOn();
+				return 0.6f;
+			}));
+			AddShot(S, [FirstDoorway, View]()
+			{
+				const FOpening* D = AAreaGenerator::Find(W()) ? nullptr : FirstDoorway();
+				return D ? FString::Printf(TEXT("%s_%s_%s_%s_%s"), *MapShort(), *D->Label, View < 2 ? TEXT("Threshold2m") : TEXT("Wall3m"), View % 2 == 0 ? TEXT("PlusX") : TEXT("MinusX"), *GRun.Tag)
+					: FString();
+			});
+		}
+
 		// Part B: each hangar's hatch.
 		S.Add(Do(TEXT("B: the hangars' hatches"), []()
 		{
@@ -1998,7 +2366,7 @@ namespace SeamDebug
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsSeamCheckCommand(
 	TEXT("tls.SeamCheck"),
-	TEXT("tls.SeamCheck [Quit=0] [Tag=After]: Brief 35 (an area, Prologue_Home, Prologue_Arrival or Epilogue_Chamber; PIE): A, every door and sliding panel that opens has a shown floor piece under it every 20 cm across and through its depth, and no floor piece in its travel; B, each hangar's hatch has its floor running past its panel and frame, and still blocks the way out; C, no face of a door's or gate's frame within 1 cm of the plane of a face it overlaps, and no pixel of a frame alternating between the accent and another colour on 30 frames from 3 m and from 10 m (camera moving 1 cm a frame). Shots (Tag in their names) to Saved/Screenshots/Brief35."),
+	TEXT("tls.SeamCheck [Quit=0] [Tag=After]: Brief 35 (an area, Prologue_Home, Prologue_Arrival or Epilogue_Chamber; PIE): A, every door and sliding panel that opens has a shown floor piece under it every 20 cm across and through its depth, and no floor piece in its travel; in a hand-built map also its doorways, and each opening from 2 m at eye height on each side, shut and open, no pixel of its threshold showing nothing or a surface below the plates' base, and from 3 m on each side no pixel of the wall round its frame showing nothing; B, each hangar's hatch has its floor running past its panel and frame, and still blocks the way out; C, no face of a door's or gate's frame within 1 cm of the plane of a face it overlaps, and no pixel of a frame alternating between the accent and another colour on 30 frames from 3 m and from 10 m (camera moving 1 cm a frame). Shots (Tag in their names) to Saved/Screenshots/Brief44."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		if (SeamDebug::GRun.bRunning)

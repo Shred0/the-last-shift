@@ -34,6 +34,7 @@ namespace EpilogueChamberImpl
 		case EEpilogueChamberState::Lines: return TEXT("Lines");
 		case EEpilogueChamberState::Offering: return TEXT("Offering");
 		case EEpilogueChamberState::Aftermath: return TEXT("Aftermath");
+		case EEpilogueChamberState::Hold: return TEXT("Hold");
 		case EEpilogueChamberState::Ended: return TEXT("Ended");
 		}
 		return TEXT("Unknown");
@@ -87,7 +88,7 @@ void AEpilogueChamber::BeginPlay()
 	State = EEpilogueChamberState::Waiting;
 	LastRow = Chosen = NAME_None;
 	bLastSeen = bTravelAsked = bDoorOpened = false;
-	LastRunSeconds = LinesStartRun = OfferedRun = ChosenRun = EndingRun = -1.0;
+	LastRunSeconds = LinesStartRun = OfferedRun = ChosenRun = EndingRun = HoldStartRun = -1.0;
 	LockStartRun = LockOpeningRun = LockOpenRun = -1.0;
 	LockElapsed = AftermathElapsed = 0.0;
 	LightShare = 1.f;
@@ -169,6 +170,7 @@ void AEpilogueChamber::HandleChoiceMade(AChoiceTerminal* InTerminal, FName Endin
 	// Nothing in the room answers once a choice is made; the hall answers the choice first (the aftermath).
 	Terminal->SetOffering(false);
 	AftermathElapsed = AftermathStill = 0.0;
+	HoldStartRun = -1.0;
 	UE_LOG(LogTheLastShift, Log, TEXT("%s: %s chosen at %s: the aftermath, %.2f s."), *GetName(), *Chosen.ToString(), *InTerminal->GetName(),
 		UTheLastShiftSettings::Get()->GetChoiceAftermathSeconds());
 	if (Chosen == TEXT("Open"))
@@ -189,7 +191,7 @@ void AEpilogueChamber::HandleChoiceMade(AChoiceTerminal* InTerminal, FName Endin
 
 float AEpilogueChamber::GetAftermathAlpha() const
 {
-	if (State == EEpilogueChamberState::Ended)
+	if (State == EEpilogueChamberState::Hold || State == EEpilogueChamberState::Ended)
 	{
 		return 1.f;
 	}
@@ -254,17 +256,31 @@ void AEpilogueChamber::TickAftermath(double Now, double Delta, bool bStill)
 		AftermathStill += Delta;
 	}
 	AftermathElapsed = FMath::Max(0.0, Now - ChosenRun - AftermathStill);
-	if (Chosen == TEXT("Open"))
+	const float Aftermath = Settings->GetChoiceAftermathSeconds();
+	if (State == EEpilogueChamberState::Aftermath)
 	{
-		ApplyLightShare(FMath::Lerp(1.f, Settings->GetAftermathLightShare(), EpilogueChamberImpl::Ease(GetAftermathAlpha())));
-	}
-	if (AftermathElapsed >= Settings->GetChoiceAftermathSeconds())
-	{
+		if (Chosen == TEXT("Open"))
+		{
+			ApplyLightShare(FMath::Lerp(1.f, Settings->GetAftermathLightShare(), EpilogueChamberImpl::Ease(GetAftermathAlpha())));
+		}
+		if (AftermathElapsed < Aftermath)
+		{
+			return;
+		}
+		// Every part of the answer at its end state: the hall holds still as it is now.
 		if (Chosen == TEXT("Open"))
 		{
 			ApplyLightShare(Settings->GetAftermathLightShare());
 		}
-		UE_LOG(LogTheLastShift, Log, TEXT("%s: the aftermath of %s is over (%.2f s of the run's clock after the choice)."), *GetName(), *Chosen.ToString(), Now - ChosenRun);
+		HoldStartRun = Now;
+		UE_LOG(LogTheLastShift, Log, TEXT("%s: the aftermath of %s is over (%.2f s of the run's clock after the choice): the hall holds still for %.2f s."), *GetName(),
+			*Chosen.ToString(), Now - ChosenRun, Settings->GetAftermathHoldSeconds());
+		SetState(EEpilogueChamberState::Hold);
+	}
+	// The hold: nothing changes and nothing answers; Stopped time does not count, as in the aftermath.
+	if (State == EEpilogueChamberState::Hold && AftermathElapsed >= Aftermath + Settings->GetAftermathHoldSeconds())
+	{
+		UE_LOG(LogTheLastShift, Log, TEXT("%s: the hold after %s is over (%.2f s of the run's clock after the choice)."), *GetName(), *Chosen.ToString(), Now - ChosenRun);
 		SetState(EEpilogueChamberState::Ended);
 	}
 }
@@ -316,6 +332,7 @@ void AEpilogueChamber::Tick(float DeltaSeconds)
 	case EEpilogueChamberState::Offering:
 		break;
 	case EEpilogueChamberState::Aftermath:
+	case EEpilogueChamberState::Hold:
 		TickAftermath(Now, Delta, bStill);
 		break;
 	case EEpilogueChamberState::Ended:

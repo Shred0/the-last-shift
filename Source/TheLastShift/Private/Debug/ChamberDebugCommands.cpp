@@ -20,6 +20,7 @@
 #include "Audio/GameAudioSubsystem.h"
 #include "Area/AreaGenerator.h"
 #include "Blueprint/WidgetTree.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Components/AudioComponent.h"
 #include "Components/Border.h"
 #include "Components/CapsuleComponent.h"
@@ -27,6 +28,7 @@
 #include "Components/Button.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PanelWidget.h"
+#include "Components/SceneCaptureComponent2D.h"
 #include "Components/ProgressBar.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/TextBlock.h"
@@ -43,6 +45,7 @@
 #include "Engine/Light.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "Engine/UserInterfaceSettings.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -66,10 +69,13 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Narrative/NarrativeRows.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "RHI.h"
+#include "RenderingThread.h"
+#include "TextureResource.h"
 #include "Sound/SoundWave.h"
 #include "Prologue/PrologueMonitorRoom.h"
 #include "Prologue/PrologueReturn.h"
@@ -325,6 +331,17 @@ namespace ChamberDebug
 		double AftermathLastRun = -1.0;
 		float SavedReach = 230.f;
 		float SavedAftermath = 3.f;
+		float SavedAftermathHold = 3.f;
+		/** The hall as the aftermath left it, read when the hold began. */
+		float HoldGlow = 0.f, HoldLights = 0.f, HoldHum = 0.f, HoldRings = 0.f, HoldGauge = 0.f;
+		int32 HoldLit = 0;
+		/** The ring test: the ring, its turn at the first pose, the pose, and its captures there. */
+		int32 RingIndex = -1;
+		float RingTurnStart = 0.f;
+		FVector RingEye = FVector::ZeroVector;
+		FRotator RingRot = FRotator::ZeroRotator;
+		float RingFov = 90.f;
+		TArray<FLinearColor> RingA, RingA0, RingDepthA;
 		FGameSoundSlot SavedHum;
 		FVector PawnAt = FVector::ZeroVector;
 		FRotator ControlAt = FRotator::ZeroRotator;
@@ -510,7 +527,7 @@ namespace ChamberDebug
 		}
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Rect.Width(), Rect.Height(), TArrayView64<const FColor>(Crop.GetData(), Crop.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief36B"), GRun.ShotName + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"), GRun.ShotName + TEXT(".png")));
 		if (!GRun.ShotName.IsEmpty())
 		{
 			IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
@@ -551,6 +568,7 @@ namespace ChamberDebug
 		Mutable->ChoiceHoldSeconds = GRun.SavedHold;
 		Mutable->ChoiceTerminalReachCm = GRun.SavedReach;
 		Mutable->ChoiceAftermathSeconds = GRun.SavedAftermath;
+		Mutable->AftermathHoldSeconds = GRun.SavedAftermathHold;
 		Mutable->Audio.ChamberHum = GRun.SavedHum;
 		AChamberBattery::SetSessionBattery(-1.f);
 		if (AChamberBattery* B = AChamberBattery::Find(W()))
@@ -646,13 +664,13 @@ namespace ChamberDebug
 			{
 				++GRun.EarlyPrompts;
 			}
-			if (const UInteractPromptWidget* P = Prompt(); C->GetChamberState() == EEpilogueChamberState::Aftermath && ((P && P->GetMode() != EInteractPromptMode::Hidden) || (C->Terminal && C->Terminal->OffersChoice())))
+			if (const UInteractPromptWidget* P = Prompt(); (C->GetChamberState() == EEpilogueChamberState::Aftermath || C->GetChamberState() == EEpilogueChamberState::Hold) && ((P && P->GetMode() != EInteractPromptMode::Hidden) || (C->Terminal && C->Terminal->OffersChoice())))
 			{
 				++GRun.AftermathPrompts;
 			}
 			// The longest frame of the run's clock from the choice to the ending's travel, the frame that crosses the aftermath's end
 			// included: the aftermath ends at the first frame past its length, and the ending is asked the frame after.
-			if (C->GetChosenRunSeconds() >= 0.f && (C->GetChamberState() == EEpilogueChamberState::Aftermath || (C->GetChamberState() == EEpilogueChamberState::Ended && GRun.AftermathLastRun >= 0.0)))
+			if (C->GetChosenRunSeconds() >= 0.f && (C->GetChamberState() == EEpilogueChamberState::Aftermath || C->GetChamberState() == EEpilogueChamberState::Hold || (C->GetChamberState() == EEpilogueChamberState::Ended && GRun.AftermathLastRun >= 0.0)))
 			{
 				if (GRun.AftermathLastRun >= 0.0)
 				{
@@ -1185,6 +1203,101 @@ namespace ChamberDebug
 			}
 		}
 		return Max;
+	}
+
+	// --- The rings' surface (follow-up of the battery's hall): base colour captures of one ring alone ---
+
+	static const int32 RingCaptureW = 640;
+	static const int32 RingCaptureH = 360;
+
+	/**
+	 * Captures Ring alone (the show-only list) from Eye along Rotation, FovDeg across: its base colour (no light, so the
+	 * light falling on it does not count) or its scene depth (nothing drawn reads as a very large depth). Empty on failure.
+	 */
+	static bool CaptureRing(UStaticMeshComponent* Ring, const FVector& Eye, const FRotator& Rotation, float FovDeg, bool bDepth, TArray<FLinearColor>& Out)
+	{
+		Out.Reset();
+		UWorld* World = W();
+		APawn* P = Pawn();
+		if (!World || !P || !Ring)
+		{
+			return false;
+		}
+		UTextureRenderTarget2D* Target = NewObject<UTextureRenderTarget2D>(GetTransientPackage());
+		Target->RenderTargetFormat = RTF_RGBA32f;
+		Target->ClearColor = bDepth ? FLinearColor(1.0e9f, 0.f, 0.f, 0.f) : FLinearColor::Black;
+		Target->InitAutoFormat(RingCaptureW, RingCaptureH);
+		Target->UpdateResourceImmediate(true);
+		USceneCaptureComponent2D* Capture = NewObject<USceneCaptureComponent2D>(P);
+		Capture->bCaptureEveryFrame = false;
+		Capture->bCaptureOnMovement = false;
+		Capture->CaptureSource = bDepth ? SCS_SceneDepth : SCS_BaseColor;
+		Capture->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
+		Capture->ShowOnlyComponents.Add(Ring);
+		Capture->FOVAngle = FovDeg;
+		Capture->TextureTarget = Target;
+		Capture->RegisterComponentWithWorld(World);
+		Capture->SetWorldLocationAndRotation(Eye, Rotation);
+		Capture->CaptureScene();
+		FlushRenderingCommands();
+		FTextureRenderTargetResource* Resource = Target->GameThread_GetRenderTargetResource();
+		const bool bOk = Resource && Resource->ReadLinearColorPixels(Out) && Out.Num() == RingCaptureW * RingCaptureH;
+		Capture->DestroyComponent();
+		return bOk;
+	}
+
+	/** Captures the ring's base colour with its surface mapped in its own space (ObjectSpace 1) and in world space (0). */
+	static bool CaptureRingBoth(UStaticMeshComponent* Ring, const FVector& Eye, const FRotator& Rotation, float FovDeg, TArray<FLinearColor>& OutOwn, TArray<FLinearColor>& OutWorld)
+	{
+		UMaterialInstanceDynamic* Mid = Bat() ? Bat()->GetRingMaterial() : nullptr;
+		if (!Mid)
+		{
+			return false;
+		}
+		const bool bOwn = CaptureRing(Ring, Eye, Rotation, FovDeg, false, OutOwn);
+		Mid->SetScalarParameterValue(TEXT("ObjectSpace"), 0.f);
+		const bool bWorld = CaptureRing(Ring, Eye, Rotation, FovDeg, false, OutWorld);
+		Mid->SetScalarParameterValue(TEXT("ObjectSpace"), 1.f);
+		return bOwn && bWorld;
+	}
+
+	/**
+	 * Mean and share above 4 levels of the difference over the ring's pixels: 8-bit levels of the base colour as shown on
+	 * screen (sRGB), its largest channel. The battery's family is dark (a linear base colour near 0.035), so its details
+	 * differ by a fraction of a level in linear terms and by a few once encoded for the screen.
+	 */
+	static void CompareRing(const TArray<FLinearColor>& A, const TArray<FLinearColor>& B, const TArray<FLinearColor>& DepthA, const TArray<FLinearColor>& DepthB, double& OutMean,
+		double& OutShare, int32& OutPixels)
+	{
+		OutMean = OutShare = 0.0;
+		OutPixels = 0;
+		int32 Above = 0;
+		for (int32 I = 0; I < A.Num() && I < B.Num() && I < DepthA.Num() && I < DepthB.Num(); ++I)
+		{
+			if (DepthA[I].R > 1.0e7f || DepthB[I].R > 1.0e7f)
+			{
+				continue;
+			}
+			const FColor SA = FLinearColor(A[I].R, A[I].G, A[I].B, 1.f).ToFColorSRGB();
+			const FColor SB = FLinearColor(B[I].R, B[I].G, B[I].B, 1.f).ToFColorSRGB();
+			const double D = FMath::Max3(FMath::Abs(SA.R - SB.R), FMath::Abs(SA.G - SB.G), FMath::Abs(SA.B - SB.B));
+			OutMean += D;
+			Above += D > 4.0 ? 1 : 0;
+			++OutPixels;
+		}
+		if (OutPixels > 0)
+		{
+			OutMean /= OutPixels;
+			OutShare = static_cast<double>(Above) / OutPixels;
+		}
+	}
+
+	/** Eye and Rotation turned by Degrees about the vertical through Pivot. */
+	static void OrbitView(const FVector& Pivot, float Degrees, FVector& InOutEye, FRotator& InOutRotation)
+	{
+		const FQuat Turn(FVector::UpVector, FMath::DegreesToRadians(Degrees));
+		InOutEye = Pivot + Turn.RotateVector(InOutEye - Pivot);
+		InOutRotation = (Turn * InOutRotation.Quaternion()).Rotator();
 	}
 
 	/** Waits for the last requested shot to be written. */
@@ -1871,20 +1984,44 @@ namespace ChamberDebug
 		// --- Criteria 5 to 8: the battery's surface and light, the rings, the monitors; the hum ---
 		S.Add(Do(TEXT("surface: the battery's family"), []()
 		{
+			// The printed circuit is gone: the battery's family is M_Surface's, with its own values (darker than the objects').
 			const UMaterialInterface* MI = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/TheLastShift/Art/Materials/MI_Surface_Battery.MI_Surface_Battery"));
 			const UMaterial* Base = MI ? MI->GetMaterial() : nullptr;
-			Check(Base && Base->GetName() == TEXT("M_SurfaceBattery") && Base->GetBlendMode() == BLEND_Opaque && !Base->HasEmissiveColorConnected() && !Base->HasVertexPositionOffsetConnected()
-				&& !Base->HasPixelDepthOffsetConnected() && !Base->HasDisplacementConnected(),
-				FString::Printf(TEXT("surface: MI_Surface_Battery on %s: opaque, not emissive, no vertex and no depth moved"), *GetNameSafe(Base)));
-			int32 OnBattery = 0, Wrong = 0;
+			const bool bCircuitGone = !FPackageName::DoesPackageExist(TEXT("/Game/TheLastShift/Art/Materials/M_SurfaceBattery"));
+			float WorldSpace = -1.f;
+			if (MI)
+			{
+				MI->GetScalarParameterValue(TEXT("ObjectSpace"), WorldSpace);
+			}
+			Check(Base && Base->GetName() == TEXT("M_Surface") && bCircuitGone && Base->GetBlendMode() == BLEND_Opaque && !Base->HasEmissiveColorConnected() && !Base->HasVertexPositionOffsetConnected()
+				&& !Base->HasPixelDepthOffsetConnected() && !Base->HasDisplacementConnected() && WorldSpace == 0.f,
+				FString::Printf(TEXT("surface: MI_Surface_Battery on %s (M_SurfaceBattery and its circuit gone: %d), mapped in world space (ObjectSpace %.0f): opaque, not emissive, no vertex and no depth moved"),
+					*GetNameSafe(Base), bCircuitGone ? 1 : 0, WorldSpace));
+			int32 OnBattery = 0, RingsOwn = 0, Wrong = 0;
+			const UMaterialInstanceDynamic* RingMid = Bat() ? Bat()->GetRingMaterial() : nullptr;
+			float RingSpace = -1.f;
+			if (RingMid)
+			{
+				RingMid->GetScalarParameterValue(TEXT("ObjectSpace"), RingSpace);
+			}
 			for (const TCHAR* N : { TEXT("SM_BatteryTier"), TEXT("SM_BatteryTierB"), TEXT("SM_BatteryRing"), TEXT("SM_BatterySpine"), TEXT("SM_BatteryDuct"), TEXT("SM_BatteryDuctSocket") })
 			{
+				const bool bRing = FCString::Strcmp(N, TEXT("SM_BatteryRing")) == 0;
 				for (const UStaticMeshComponent* C : MeshComps(N))
 				{
-					(C->GetMaterial(0) == MI ? OnBattery : Wrong) += 1;
+					if (bRing)
+					{
+						(RingMid && C->GetMaterial(0) == RingMid && RingMid->Parent == MI && RingSpace == 1.f ? RingsOwn : Wrong) += 1;
+					}
+					else
+					{
+						(C->GetMaterial(0) == MI ? OnBattery : Wrong) += 1;
+					}
 				}
 			}
-			Check(OnBattery == 12 + 11 + 48 + 10 + 2 && Wrong == 0, FString::Printf(TEXT("surface: the tiers, rings, spines, ducts and sockets in MI_Surface_Battery (%d, %d not)"), OnBattery, Wrong));
+			Check(OnBattery == 12 + 48 + 10 + 2 && RingsOwn == 11 && Wrong == 0,
+				FString::Printf(TEXT("surface: the tiers, spines, ducts and sockets in MI_Surface_Battery (%d); the 11 rings in it mapped in their own space (ObjectSpace %.0f: %d); %d not"),
+					OnBattery, RingSpace, RingsOwn, Wrong));
 			StandOn(FVector(0.f, 620.f, 0.f), 300.f);
 			LookAt(FVector(0.f, 300.f, 520.f));
 			return 0.5f;
@@ -1892,6 +2029,70 @@ namespace ChamberDebug
 		AddShotWait(S, TEXT("07_Tier_From3m"));
 		S.Add(Do(TEXT("surface: from 12 m"), []() { StandOn(FVector(0.f, 1500.f, 0.f), 300.f); LookAt(FVector(0.f, 300.f, 700.f)); return 0.5f; }));
 		AddShotWait(S, TEXT("08_Tier_From12m"));
+		// A ring turning: its surface turns with it. The ring nearest the eye's height, from 3 m, two shots 20 degrees apart; and
+		// its base colour alone (no light) from the first pose, against the same from that pose turned with the ring: mapped in
+		// its own space they match; mapped in the world they do not (the control: the same captures at ObjectSpace 0).
+		S.Add(Do(TEXT("ring: the pose, 3 m from a ring"), []()
+		{
+			const AChamberBattery* B = Bat();
+			GRun.RingIndex = -1;
+			float Best = TNumericLimits<float>::Max();
+			for (int32 I = 0; I < B->GetRings().Num(); ++I)
+			{
+				const float D = FMath::Abs(static_cast<float>(B->GetRings()[I]->Bounds.Origin.Z) - 520.f);
+				if (D < Best)
+				{
+					Best = D;
+					GRun.RingIndex = I;
+				}
+			}
+			const UStaticMeshComponent* Ring = B->GetRings().IsValidIndex(GRun.RingIndex) ? B->GetRings()[GRun.RingIndex].Get() : nullptr;
+			const float Radius = Ring ? static_cast<float>(Ring->Bounds.BoxExtent.X) : 250.f;
+			const float Z = Ring ? static_cast<float>(Ring->Bounds.Origin.Z) : 520.f;
+			StandOn(FVector(0.f, Radius + 300.f, 0.f), 300.f);
+			LookAt(FVector(0.f, Radius, Z));
+			Note(FString::Printf(TEXT("ring: ring %d of %d (centre at %.0f cm, radius %.0f cm), seen from %.0f cm off its outer face"), GRun.RingIndex, B->GetRings().Num(), Z, Radius, 300.f));
+			return 0.5f;
+		}));
+		AddShotWait(S, TEXT("09_Ring_A"), []()
+		{
+			const AChamberBattery* B = Bat();
+			UStaticMeshComponent* Ring = B->GetRings().IsValidIndex(GRun.RingIndex) ? B->GetRings()[GRun.RingIndex].Get() : nullptr;
+			const APlayerCameraManager* Cam = PC()->PlayerCameraManager;
+			GRun.RingEye = Cam->GetCameraLocation();
+			GRun.RingRot = Cam->GetCameraRotation();
+			GRun.RingFov = Cam->GetFOVAngle();
+			GRun.RingTurnStart = B->GetRingTurn(GRun.RingIndex);
+			const bool bOk = Ring && CaptureRingBoth(Ring, GRun.RingEye, GRun.RingRot, GRun.RingFov, GRun.RingA, GRun.RingA0) && CaptureRing(Ring, GRun.RingEye, GRun.RingRot, GRun.RingFov, true, GRun.RingDepthA);
+			Check(bOk, TEXT("ring: the base colour captures from the first pose"));
+			return 0.f;
+		});
+		S.Add(WaitFor(TEXT("ring: turned 20 degrees"), []()
+		{
+			const AChamberBattery* B = Bat();
+			return FMath::Abs(B->GetRingTurn(GRun.RingIndex) - GRun.RingTurnStart) >= 20.f;
+		}, 30.f));
+		AddShotWait(S, TEXT("09_Ring_B_20deg"), []()
+		{
+			const AChamberBattery* B = Bat();
+			UStaticMeshComponent* Ring = B->GetRings()[GRun.RingIndex].Get();
+			const float Turned = B->GetRingTurn(GRun.RingIndex) - GRun.RingTurnStart;
+			FVector Eye = GRun.RingEye;
+			FRotator Rotation = GRun.RingRot;
+			OrbitView(Ring->GetComponentLocation(), Turned, Eye, Rotation);
+			TArray<FLinearColor> Own, World, Depth, Still, StillDepth;
+			const bool bOk = CaptureRingBoth(Ring, Eye, Rotation, GRun.RingFov, Own, World) && CaptureRing(Ring, Eye, Rotation, GRun.RingFov, true, Depth)
+				&& CaptureRing(Ring, GRun.RingEye, GRun.RingRot, GRun.RingFov, false, Still) && CaptureRing(Ring, GRun.RingEye, GRun.RingRot, GRun.RingFov, true, StillDepth);
+			double OwnMean = 0.0, OwnShare = 0.0, WorldMean = 0.0, WorldShare = 0.0, PoseMean = 0.0, PoseShare = 0.0;
+			int32 OwnPixels = 0, WorldPixels = 0, PosePixels = 0;
+			CompareRing(GRun.RingA, Own, GRun.RingDepthA, Depth, OwnMean, OwnShare, OwnPixels);
+			CompareRing(GRun.RingA0, World, GRun.RingDepthA, Depth, WorldMean, WorldShare, WorldPixels);
+			CompareRing(GRun.RingA, Still, GRun.RingDepthA, StillDepth, PoseMean, PoseShare, PosePixels);
+			Check(bOk && OwnPixels > 5000 && OwnMean <= 1.0 && OwnShare <= 0.02 && WorldMean >= 0.5 && WorldMean > 4.0 * OwnMean,
+				FString::Printf(TEXT("ring: turned %.1f deg, its base colour seen from the first pose turned with it matches the first capture (%d pixels, mean %.2f levels as shown, %.2f%% above 4 levels): every detail turned with the ring; mapped in the world instead (control, ObjectSpace 0) it would not (mean %.2f levels, at least 0.5 and 4 times the first, %.2f%% above 4); from the one pose, 20 degrees apart: mean %.2f levels, %.2f%% above 4"),
+					Turned, OwnPixels, OwnMean, 100.0 * OwnShare, WorldMean, 100.0 * WorldShare, PoseMean, 100.0 * PoseShare));
+			return 0.f;
+		});
 		// The light: shown, its levels, its pulses.
 		S.Add(Do(TEXT("light: the glow in Normal time"), []()
 		{
@@ -2092,18 +2293,58 @@ namespace ChamberDebug
 		}));
 	}
 
-	/** Brief 36B: after a choice held through, the hall answers for ChoiceAftermathSeconds before the ending opens. */
+	/**
+	 * After a choice held through, the hall answers for ChoiceAftermathSeconds, each part reaching its end state at the end and
+	 * not before (checked in the aftermath's last second); then it holds still as the aftermath left it for AftermathHoldSeconds,
+	 * nothing answering the player; then the ending opens.
+	 */
 	static void AddAftermath(TArray<FStep>& S, const FString& L, FName Ending)
 	{
-		S.Add(WaitFor(L + TEXT(": the aftermath near its end"), []() { return Chamber()->GetAftermathAlpha() >= 0.97f || Chamber()->GetChamberState() == EEpilogueChamberState::Ended; }, 40.f, [L, Ending]()
+		// The aftermath's last second: nothing at its end state yet.
+		S.Add(WaitFor(L + TEXT(": the aftermath's last second"), []()
+		{
+			const float Seconds = Settings()->GetChoiceAftermathSeconds();
+			return Chamber()->GetAftermathAlpha() * Seconds >= Seconds - 0.9f || Chamber()->GetChamberState() != EEpilogueChamberState::Aftermath;
+		}, 40.f, [L, Ending]()
 		{
 			const AEpilogueChamber* C = Chamber();
 			const AChamberBattery* B = Bat();
 			const APrologueMonitorRoom* M = Mon();
 			const FBatteryLook Look = Settings()->GetBatteryLook();
 			const FGameAudio& A = Settings()->Audio;
-			Check(C->GetChamberState() == EEpilogueChamberState::Aftermath && C->GetEndingRunSeconds() < 0.f && TopScene() == nullptr && GRun.AftermathPrompts == 0,
-				FString::Printf(TEXT("%s: the hall answers before the ending opens; nothing answers the player during it (%d prompt frames)"), *L, GRun.AftermathPrompts));
+			const float Seconds = Settings()->GetChoiceAftermathSeconds();
+			const float Elapsed = C->GetAftermathAlpha() * Seconds;
+			const float Surge = 1.f + Settings()->GetAftermathSurge();
+			if (Ending == TEXT("Inject"))
+			{
+				Check(C->GetChamberState() == EEpilogueChamberState::Aftermath && B->GetGlowLevel() < Look.GlowLevelFull * Surge - 0.01f
+					&& Aud()->GetHumVolume() < A.GetVolume(EGameSound::ChamberHum) * A.GetHumVolumeFull() * Surge - 0.005f,
+					FString::Printf(TEXT("%s: at %.2f s of %.2f (its last second) not yet at its end: the glow %.3f below %.3f, the hum's volume %.3f below its surge"), *L, Elapsed, Seconds,
+						B->GetGlowLevel(), Look.GlowLevelFull * Surge, Aud()->GetHumVolume()));
+			}
+			else
+			{
+				Check(C->GetChamberState() == EEpilogueChamberState::Aftermath && M->GetLitShownCount() > 0 && Aud()->GetHumVolume() > 0.f && B->GetGlowLevel() > 0.f && B->GetRingSpeed() > 0.f,
+					FString::Printf(TEXT("%s: at %.2f s of %.2f (its last second) not yet at its end: %d monitors still lit, the hum at %.4f, the glow at %.3f, the rings at %.3f deg/s"), *L, Elapsed, Seconds,
+						M->GetLitShownCount(), Aud()->GetHumVolume(), B->GetGlowLevel(), B->GetRingSpeed()));
+			}
+			return 0.f;
+		}));
+		// The aftermath's end: every part at its end state; the hold begins.
+		S.Add(WaitFor(L + TEXT(": the aftermath's end, the hold begun"), []() { return Chamber()->GetChamberState() == EEpilogueChamberState::Hold || Chamber()->GetChamberState() == EEpilogueChamberState::Ended; }, 40.f, [L, Ending]()
+		{
+			const AEpilogueChamber* C = Chamber();
+			const AChamberBattery* B = Bat();
+			const APrologueMonitorRoom* M = Mon();
+			const FBatteryLook Look = Settings()->GetBatteryLook();
+			const FGameAudio& A = Settings()->Audio;
+			const float Seconds = Settings()->GetChoiceAftermathSeconds();
+			const float Took = C->GetHoldStartRunSeconds() - C->GetChosenRunSeconds();
+			const float Slack = 2.f * GRun.AftermathLongestFrame + 0.02f;
+			Check(C->GetChamberState() == EEpilogueChamberState::Hold && C->GetEndingRunSeconds() < 0.f && TopScene() == nullptr && GRun.AftermathPrompts == 0
+				&& Took >= Seconds - 0.02f && Took <= Seconds + Slack,
+				FString::Printf(TEXT("%s: the hall answered for %.3f s of the run's clock (ChoiceAftermathSeconds %.2f; within two frames, its longest %.3f s), then holds; no ending yet, nothing answered the player (%d prompt frames)"),
+					*L, Took, Seconds, GRun.AftermathLongestFrame, GRun.AftermathPrompts));
 			if (Ending == TEXT("Inject"))
 			{
 				Check(B->GetGlowLevel() > Look.GlowLevelFull && M->GetScreenLevel() >= 0.999f && M->GetLitShownCount() == M->GetLitPlates().Num(),
@@ -2117,23 +2358,49 @@ namespace ChamberDebug
 					&& FMath::Abs(C->GetLightShare() - Settings()->GetAftermathLightShare()) <= 0.02f && C->LockPanel->IsFullyOpen() && C->EntryDoor->IsOpen(),
 					FString::Printf(TEXT("%s: the glow at nothing (%.3f), the rings still (%.3f deg/s), every monitor black (%d lit), the lights at %.3f (AftermathLightShare %.2f), the lock's panel and door open (%d, %d)"),
 						*L, B->GetGlowLevel(), B->GetRingSpeed(), M->GetLitShownCount(), C->GetLightShare(), Settings()->GetAftermathLightShare(), C->LockPanel->IsFullyOpen() ? 1 : 0, C->EntryDoor->IsOpen() ? 1 : 0));
-				Check(Aud()->GetHumVolume() < 0.01f, FString::Printf(TEXT("%s: the hum sinking to nothing (volume %.4f)"), *L, Aud()->GetHumVolume()));
+				Check(Aud()->GetHumVolume() < 0.001f, FString::Printf(TEXT("%s: the hum at silence (volume %.4f)"), *L, Aud()->GetHumVolume()));
 			}
+			GRun.HoldGlow = B->GetGlowLevel();
+			GRun.HoldLights = C->GetLightShare();
+			GRun.HoldHum = Aud()->GetHumVolume();
+			GRun.HoldRings = B->GetRingSpeed();
+			GRun.HoldGauge = M->GetScreenLevel();
+			GRun.HoldLit = M->GetLitShownCount();
 			StandOn(FVector(0.f, 1100.f, 0.f), 300.f);
 			LookAt(FVector(0.f, 0.f, 700.f));
-			RequestShot(Ending == TEXT("Inject") ? TEXT("13_Aftermath_Inject_End") : TEXT("14_Aftermath_Open_End"));
+			return 0.3f;
+		}));
+		AddShotWait(S, Ending == TEXT("Inject") ? TEXT("13_Aftermath_Inject_End") : TEXT("14_Aftermath_Open_End"));
+		// The hold: the hall as the aftermath left it, nothing answering, until its last frames.
+		S.Add(WaitFor(L + TEXT(": the hold near its end"), []()
+		{
+			const AEpilogueChamber* C = Chamber();
+			return C->GetChamberState() != EEpilogueChamberState::Hold || RunNow() - C->GetHoldStartRunSeconds() >= Settings()->GetAftermathHoldSeconds() - 0.25f;
+		}, 40.f, [L]()
+		{
+			const AEpilogueChamber* C = Chamber();
+			const AChamberBattery* B = Bat();
+			const APrologueMonitorRoom* M = Mon();
+			const bool bSame = FMath::IsNearlyEqual(B->GetGlowLevel(), GRun.HoldGlow, 1.e-4f) && FMath::IsNearlyEqual(C->GetLightShare(), GRun.HoldLights, 1.e-4f)
+				&& FMath::IsNearlyEqual(Aud()->GetHumVolume(), GRun.HoldHum, 0.005f) && FMath::IsNearlyEqual(B->GetRingSpeed(), GRun.HoldRings, 1.e-4f)
+				&& FMath::IsNearlyEqual(M->GetScreenLevel(), GRun.HoldGauge, 1.e-4f) && M->GetLitShownCount() == GRun.HoldLit;
+			Check(C->GetChamberState() == EEpilogueChamberState::Hold && C->GetEndingRunSeconds() < 0.f && TopScene() == nullptr && GRun.AftermathPrompts == 0 && bSame,
+				FString::Printf(TEXT("%s: through the hold the hall stays as the aftermath left it (glow %.3f, lights %.3f, hum %.3f, rings %.3f deg/s, gauges %.3f, %d monitors lit) and nothing answers (%d prompt frames, no scene)"),
+					*L, B->GetGlowLevel(), C->GetLightShare(), Aud()->GetHumVolume(), B->GetRingSpeed(), M->GetScreenLevel(), M->GetLitShownCount(), GRun.AftermathPrompts));
 			return 0.f;
 		}));
+		S.Add(Do(L + TEXT(": the hold's shot"), [Ending]() { RequestShot(Ending == TEXT("Inject") ? TEXT("15_Hold_Inject_End") : TEXT("16_Hold_Open_End")); return 0.f; }));
 		S.Add(WaitFor(L + TEXT(": the ending's travel"), []() { return Chamber() && Chamber()->GetEndingRunSeconds() >= 0.f; }, 40.f, [L, Ending]()
 		{
 			const AEpilogueChamber* C = Chamber();
 			const float Took = C->GetEndingRunSeconds() - C->GetChosenRunSeconds();
-			const float Want = Settings()->GetChoiceAftermathSeconds();
-			// The aftermath ends at the first frame past its length, and the ending is asked the frame after: two frames at most.
+			const float Held = C->GetEndingRunSeconds() - C->GetHoldStartRunSeconds();
+			const float Want = Settings()->GetChoiceAftermathSeconds() + Settings()->GetAftermathHoldSeconds();
+			// The hold ends at the first frame past its length, and the ending is asked the frame after: two frames at most.
 			const float Slack = 2.f * GRun.AftermathLongestFrame + 0.02f;
-			Check(Took >= Want - 0.02f && Took <= Want + Slack,
-				FString::Printf(TEXT("%s: the ending asked %.3f s of the run's clock after the choice (ChoiceAftermathSeconds %.2f; within two frames, its longest %.3f s)"), *L, Took, Want,
-					GRun.AftermathLongestFrame));
+			Check(Took >= Want - 0.02f && Took <= Want + Slack && Held >= Settings()->GetAftermathHoldSeconds() - 0.02f - GRun.AftermathLongestFrame,
+				FString::Printf(TEXT("%s: the ending asked %.3f s of the run's clock after the choice and %.3f s after the hold began (ChoiceAftermathSeconds %.2f + AftermathHoldSeconds %.2f; within two frames, its longest %.3f s)"),
+					*L, Took, Held, Settings()->GetChoiceAftermathSeconds(), Settings()->GetAftermathHoldSeconds(), GRun.AftermathLongestFrame));
 			GRun.AftermathLongestFrame = 0.f;
 			GRun.AftermathLastRun = -1.0;
 			if (Ending == TEXT("Open"))
@@ -2410,6 +2677,7 @@ namespace ChamberDebug
 		GRun.SavedHold = Settings()->ChoiceHoldSeconds;
 		GRun.SavedReach = Settings()->ChoiceTerminalReachCm;
 		GRun.SavedAftermath = Settings()->ChoiceAftermathSeconds;
+		GRun.SavedAftermathHold = Settings()->AftermathHoldSeconds;
 		GRun.SavedHum = Settings()->Audio.ChamberHum;
 		if (IConsoleVariable* Synthetic = IConsoleManager::Get().FindConsoleVariable(TEXT("Slate.EnableSyntheticCursorMoves")))
 		{
@@ -2909,7 +3177,12 @@ namespace ChamberDebug
 
 		// --- Criterion 6: Open held through with the confirm key, at a hold set for the session ---
 		AddToChamber(S, TEXT("open"));
-		S.Add(Do(TEXT("open: the aftermath set to 2 s for the session"), []() { GetMutableDefault<UTheLastShiftSettings>()->ChoiceAftermathSeconds = 2.f; return 0.f; }));
+		S.Add(Do(TEXT("open: the aftermath set to 2 s and the hold to 1.5 s for the session"), []()
+		{
+			GetMutableDefault<UTheLastShiftSettings>()->ChoiceAftermathSeconds = 2.f;
+			GetMutableDefault<UTheLastShiftSettings>()->AftermathHoldSeconds = 1.5f;
+			return 0.f;
+		}));
 		AddOpenDialog(S, TEXT("open"));
 		S.Add(Do(TEXT("open: hold the last button with the confirm key"), []()
 		{
@@ -3012,6 +3285,7 @@ namespace ChamberDebug
 				R->Destroy();
 			}
 			GetMutableDefault<UTheLastShiftSettings>()->ChoiceAftermathSeconds = GRun.SavedAftermath;
+			GetMutableDefault<UTheLastShiftSettings>()->AftermathHoldSeconds = GRun.SavedAftermathHold;
 			return 0.2f;
 		}));
 		S.Add(Do(TEXT("one part less: back to the main menu"), []()
@@ -3191,6 +3465,7 @@ namespace ChamberDebug
 		GRun.SavedHold = Settings()->ChoiceHoldSeconds;
 		GRun.SavedReach = Settings()->ChoiceTerminalReachCm;
 		GRun.SavedAftermath = Settings()->ChoiceAftermathSeconds;
+		GRun.SavedAftermathHold = Settings()->AftermathHoldSeconds;
 		GRun.SavedHum = Settings()->Audio.ChamberHum;
 		GetMutableDefault<UTheLastShiftSettings>()->bReturnHome = true;
 		GetMutableDefault<UTheLastShiftSettings>()->bPrologueMaps = true;

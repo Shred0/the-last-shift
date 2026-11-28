@@ -27,6 +27,8 @@ enum class EEpilogueChamberState : uint8
 	Offering,
 	/** Brief 36B: a choice was made: the hall answers it for ChoiceAftermathSeconds; nothing answers the player. */
 	Aftermath,
+	/** The aftermath over: the hall holds still as it left it for AftermathHoldSeconds; nothing answers the player. */
+	Hold,
 	/** The aftermath over and the ending's travel asked for: nothing in the room answers any more. */
 	Ended
 };
@@ -43,8 +45,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEpilogueChamberStateChanged, EEpi
  * way home's door's rule, the engineer's lines counting as rows) the terminal is let offer the choice. The choice made
  * in its dialog starts the aftermath: for ChoiceAftermathSeconds the hall answers it (Inject: the battery is fed, its
  * glow and the monitors rising, AChamberBattery; Open: the structure lets go, the glow, the rings and the monitors going
- * out, the hall's lights falling to AftermathLightShare of their level, here, and the lock's door opening), then its
- * ending is asked for (URunSubsystem::TravelToChosenEnding). From the choice on nothing in the hall answers the player.
+ * out, the hall's lights falling to AftermathLightShare of their level, here, and the lock's door opening), each reaching
+ * its end state at the aftermath's end; then the hall holds still as the aftermath left it for AftermathHoldSeconds, and
+ * then its ending is asked for (URunSubsystem::TravelToChosenEnding). From the choice on nothing in the hall answers the player.
  * Every wait stands still while Stopped and behind the pause menu; an ending's travel is asked in Normal time only.
  * Nothing is carried across maps.
  */
@@ -74,7 +77,7 @@ public:
 
 	/** Brief 36B: the aftermath's ending (None before the choice), and how far it has gone: 0 at the choice, 1 at its end. */
 	UFUNCTION(BlueprintPure, Category = "Chamber")
-	FName GetAftermathEnding() const { return State == EEpilogueChamberState::Aftermath || State == EEpilogueChamberState::Ended ? Chosen : NAME_None; }
+	FName GetAftermathEnding() const { return State == EEpilogueChamberState::Aftermath || State == EEpilogueChamberState::Hold || State == EEpilogueChamberState::Ended ? Chosen : NAME_None; }
 
 	UFUNCTION(BlueprintPure, Category = "Chamber")
 	float GetAftermathAlpha() const;
@@ -121,6 +124,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Chamber", meta = (Units = "s"))
 	float GetEndingRunSeconds() const { return static_cast<float>(EndingRun); }
 
+	/** The run's clock when the aftermath ended and the hold began (-1: not yet). */
+	UFUNCTION(BlueprintPure, Category = "Chamber", meta = (Units = "s"))
+	float GetHoldStartRunSeconds() const { return static_cast<float>(HoldStartRun); }
+
 	/** The chamber of World, or null. */
 	static AEpilogueChamber* Find(const UWorld* World);
 
@@ -155,6 +162,7 @@ private:
 	double OfferedRun = -1.0;
 	double ChosenRun = -1.0;
 	double EndingRun = -1.0;
+	double HoldStartRun = -1.0;
 	double LockStartRun = -1.0;
 	double LockOpeningRun = -1.0;
 	double LockOpenRun = -1.0;

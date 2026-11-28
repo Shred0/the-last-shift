@@ -1304,11 +1304,19 @@ public:
 	float LockOpenSeconds = 2.f;
 
 	/**
-	 * Brief 36B: after a choice is held through, the hall answers for this long (run's clock, Normal time) before the
-	 * ending opens: Inject, the battery is fed; Open, the structure lets go. Nothing answers the player during it.
+	 * Brief 36B: after a choice is held through, the hall answers for this long (run's clock, Normal time): Inject, the
+	 * battery is fed; Open, the structure lets go. Everything it does reaches its end state at the end of this time.
+	 * Nothing answers the player during it. Then the hall holds still for AftermathHoldSeconds before the ending opens.
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
-	float ChoiceAftermathSeconds = 3.f;
+	float ChoiceAftermathSeconds = 6.f;
+
+	/**
+	 * After the aftermath the hall holds still for this long (run's clock, Normal time) as the aftermath left it, charged or
+	 * dark and silent; nothing answers the player. Then the ending opens.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
+	float AftermathHoldSeconds = 3.f;
 
 	/** Brief 36B: Inject drives the glow and the hum past their full values by this share at the aftermath's end. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "4.0"))
@@ -1336,6 +1344,7 @@ public:
 	float GetLockOpenDelaySeconds() const { return FMath::Clamp(LockOpenDelaySeconds, 0.f, 30.f); }
 	float GetLockOpenSeconds() const { return FMath::Clamp(LockOpenSeconds, 0.2f, 30.f); }
 	float GetChoiceAftermathSeconds() const { return FMath::Clamp(ChoiceAftermathSeconds, 0.f, 30.f); }
+	float GetAftermathHoldSeconds() const { return FMath::Clamp(AftermathHoldSeconds, 0.f, 30.f); }
 	float GetAftermathSurge() const { return FMath::Clamp(AftermathSurge, 0.f, 4.f); }
 	float GetAftermathLightShare() const { return FMath::Clamp(AftermathLightShare, 0.f, 1.f); }
 

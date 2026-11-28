@@ -5,6 +5,7 @@
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Epilogue/ChamberBattery.h"
+#include "Epilogue/EpilogueChamber.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -117,6 +118,15 @@ void APrologueMonitorRoom::BeginPlay()
 	if (TimeState)
 	{
 		TimeState->OnTimeStateChanged.AddUniqueDynamic(this, &APrologueMonitorRoom::HandleTimeStateChanged);
+	}
+	// The battery's hall: the lit screens read the aftermath of the frame (the chamber's): tick after it, so that the last
+	// monitor goes black on the aftermath's last frame, not one later.
+	if (bBatteryScreens)
+	{
+		if (AEpilogueChamber* Chamber = AEpilogueChamber::Find(GetWorld()))
+		{
+			AddTickPrerequisiteActor(Chamber);
+		}
 	}
 	Rebuild();
 }

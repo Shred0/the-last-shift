@@ -104,13 +104,14 @@ float AChamberBattery::GetAftermathAlpha() const
 float AChamberBattery::GetGaugeLevel() const
 {
 	const float Level = GetBatteryShown();
-	return GetAftermathEnding() == TEXT("Inject") ? FMath::Lerp(Level, 1.f, ChamberBatteryImpl::Ease(GetAftermathAlpha() / 0.8f)) : Level;
+	// Full at the aftermath's end, not before.
+	return GetAftermathEnding() == TEXT("Inject") ? FMath::Lerp(Level, 1.f, ChamberBatteryImpl::Ease(GetAftermathAlpha())) : Level;
 }
 
 float AChamberBattery::GetScreenOutShare() const
 {
-	// Every monitor out by 80% of the aftermath: the wall is black before the scene opens.
-	return GetAftermathEnding() == TEXT("Open") ? FMath::Clamp(GetAftermathAlpha() / 0.8f, 0.f, 1.f) : 0.f;
+	// The monitors go out one after another over the whole aftermath, the last at its end; the hold keeps the wall black.
+	return GetAftermathEnding() == TEXT("Open") ? FMath::Clamp(GetAftermathAlpha(), 0.f, 1.f) : 0.f;
 }
 
 void AChamberBattery::BeginPlay()
@@ -185,8 +186,21 @@ void AChamberBattery::Collect()
 		}
 	}
 	Rings.Sort([](const UStaticMeshComponent& A, const UStaticMeshComponent& B) { return A.GetComponentLocation().Z < B.GetComponentLocation().Z; });
+	// The rings move: their surface (the mesh's own family, the battery's) is mapped in their own space, as the doors' and
+	// hatches' panels are, so that every detail of it turns with the ring instead of standing still while it turns.
+	RingMid = nullptr;
+	UMaterialInterface* RingSurface = Rings.Num() > 0 && Rings[0]->GetStaticMesh() ? Rings[0]->GetStaticMesh()->GetMaterial(0) : nullptr;
+	if (RingSurface)
+	{
+		RingMid = UMaterialInstanceDynamic::Create(RingSurface, this);
+		RingMid->SetScalarParameterValue(TEXT("ObjectSpace"), 1.f);
+	}
 	for (UStaticMeshComponent* Ring : Rings)
 	{
+		if (RingMid)
+		{
+			Ring->SetMaterial(0, RingMid);
+		}
 		RingBase.Add(Ring->GetComponentQuat());
 		RingTurns.Add(0.0);
 		if (Ring->Mobility != EComponentMobility::Movable)
