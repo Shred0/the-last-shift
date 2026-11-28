@@ -61,7 +61,8 @@ struct LIDARSCAN_API FLidarInjectedPoint
 	GENERATED_BODY()
 
 	FLidarInjectedPoint() = default;
-	FLidarInjectedPoint(const FVector& InPosition, float InIntensity = 1.f) : WorldPosition(InPosition), Intensity(InIntensity) {}
+	FLidarInjectedPoint(const FVector& InPosition, float InIntensity = 1.f, float InMotionWeight = 1.f)
+		: WorldPosition(InPosition), Intensity(InIntensity), MotionWeight(InMotionWeight) {}
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar")
 	FVector WorldPosition = FVector::ZeroVector;
@@ -69,6 +70,14 @@ struct LIDARSCAN_API FLidarInjectedPoint
 	/** Multiplies the source colour and intensity for this point only. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar", meta = (ClampMin = "0.0", ClampMax = "16.0"))
 	float Intensity = 1.f;
+
+	/**
+	 * Scales the source's motion for this point only (FLidarSourceSettings::TremorRadius and PulseShare; the rates are
+	 * not scaled): 1 moves it as its source asks, 0 holds it still. A source that asks for no motion draws its points
+	 * still whatever this is.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MotionWeight = 1.f;
 };
 
 /** How the alpha of a source's points follows the age of the scan that holds them. */
@@ -138,6 +147,33 @@ struct LIDARSCAN_API FLidarSourceSettings
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar")
 	bool bShowBehindGeometry = false;
+
+	/**
+	 * Tremor, display only: each point is drawn moving smoothly about its own place, never farther from it than this, at
+	 * TremorRate, each point on its own phase, so that its mean place is its own place. 0 (or a TremorRate of 0) holds the
+	 * points still: the default. Nothing a scan decides depends on it: the points it keeps (bOccludeByCapture tests the
+	 * point's own place), the cap and its cut, the fades, the spacing and angle rules and the offset are those of the
+	 * point's own place. Its clock is the world's time: it stands still while the game is paused.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Motion", meta = (ClampMin = "0.0", ClampMax = "50.0", Units = "cm"))
+	float TremorRadius = 0.f;
+
+	/** Cycles a second of the tremor. 0 holds the points still. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Motion", meta = (ClampMin = "0.0", ClampMax = "30.0"))
+	float TremorRate = 0.f;
+
+	/**
+	 * Pulse, display only: each point's intensity rises and falls by this share about its own level (0.2: from 0.8 to 1.2
+	 * times it), at PulseRate, each point on its own phase, so that its mean is its own level. 0 (or a PulseRate of 0)
+	 * keeps it steady: the default. The pulse is the one thing that changes a point's intensity over time; its clock is
+	 * the world's time, as the tremor's.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Motion", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PulseShare = 0.f;
+
+	/** Cycles a second of the pulse. 0 keeps the intensity steady. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lidar|Motion", meta = (ClampMin = "0.0", ClampMax = "30.0"))
+	float PulseRate = 0.f;
 };
 
 UINTERFACE(BlueprintType, MinimalAPI)

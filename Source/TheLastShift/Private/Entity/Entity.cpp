@@ -943,7 +943,8 @@ void AEntity::GatherLidarPoints_Implementation(const FLidarScanContext& Context,
 		{
 			const float Jittered = FMath::Clamp(Along + Rng.FRandRange(-0.5f, 0.5f) * Spacing - SegmentStart, 0.f, Length);
 			const FVector OnPath = A + Direction * Jittered;
-			OutPoints.Emplace(OnPath + Side * Rng.FRandRange(-Lateral, Lateral) + FVector(0.f, 0.f, Rng.FRandRange(0.f, Vertical)));
+			// Brief 47: the trail stands still (no tremor, no pulse); only the figure's points ask the lidar for motion.
+			OutPoints.Emplace(OnPath + Side * Rng.FRandRange(-Lateral, Lateral) + FVector(0.f, 0.f, Rng.FRandRange(0.f, Vertical)), 1.f, 0.f);
 			Along += Spacing;
 		}
 		SegmentStart += Length;
@@ -1214,7 +1215,42 @@ FLidarSourceSettings AEntity::GetLidarSourceSettings_Implementation() const
 	// Once a scan has shown it, it stays visible when geometry comes between it and the player, like the scan's points.
 	// The capture still decides whether a scan picks it up (bOccludeByCapture): a scan does not reveal it through a wall.
 	Settings.bShowBehindGeometry = true;
+	// Brief 47: the figure trembles and pulses (EntityForms, or the session's values); its points ask for all of it
+	// (FLidarInjectedPoint::MotionWeight 1), the trail's and the walls' for none (0), so they stand still. One source keeps
+	// the order the cap cuts in: the figure first, then the trail, then the walls.
+	const FVector4f Motion = GetFigureMotionNow();
+	Settings.TremorRadius = Motion.X;
+	Settings.TremorRate = Motion.Y;
+	Settings.PulseShare = Motion.Z;
+	Settings.PulseRate = Motion.W;
 	return Settings;
+}
+
+namespace
+{
+	TOptional<FVector4f> GSessionFigureMotion;
+}
+
+FVector4f AEntity::GetFigureMotionNow()
+{
+	if (GSessionFigureMotion.IsSet())
+	{
+		const FVector4f& M = GSessionFigureMotion.GetValue();
+		return FVector4f(FMath::Clamp(M.X, 0.f, 50.f), FMath::Clamp(M.Y, 0.f, 30.f), FMath::Clamp(M.Z, 0.f, 1.f), FMath::Clamp(M.W, 0.f, 30.f));
+	}
+	const FEntityForms& Forms = UTheLastShiftSettings::Get()->EntityForms;
+	return FVector4f(FMath::Clamp(Forms.FigureTremorRadiusCm, 0.f, 50.f), FMath::Clamp(Forms.FigureTremorRate, 0.f, 30.f),
+		FMath::Clamp(Forms.FigurePulseShare, 0.f, 1.f), FMath::Clamp(Forms.FigurePulseRate, 0.f, 30.f));
+}
+
+void AEntity::SetSessionFigureMotion(TOptional<FVector4f> Motion)
+{
+	GSessionFigureMotion = Motion;
+}
+
+TOptional<FVector4f> AEntity::GetSessionFigureMotion()
+{
+	return GSessionFigureMotion;
 }
 
 void AEntity::DrawDebug() const

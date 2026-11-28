@@ -294,9 +294,11 @@
  *
  * Injected emitter (second emitter of the same system, so it shares the instance: ghost cap, ClearScans, eviction).
  * Spawn (once per activation): burst of InjectedPointCount particles; particle i reads InjectedPositions[i] (P),
- * InjectedColors[i], InjectedParams[i] = (FadeWeight, OcclusionTolerance), InjectedTransient[i] = (Hold, Vanish) and
+ * InjectedColors[i], InjectedParams[i] = (FadeWeight, OcclusionTolerance), InjectedTransient[i] = (Hold, Vanish),
  * InjectedBehindWeight[i] (stored as Particles.LidarBehindWeight; Particles.DynamicMaterialParameter = (it, 1, 1, 1),
- * see Occlusion display above).
+ * see Occlusion display above) and InjectedMotion[i] = M = (TremorRadius w, TremorRate, PulseShare w, PulseRate) (a colour
+ * array, stored as Particles.LidarInjectedMotion), w the point's FLidarInjectedPoint::MotionWeight, each half 0 when its
+ * rate is 0; Particles.LidarMotionSeed = s = float(i), the point's own phase.
  * With d = dot(P - CaptureOrigin,
  * CaptureForward), u' = dot(P - CaptureOrigin, CaptureRight) / (d * TanHalfFov.x), v' = dot(P - CaptureOrigin,
  * CaptureUp) / (d * TanHalfFov.y), the point reads the depth texel at UV = ((u' + 1) / 2, (1 - v') / 2) (same
@@ -316,6 +318,18 @@
  *   TransientAlpha = saturate(1 - SupersededAge / max(Vanish, 0.001))         if Hold < -1.5   (UntilNextScan),
  *   TransientAlpha = 1                                                        otherwise (Hold = -1),
  * and a particle with Hold < -1.5 is killed (DataInstance.Alive = false) once SupersededAge >= max(Vanish, 0.001).
+ * Motion (display only, the injected points' tremor and pulse; FLidarSourceSettings, all 0 by default), with
+ * t = User.InjectedMotionSeconds (world time since the scan, it stands still while the game is paused; pushed every frame
+ * only to a slot whose scan has moving points, FLidarScanSlot::bInjectedMotion: a scan that asks for no motion pushes nothing
+ * more per frame; User.InjectedMotion is uploaded once, with the scan's points, for every scan, so a reused slot never keeps
+ * the motion of its previous scan):
+ *   Position += M.r / sqrt(3) * sin(2 pi (M.g t (1, 1.1312, 0.8731) + frac(s (0.7548777, 0.5698403, 0.4124546)))),
+ *               added in the same update module that sets Position, before the sprite size and both renderers, so both
+ *               point renderers draw the same moved place: never farther than M.r from the point's own place, smooth,
+ *               each axis on its own phase, mean place the point's own,
+ *   rgb   *= 1 + M.b * sin(2 pi (M.a t + frac(0.618034 s)))      (mean: the point's own level; alpha unchanged).
+ * With M = 0 both terms are exactly 0 and 1: the pixels and counts of a system without them. Nothing the spawn decides
+ * reads them (the occlusion kill tests LidarSurfacePosition, the point's own place), and captured points have none.
  * FadeWeight 0 skips the age fade but not the ClearScans fade-out. ELidarFadeMode maps to
  * ScanFade = (FadeWeight 1, Hold -1), None = (0, -1), Transient = (0, HoldSeconds) with Vanish = VanishSeconds,
  * UntilNextScan = (0, -2) with Vanish = VanishSeconds.
@@ -363,6 +377,8 @@ namespace LidarScanParams
 	static const FName InjectedIntensity(TEXT("User.InjectedIntensity"));
 	static const FName FadeOutAlpha(TEXT("User.FadeOutAlpha"));
 	static const FName InjectedBehindWeight(TEXT("User.InjectedBehindWeight"));
+	static const FName InjectedMotion(TEXT("User.InjectedMotion"));
+	static const FName InjectedMotionSeconds(TEXT("User.InjectedMotionSeconds"));
 	static const FName PointMaterial(TEXT("User.PointMaterial"));
 	static const FName OcclusionDisplay(TEXT("User.OcclusionDisplay"));
 
@@ -937,8 +953,9 @@ void ULidarScanComponent::Scan()
 	OnScanStarted.Broadcast(ScanIndex, Slot.Context.Timestamp);
 }
 
-void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRenderTarget2D* Target)
+void ULidarScanComponent::InjectPoints(FLidarScanSlot& Slot, UTextureRenderTarget2D* Target)
 {
+	Slot.bInjectedMotion = false;
 	const FLidarScanContext& Context = Slot.Context;
 	FLidarInjectionStats Stats;
 	Stats.ScanIndex = Context.ScanIndex;
@@ -948,6 +965,7 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 	InjectedParams.Reset();
 	InjectedTransient.Reset();
 	InjectedBehindWeight.Reset();
+	InjectedMotion.Reset();
 
 	const int32 Cap = FMath::Clamp(MaxInjectedPointsPerScan, 0, 65536);
 	bool bAnyOccluding = false;
@@ -985,6 +1003,11 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 			? FVector2D(FMath::Clamp(Settings.HoldSeconds, 0.f, 30.f), Vanish)
 			: Settings.FadeMode == ELidarFadeMode::UntilNextScan ? FVector2D(-2.0, Vanish) : FVector2D(-1.0, 0.0);
 		const float BehindWeight = Settings.bShowBehindGeometry ? 1.f : 0.f;
+		// Display only (see the contract above): a half with a rate of 0 is off, so a still point is never left displaced.
+		const float TremorRate = FMath::Clamp(Settings.TremorRate, 0.f, 30.f);
+		const float TremorRadius = TremorRate > 0.f ? FMath::Clamp(Settings.TremorRadius, 0.f, 50.f) : 0.f;
+		const float PulseRate = FMath::Clamp(Settings.PulseRate, 0.f, 30.f);
+		const float PulseShare = PulseRate > 0.f ? FMath::Clamp(Settings.PulseShare, 0.f, 1.f) : 0.f;
 
 		for (const FLidarInjectedPoint& Point : Gathered)
 		{
@@ -1007,6 +1030,9 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 			InjectedParams.Add(Params);
 			InjectedTransient.Add(Transient);
 			InjectedBehindWeight.Add(BehindWeight);
+			const float Weight = FMath::Clamp(Point.MotionWeight, 0.f, 1.f);
+			InjectedMotion.Add(FLinearColor(TremorRadius * Weight, TremorRate, PulseShare * Weight, PulseRate));
+			Slot.bInjectedMotion |= Weight > 0.f && (TremorRadius > 0.f || PulseShare > 0.f);
 			bAnyOccluding |= Settings.bOccludeByCapture;
 		}
 	}
@@ -1019,6 +1045,7 @@ void ULidarScanComponent::InjectPoints(const FLidarScanSlot& Slot, UTextureRende
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector2D(Points, LidarScanParams::InjectedParams, InjectedParams);
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector2D(Points, LidarScanParams::InjectedTransient, InjectedTransient);
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(Points, LidarScanParams::InjectedBehindWeight, InjectedBehindWeight);
+		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(Points, LidarScanParams::InjectedMotion, InjectedMotion);
 		Points->SetVariableInt(LidarScanParams::InjectedPointCount, Stats.Uploaded);
 	}
 
@@ -1324,6 +1351,7 @@ void ULidarScanComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 				Slot.Points->SetVariableFloat(LidarScanParams::SupersededAge, Slot.SupersededRealTime < 0.0
 					? -1.f : static_cast<float>(FMath::Max(Now - Slot.SupersededRealTime, 0.0)));
 				PushLinkGrowth(Slot);
+				PushMotionClock(Slot);
 			}
 			bAnyActive |= Slot.IsActive();
 			continue;
@@ -1499,6 +1527,7 @@ void ULidarScanComponent::ReleaseSlot(FLidarScanSlot& Slot)
 	Slot.FadeOutDuration = 0.f;
 	Slot.FadeOutElapsed = 0.f;
 	Slot.WarmUntilRealTime = -1.0;
+	Slot.bInjectedMotion = false;
 }
 
 void ULidarScanComponent::ApplyLiveSettings()
@@ -1760,6 +1789,20 @@ void ULidarScanComponent::PushLiveParameters(const FLidarScanSlot& Slot) const
 		const double WorldNow = World ? World->GetTimeSeconds() : Slot.StartWorldTime;
 		Points->SetVariableFloat(LidarScanParams::LinkGrowth, LidarScanLinkTiming::Growth(WorldNow - Slot.StartWorldTime, LinkSeconds));
 	}
+	PushMotionClock(Slot);
+}
+
+void ULidarScanComponent::PushMotionClock(const FLidarScanSlot& Slot) const
+{
+	// The injected points' tremor and pulse clock: world time since the scan, so it stands still while the game is paused.
+	// Only a scan whose injected points move has it pushed: a scan that asks for no motion pushes nothing more.
+	if (!Slot.bInjectedMotion || !Slot.Points)
+	{
+		return;
+	}
+	const UWorld* World = GetWorld();
+	const double WorldNow = World ? World->GetTimeSeconds() : Slot.StartWorldTime;
+	Slot.Points->SetVariableFloat(LidarScanParams::InjectedMotionSeconds, static_cast<float>(FMath::Max(WorldNow - Slot.StartWorldTime, 0.0)));
 }
 
 // --- Links ---

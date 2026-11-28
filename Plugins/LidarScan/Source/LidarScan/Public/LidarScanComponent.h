@@ -155,6 +155,12 @@ struct FLidarScanSlot
 	/** Last growth fraction of the lines pushed to the slot's system, negative when none. */
 	float PushedLinkGrowth = -1.f;
 
+	/**
+	 * The slot's scan holds injected points that move (a source asked for a tremor or a pulse and at least one of its
+	 * uploaded points has a MotionWeight above 0): only then is the motion clock (User.InjectedMotionSeconds) pushed.
+	 */
+	bool bInjectedMotion = false;
+
 	/** The capture of the slot's scan as the scan memory reads it (pose, size, sampling values at scan time). */
 	UPROPERTY(Transient)
 	FLidarMemoryCapture MemoryCapture;
@@ -902,11 +908,13 @@ private:
 	float ResolveViewPixelScale() const;
 	void UpdateViewPixelScale();
 	void PushLiveParameters(const FLidarScanSlot& Slot) const;
+	/** Pushes the injected points' motion clock (User.InjectedMotionSeconds) to a slot whose scan has moving points; nothing otherwise. */
+	void PushMotionClock(const FLidarScanSlot& Slot) const;
 	void ReleaseSlot(FLidarScanSlot& Slot);
 	void BroadcastScanCompleted(int32 ScanIndex);
 
 	/** Gathers every source for this scan, filters by coverage and the cap, and hands the points to the slot's system. */
-	void InjectPoints(const FLidarScanSlot& Slot, UTextureRenderTarget2D* Target);
+	void InjectPoints(FLidarScanSlot& Slot, UTextureRenderTarget2D* Target);
 
 	/** CPU count of uploaded points that lie behind the captured depth (see bVerifyInjectedOcclusion). */
 	int32 CountBehindCapturedDepth(UTextureRenderTarget2D* Target, const FLidarScanContext& Context) const;
@@ -1027,6 +1035,8 @@ private:
 	TArray<FVector2D> InjectedParams;
 	TArray<FVector2D> InjectedTransient;
 	TArray<float> InjectedBehindWeight;
+	/** Per injected point: (tremor radius, tremor rate, pulse share, pulse rate), see the contract comment. */
+	TArray<FLinearColor> InjectedMotion;
 
 	/** World size of one screen pixel at unit view depth for the current view, last value pushed to the scans. */
 	float ViewPixelScale = 0.f;

@@ -96,9 +96,13 @@ struct THELASTSHIFT_API FEntityFormTuning
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float WallBow = 0.f;
 
-	/** A strand's thickness: its points are jittered this far round its line, anew for every scan. */
+	/**
+	 * A strand's half-width: its points are spread evenly over a band round its line, along its whole length, up to this far
+	 * from it on each axis of the opening's plane (so the strand is twice this wide as the player sees it, more on a slant)
+	 * and this far either side of that plane, anew for every scan; never out of the opening.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "0.0", ClampMax = "50.0", Units = "cm"))
-	float WallThickness = 4.f;
+	float WallThickness = 8.f;
 };
 
 /** Brief 29: the modelled forms of the entity's figure. The one owner of the forms' meshes and point counts. */
@@ -133,6 +137,25 @@ struct THELASTSHIFT_API FEntityForms
 	/** Thickness of the volume that blocks the player across a wall's opening while Stopped. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Walls", meta = (ClampMin = "5.0", ClampMax = "200.0", Units = "cm"))
 	float WallBlockDepth = 30.f;
+
+	/**
+	 * Brief 47: the figure's points tremble about their own places, never farther than this, while their scan shows them,
+	 * in every area and with every form, before the entity is found and after. Its trail and its walls stand still. 0 = off.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Motion", meta = (ClampMin = "0.0", ClampMax = "50.0", Units = "cm"))
+	float FigureTremorRadiusCm = 0.f;
+
+	/** Cycles a second of the figure's tremor. 0 = off. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Motion", meta = (ClampMin = "0.0", ClampMax = "30.0"))
+	float FigureTremorRate = 0.f;
+
+	/** The figure's points' intensity rises and falls by this share about its own level (0.2: a fifth up and down). 0 = off. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Motion", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FigurePulseShare = 0.f;
+
+	/** Cycles a second of the figure's pulse. 0 = off. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity|Motion", meta = (ClampMin = "0.0", ClampMax = "30.0"))
+	float FigurePulseRate = 0.f;
 
 	/** One entry for each modelled form (Procedural has no entry). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Entity")

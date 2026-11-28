@@ -464,6 +464,8 @@ namespace WallDebug
 	static FShot GShot;
 	static bool bShotReady = false;
 	static FDelegateHandle GShotHandle;
+	/** The folder under Saved/Screenshots the next shots go to (Brief 47's width shots go to Brief47). */
+	static FString GShotFolder = TEXT("Brief30");
 
 	/** The hue classes of the Brief 20 tests (8-bit sRGB after tonemapping): the scan's cyan, the entity's red. */
 	static bool IsHue(const FColor& C, EHue Hue)
@@ -494,7 +496,7 @@ namespace WallDebug
 		GShot.Pixels = Pixels;
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief30"), GShot.Label + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), GShotFolder, GShot.Label + TEXT(".png")));
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 		FFileHelper::SaveArrayToFile(Png, *Path);
 		Note(FString::Printf(TEXT("shot %s saved (%d x %d): %s"), *GShot.Label, Width, Height, *Path));
@@ -602,8 +604,79 @@ namespace WallDebug
 		bool bTraceBeforeHit = false;
 		int32 EntityHueFound = 0;
 		double WalkStart = 0.0;
+
+		// Brief 47: the strands' width on screen before and after (px), the form whose look the check sets for the session.
+		EEntityForm LookForm = EEntityForm::Procedural;
+		float WidthBeforePx = 0.f;
+		float WidthAfterPx = 0.f;
+		float ThicknessAfter = 0.f;
+		TOptional<FVector3f> SavedLook;
 	};
 	static FCheck G;
+
+	/**
+	 * Brief 47: the width across its strands of the first wall's points for the newest scan, on screen (px): for each point the
+	 * distance from its strand's line in the opening's plane, twice their 90th percentile, seen from the camera at the wall's
+	 * centre. Also counts the points outside the opening.
+	 */
+	static float StrandWidthPx(int32& OutPoints, int32& OutOutside)
+	{
+		OutPoints = 0;
+		OutOutside = 0;
+		const AEntity* E = FindEntity();
+		const AEntityWall* Wall = E && E->GetWalls().Num() > 0 ? E->GetWalls()[0] : nullptr;
+		const ULidarScanComponent* L = Lidar();
+		const APlayerController* C = PC();
+		if (!Wall || !L || !C)
+		{
+			return 0.f;
+		}
+		int32 Newest = INDEX_NONE;
+		for (const FLidarScanContext& Context : L->GetAliveScans())
+		{
+			Newest = FMath::Max(Newest, Context.ScanIndex);
+		}
+		TArray<FLidarInjectedPoint> Built;
+		Wall->BuildPoints(Newest, Built);
+		const FAreaPassage& P = Wall->GetPassage();
+		TArray<double> Distances;
+		int32 Index = 0;
+		for (const FEntityWallStrand& Strand : Wall->GetStrands())
+		{
+			for (int32 I = 0; I < Strand.Points && Index < Built.Num(); ++I, ++Index)
+			{
+				const FVector D = Built[Index].WorldPosition - P.Centre;
+				const FVector2D UV(FVector::DotProduct(D, P.Across), D.Z);
+				double Best = TNumericLimits<double>::Max();
+				for (int32 K = 0; K <= 400; ++K)
+				{
+					Best = FMath::Min(Best, FVector2D::Distance(UV, Strand.At(K / 400.0)));
+				}
+				Distances.Add(Best);
+				OutOutside += Wall->IsInsideOpening(Built[Index].WorldPosition, 0.5f) ? 0 : 1;
+			}
+		}
+		OutPoints = Built.Num();
+		if (Distances.Num() == 0)
+		{
+			return 0.f;
+		}
+		Distances.Sort();
+		const double WidthCm = 2.0 * Distances[FMath::Min(Distances.Num() - 1, Distances.Num() * 9 / 10)];
+		FVector CamLoc;
+		FRotator CamRot;
+		C->GetPlayerViewPoint(CamLoc, CamRot);
+		const FVector Right = FRotationMatrix(CamRot).GetUnitAxis(EAxis::Y);
+		const FVector Mid = P.Centre + FVector(0.f, 0.f, Wall->GetHeight() * 0.5f);
+		FVector2D A, B;
+		if (!C->ProjectWorldLocationToScreen(Mid, A, false) || !C->ProjectWorldLocationToScreen(Mid + Right * WidthCm, B, false))
+		{
+			return 0.f;
+		}
+		Note(FString::Printf(TEXT("47: the strands' width: %.1f cm across (twice the 90th percentile of %d points' distance from their line), %.1f px on screen at %.0f cm"),
+			WidthCm, Distances.Num(), FVector2D::Distance(A, B), FVector::Dist(CamLoc, Mid)));
+		return static_cast<float>(FVector2D::Distance(A, B));
+	}
 
 	static void Cleanup()
 	{
@@ -625,6 +698,8 @@ namespace WallDebug
 		}
 		AEntity::SetSessionWalls(G.SavedSessionWalls);
 		AEntity::SetSessionWallCount(G.SavedSessionCount);
+		AEntity::SetSessionWallLook(G.LookForm, G.SavedLook);
+		GShotFolder = TEXT("Brief30");
 		if (AEntity* E = FindEntity())
 		{
 			E->Speed = G.SavedSpeed;
@@ -1520,6 +1595,52 @@ namespace WallDebug
 		{
 			G.EntityHueFound = CountHue(Shot, EHue::Entity);
 			Check(G.EntityHueFound > 150, FString::Printf(TEXT("9: the wall across the %s from 6 m in a scan, in the entity's colour (%d entity-coloured pixels)"), LexToString(G.Mouth.Where.Kind), G.EntityHueFound));
+		});
+		// Brief 47: the strands' width, before (the form's WallThickness before Brief 47, half today's, for the session) and now.
+		S.Add(Do(TEXT("47 width before"), []()
+		{
+			AEntity* E = FindEntity();
+			G.LookForm = E->GetRequestedForm();
+			G.SavedLook = AEntity::GetSessionWallLook(G.LookForm);
+			float Thickness = 0.f;
+			int32 Strands = 0;
+			float Bow = 0.f;
+			AEntity::GetWallLookOf(G.LookForm, Thickness, Strands, Bow);
+			G.ThicknessAfter = Thickness;
+			AEntity::SetSessionWallLook(G.LookForm, FVector3f(Thickness * 0.5f, static_cast<float>(Strands), Bow));
+			GShotFolder = TEXT("Brief47");
+			E->RaiseWallsAtForTest({ G.Mouth.Candidate });
+			StandAtSix(G.Mouth);
+			PutFigureAway();
+			StandAtSix(G.Mouth);
+			Note(FString::Printf(TEXT("47: %s's walls before Brief 47: WallThickness %.1f cm; now %.1f cm"), *G.Form, Thickness * 0.5f, Thickness));
+			Lidar()->Scan();
+			return 0.6f;
+		}));
+		AddShot(S, []() { return FString::Printf(TEXT("%s_%s_CorridorMouth_6m_WidthBefore"), *MapShort(), *G.Form); }, [](const FShot&)
+		{
+			int32 Points = 0, Outside = 0;
+			G.WidthBeforePx = StrandWidthPx(Points, Outside);
+		});
+		S.Add(Do(TEXT("47 width now"), []()
+		{
+			AEntity* E = FindEntity();
+			AEntity::SetSessionWallLook(G.LookForm, G.SavedLook);
+			E->RaiseWallsAtForTest({ G.Mouth.Candidate });
+			StandAtSix(G.Mouth);
+			Lidar()->Scan();
+			return 0.6f;
+		}));
+		AddShot(S, []() { return FString::Printf(TEXT("%s_%s_CorridorMouth_6m_WidthNow"), *MapShort(), *G.Form); }, [](const FShot& Shot)
+		{
+			int32 Points = 0, Outside = 0;
+			G.WidthAfterPx = StrandWidthPx(Points, Outside);
+			const float Ratio = G.WidthAfterPx / FMath::Max(G.WidthBeforePx, 0.01f);
+			Check(Ratio >= 1.6f && Ratio <= 2.4f, FString::Printf(TEXT("47: from 6 m a strand is twice as wide on screen as before, within a fifth (%.1f px against %.1f px: x%.2f; %d entity-coloured pixels)"),
+				G.WidthAfterPx, G.WidthBeforePx, Ratio, CountHue(Shot, EHue::Entity)));
+			Check(Points == G.WallPoints && Outside == 0, FString::Printf(TEXT("47: with the wider strands every point of the wall lies inside its opening (%d points, %d outside; WallThickness %.1f cm), no point added"),
+				Points, Outside, G.ThicknessAfter));
+			GShotFolder = TEXT("Brief30");
 		});
 		S.Add(Do(TEXT("6 latest scan only: a scan looking away"), []()
 		{

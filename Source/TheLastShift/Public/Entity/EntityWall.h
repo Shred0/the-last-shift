@@ -88,7 +88,11 @@ public:
 	void Setup(int32 InPassageIndex, const FAreaPassage& InPassage, float InHeight, float InBlockDepth, int32 InStrands, float InBow, float InThickness, int32 InPoints,
 		bool bInStrategic, FRandomStream& Rng);
 
-	/** The wall's points for one scan, jittered anew for every scan (as the trail's), all inside its opening. */
+	/**
+	 * The wall's points for one scan, jittered anew for every scan (as the trail's), all inside its opening: each strand's
+	 * points spread evenly over a band round its line, up to Thickness from it on each axis of the opening's plane and up to
+	 * Thickness either side of that plane. They ask the lidar for no motion (FLidarInjectedPoint::MotionWeight 0).
+	 */
 	void BuildPoints(int32 ScanIndex, TArray<FLidarInjectedPoint>& OutPoints) const;
 
 	/** True when Point lies inside the opening: across within HalfWidth, from the floor to Height, within Thickness of its plane (each grown by Tolerance). */

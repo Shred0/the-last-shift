@@ -141,7 +141,9 @@ void AEntityWall::Setup(int32 InPassageIndex, const FAreaPassage& InPassage, flo
 
 void AEntityWall::BuildPoints(int32 ScanIndex, TArray<FLidarInjectedPoint>& OutPoints) const
 {
-	// New jitter for every scan, as the trail's: each strand a line of points at an irregular step, thick by Thickness.
+	// New jitter for every scan, as the trail's: each strand a line of points at an irregular step, spread evenly over a band
+	// round its line along its whole length: up to Thickness from it on each axis of the opening's plane (so the strand is
+	// twice Thickness wide as the player sees it, more on a slant) and up to Thickness either side of the plane.
 	FRandomStream Rng(static_cast<int32>(HashCombineFast(GetTypeHash(ScanIndex), HashCombineFast(GetTypeHash(GetUniqueID()), GetTypeHash(PassageIndex)))));
 	const double HW = Passage.HalfWidth;
 	OutPoints.Reserve(OutPoints.Num() + PointCount);
@@ -151,9 +153,11 @@ void AEntityWall::BuildPoints(int32 ScanIndex, TArray<FLidarInjectedPoint>& OutP
 		{
 			const double T = FMath::Clamp((I + 0.5 + Rng.FRandRange(-0.45f, 0.45f)) / FMath::Max(Strand.Points, 1), 0.0, 1.0);
 			FVector2D UV = Strand.At(T) + FVector2D(Rng.FRandRange(-1.f, 1.f), Rng.FRandRange(-1.f, 1.f)) * Thickness;
+			// Never out of the opening, however wide the strand.
 			UV.X = FMath::Clamp(UV.X, -HW, HW);
 			UV.Y = FMath::Clamp(UV.Y, 0.0, static_cast<double>(Height));
-			OutPoints.Emplace(ToWorld(UV, Rng.FRandRange(-1.f, 1.f) * Thickness));
+			// The walls stand still: no tremor, no pulse (FLidarInjectedPoint::MotionWeight 0).
+			OutPoints.Emplace(ToWorld(UV, Rng.FRandRange(-1.f, 1.f) * Thickness), 1.f, 0.f);
 		}
 	}
 }
@@ -211,6 +215,48 @@ void AEntity::SetSessionWallCount(TOptional<int32> Count)
 TOptional<int32> AEntity::GetSessionWallCount()
 {
 	return SessionWallCount;
+}
+
+namespace
+{
+	/** Brief 47: the session's wall look per form (tls.Entity.WallLook): X WallThickness, Y WallStrands, Z WallBow. */
+	TMap<EEntityForm, FVector3f> GSessionWallLooks;
+}
+
+void AEntity::SetSessionWallLook(EEntityForm Form, TOptional<FVector3f> Look)
+{
+	if (Look.IsSet())
+	{
+		GSessionWallLooks.Add(Form, Look.GetValue());
+	}
+	else
+	{
+		GSessionWallLooks.Remove(Form);
+	}
+}
+
+TOptional<FVector3f> AEntity::GetSessionWallLook(EEntityForm Form)
+{
+	const FVector3f* Look = GSessionWallLooks.Find(Form);
+	return Look ? TOptional<FVector3f>(*Look) : TOptional<FVector3f>();
+}
+
+void AEntity::GetWallLookOf(EEntityForm Form, float& OutThickness, int32& OutStrands, float& OutBow)
+{
+	const FEntityFormTuning* Tuning = UTheLastShiftSettings::Get()->FindEntityForm(Form);
+	const FEntityFormTuning Look = Tuning ? *Tuning : FEntityFormTuning();
+	OutThickness = Look.WallThickness;
+	OutStrands = Look.WallStrands;
+	OutBow = Look.WallBow;
+	if (const FVector3f* Session = GSessionWallLooks.Find(Form))
+	{
+		OutThickness = Session->X;
+		OutStrands = FMath::RoundToInt32(Session->Y);
+		OutBow = Session->Z;
+	}
+	OutThickness = FMath::Clamp(OutThickness, 0.f, 50.f);
+	OutStrands = FMath::Clamp(OutStrands, 1, 32);
+	OutBow = FMath::Clamp(OutBow, 0.f, 0.5f);
 }
 
 int32 AEntity::GetWallCountNow() const
@@ -403,16 +449,19 @@ AEntityWall* AEntity::SpawnWall(int32 Candidate, bool bStrategic)
 	{
 		return nullptr;
 	}
-	// The look of the act's form (EntityForms); the procedural figure, or a form with no entry, takes the defaults.
+	// The look of the act's form (EntityForms, or the session's: tls.Entity.WallLook); the procedural figure, or a form with
+	// no entry, takes the defaults.
 	const UTheLastShiftSettings* Settings = UTheLastShiftSettings::Get();
-	const FEntityFormTuning* Form = Settings->FindEntityForm(GetRequestedForm());
-	const FEntityFormTuning Look = Form ? *Form : FEntityFormTuning();
+	float Thickness = 0.f;
+	int32 Strands = 0;
+	float Bow = 0.f;
+	GetWallLookOf(GetRequestedForm(), Thickness, Strands, Bow);
 	if (!bWallRngInitialized)
 	{
 		WallRng.Initialize(static_cast<int32>(HashCombineFast(GetTypeHash(SpawnSeed), 0x57A11u)));
 		bWallRngInitialized = true;
 	}
-	Wall->Setup(Candidate, Passage, GetWallHeight(), Settings->EntityForms.WallBlockDepth, Look.WallStrands, Look.WallBow, Look.WallThickness, GetWallPointsNow(), bStrategic, WallRng);
+	Wall->Setup(Candidate, Passage, GetWallHeight(), Settings->EntityForms.WallBlockDepth, Strands, Bow, Thickness, GetWallPointsNow(), bStrategic, WallRng);
 	Walls.Add(Wall);
 	return Wall;
 }

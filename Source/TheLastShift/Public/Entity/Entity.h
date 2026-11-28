@@ -353,6 +353,18 @@ public:
 	static void SetSessionForm(TOptional<EEntityForm> Form);
 	static TOptional<EEntityForm> GetSessionForm();
 
+	// --- The figure's tremor and pulse (Brief 47) ---
+
+	/**
+	 * The figure's motion the next scan asks the lidar for: X tremor radius (cm), Y tremor rate, Z pulse share, W pulse rate
+	 * (cycles a second): the session's values (tls.Entity.Tremor, tests) or EntityForms'. The trail and the walls stand still.
+	 */
+	static FVector4f GetFigureMotionNow();
+
+	/** The session's tremor and pulse for every entity (tls.Entity.Tremor, tests); unset = EntityForms' values. */
+	static void SetSessionFigureMotion(TOptional<FVector4f> Motion);
+	static TOptional<FVector4f> GetSessionFigureMotion();
+
 	// --- Walls (Brief 30) ---
 
 	/** True when walls are on now: the session's switch (tls.Entity.Walls) or EntityForms.bEntityWalls, and a wall count above 0. */
@@ -388,6 +400,13 @@ public:
 	static TOptional<bool> GetSessionWalls();
 	static void SetSessionWallCount(TOptional<int32> Count);
 	static TOptional<int32> GetSessionWallCount();
+
+	/** Brief 47: the session's wall look of one form (tls.Entity.WallLook): X WallThickness, Y WallStrands, Z WallBow; unset = EntityForms'. */
+	static void SetSessionWallLook(EEntityForm Form, TOptional<FVector3f> Look);
+	static TOptional<FVector3f> GetSessionWallLook(EEntityForm Form);
+
+	/** The wall look of Form now: the session's, else its EntityForms entry, else the defaults (the procedural figure). */
+	static void GetWallLookOf(EEntityForm Form, float& OutThickness, int32& OutStrands, float& OutBow);
 
 	/**
 	 * Tests and tools: raises walls at these candidates now (indices into GetWallCandidates), in place of the Stop's choice,

@@ -59,6 +59,52 @@ namespace EntityWallsTest
 	}
 }
 
+// Brief 47: the tests that measure the figure hold it still: ForceAreaOneForm and Restore set the figure's tremor and pulse
+// to 0 for their run and put the session's values back at the end, so that their poses, counts and levels keep their
+// meaning. tls.EntityFormCheck does not use the scope's form: it measures the figure trembling, as the player sees it.
+namespace EntityMotionTest
+{
+	struct FState
+	{
+		int32 Depth = 0;
+		TOptional<FVector4f> Saved;
+	};
+
+	inline FState& State()
+	{
+		static FState Instance;
+		return Instance;
+	}
+
+	/** Every entity's figure stands still until Restore; nested calls keep the first saved values. */
+	inline void HoldStill(const TCHAR* Test)
+	{
+		FState& S = State();
+		if (S.Depth++ == 0)
+		{
+			S.Saved = AEntity::GetSessionFigureMotion();
+			UE_LOG(LogTheLastShift, Log, TEXT("%s: the entity's figure stands still for the run (tremor and pulse 0)."), Test);
+		}
+		AEntity::SetSessionFigureMotion(FVector4f(0.f, 0.f, 0.f, 0.f));
+	}
+
+	/** Puts back the session's values saved by the first HoldStill. No-op without one. */
+	inline void Restore(const TCHAR* Test)
+	{
+		FState& S = State();
+		if (S.Depth <= 0)
+		{
+			return;
+		}
+		if (--S.Depth == 0)
+		{
+			AEntity::SetSessionFigureMotion(S.Saved);
+			UE_LOG(LogTheLastShift, Log, TEXT("%s: the entity's figure trembles and pulses %s again."), Test, S.Saved.IsSet() ? TEXT("at the session's values") : TEXT("as the settings say"));
+			S.Saved.Reset();
+		}
+	}
+}
+
 namespace EntityFormTest
 {
 	struct FState
@@ -84,6 +130,7 @@ namespace EntityFormTest
 		const EEntityForm Form = UTheLastShiftSettings::Get()->GetEntityFormOfAct(1);
 		AEntity::SetSessionForm(Form);
 		EntityWallsTest::SwitchOff(Test);
+		EntityMotionTest::HoldStill(Test);
 		UE_LOG(LogTheLastShift, Log, TEXT("%s: the entity's figure takes area 1's form (%s) for the run."), Test, LexToString(Form));
 	}
 
@@ -96,6 +143,7 @@ namespace EntityFormTest
 			return;
 		}
 		EntityWallsTest::Restore(Test);
+		EntityMotionTest::Restore(Test);
 		if (--S.Depth == 0)
 		{
 			AEntity::SetSessionForm(S.Saved);
