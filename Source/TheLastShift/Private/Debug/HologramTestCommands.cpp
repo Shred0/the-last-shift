@@ -14,12 +14,14 @@
 //    still whole later; with two rows (45 and 140 characters), four rows (20, 90, 35 and 60) and none;
 //  - the route's colour measured on a shot from the doorway, with and without the beams, and the beams seen there (Brief
 //    48): over each beam's lower half, from its rod's tip to half its length, the median difference with the beams shown
-//    and hidden at least 20 levels, and no pixel of a beam pushed above 200 levels by it;
+//    and hidden at least 50 levels (Brief 49: two thirds of the 75 the settings' 0.075 and 3.0 gave; 20 before), and no
+//    pixel of a beam pushed above 200 levels by it; then BeamLevel 0.05 and BeamFadePower 5.0 (the values nobody saw) set
+//    for the session, measured the same way, must fail that floor (the check proves itself), and the settings come back;
 //  - nothing of it while Stopped (each part's component hidden; a shot before the first scan), and none of its parts in the
 //    scan's capture: from two poses, the scan's depth with each part shown while Stopped (test only) is the depth without
 //    the hologram, texel by texel.
 // tls.HologramTest 0 tune: the beams' measure alone, for pairs of BeamLevel and BeamFadePower set for the session (TUNE lines).
-// Shots to Saved/Screenshots/Brief48 (Brief44, Brief18 before). The fixture rows replace the prologue table for the run and are put back at the end.
+// Shots to Saved/Screenshots/Brief49 (Brief48, Brief44, Brief18 before). The fixture rows replace the prologue table for the run and are put back at the end.
 
 #include "CoreMinimal.h"
 
@@ -123,6 +125,14 @@ namespace HologramTest
 	};
 	static FRun G;
 
+	// Brief 49: the beams' floor, two thirds of the least lower-half median the settings' values (BeamLevel 0.075,
+	// BeamFadePower 3.0, kept by the developer) gave from the doorway in Brief 48 (75 levels); and the values nobody saw
+	// (before Brief 48), which the same measure must find failing it.
+	static constexpr int32 GBeamMedianFloor = 50;
+	static constexpr float GUnseenBeamLevel = 0.05f;
+	static constexpr float GUnseenBeamFadePower = 5.0f;
+	static int32 GSettingsLeastMedian = -1;
+
 	static UWorld* W() { return TimeStateDebug::ResolveGameWorld(nullptr); }
 	static APlayerController* PC() { UWorld* World = W(); return World ? World->GetFirstPlayerController() : nullptr; }
 	static AStdPlayerController* StdPC() { return Cast<AStdPlayerController>(PC()); }
@@ -214,7 +224,7 @@ namespace HologramTest
 		}
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"), TEXT("HologramTest_") + G.ShotName + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief49"), TEXT("HologramTest_") + G.ShotName + TEXT(".png")));
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 		FFileHelper::SaveArrayToFile(Png, *Path);
 		Note(FString::Printf(TEXT("shot %s (%d x %d): %s"), *G.ShotName, Width, Height, *Path));
@@ -1128,14 +1138,57 @@ namespace HologramTest
 
 			// Brief 48: what the player sees of the beams, the same two shots (the motion held, so that only the beams differ):
 			// over each beam's lower half (from its rod's tip to half its length; pixels where geometry stands in front left
-			// out) the median difference with the beams shown and hidden at least 20 levels (8-bit, the largest channel), and
-			// no pixel of a beam pushed above 200 levels by it. A beam with fewer than 30 such pixels is not seen from there.
+			// out) the median difference with the beams shown and hidden at least GBeamMedianFloor levels (8-bit, the largest
+			// channel; 20 before Brief 49), and no pixel of a beam pushed above 200 levels by it. A beam with fewer than 30 such
+			// pixels is not seen from there.
 			const FBeamMeasure R = (With && Without) ? MeasureBeams(*With, *Without) : FBeamMeasure();
-			Check(R.Checked >= 6 && R.MinMedian >= 20 && R.Above200 == 0,
-				FString::Printf(TEXT("the beams are seen from the doorway: over each beam's lower half the median difference with the beams shown and hidden is at least 20 levels (the least %d, %d beams measured, 6 needed) and no pixel of a beam is pushed above 200 levels (%d) (BeamLevel %.3f, BeamFadePower %.2f): %s"),
-					R.MinMedian, R.Checked, R.Above200, UTheLastShiftSettings::Get()->GetHologramTuning().BeamLevel, UTheLastShiftSettings::Get()->GetHologramTuning().BeamFadePower,
+			GSettingsLeastMedian = R.MinMedian;
+			Check(R.Checked >= 6 && R.MinMedian >= GBeamMedianFloor && R.Above200 == 0,
+				FString::Printf(TEXT("the beams are seen from the doorway: over each beam's lower half the median difference with the beams shown and hidden is at least %d levels (the least %d, %d beams measured, 6 needed) and no pixel of a beam is pushed above 200 levels (%d) (BeamLevel %.3f, BeamFadePower %.2f): %s"),
+					GBeamMedianFloor, R.MinMedian, R.Checked, R.Above200, UTheLastShiftSettings::Get()->GetHologramTuning().BeamLevel, UTheLastShiftSettings::Get()->GetHologramTuning().BeamFadePower,
 					*DescribeBeams(R)));
 			return 0.f;
+		}));
+
+		// Brief 49, the check proves itself: the values the developer could not see (BeamLevel 0.05, BeamFadePower 5.0, before
+		// Brief 48), set for the session and measured the same way from the same pose, the motion held, must fail the floor;
+		// then the settings' values are put back.
+		const FHologramTuning SavedTuning = UTheLastShiftSettings::Get()->GetHologramTuning();
+		S.Add(Do(TEXT("the unseen beams: 0.05 and 5.0 set for the session"), []()
+		{
+			UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+			Settings->Hologram.BeamLevel = GUnseenBeamLevel;
+			Settings->Hologram.BeamFadePower = GUnseenBeamFadePower;
+			StandAt(1810.0, 230.0, GHoloCentre);
+			APrologueHologram* H = Holo();
+			H->SetRouteProgressOverride(1.f);
+			H->SetMotionFrozenForTest(true);
+			H->Rebuild();
+			H->SetBeamsHiddenForTest(false);
+			return 1.f;
+		}));
+		AddShot(S, TEXT("Route_Doorway_Unseen"));
+		S.Add(Do(TEXT("the unseen beams: hidden"), []() { Holo()->SetBeamsHiddenForTest(true); return 0.3f; }));
+		AddShot(S, TEXT("Route_Doorway_Unseen_NoBeams"));
+		S.Add(Do(TEXT("the unseen beams: measured, the settings back"), [SavedTuning]()
+		{
+			const FShotPixels* With = G.Shots.Find(TEXT("Route_Doorway_Unseen"));
+			const FShotPixels* Without = G.Shots.Find(TEXT("Route_Doorway_Unseen_NoBeams"));
+			const FBeamMeasure R = (With && Without) ? MeasureBeams(*With, *Without) : FBeamMeasure();
+			Check(R.Checked >= 6 && R.MinMedian < GBeamMedianFloor,
+				FString::Printf(TEXT("the check proves itself: at BeamLevel %.3f and BeamFadePower %.2f (the values nobody saw) the same measure fails the floor of %d levels (the least lower-half median %d, %d beams measured, 6 needed; %d px above 200): %s"),
+					GUnseenBeamLevel, GUnseenBeamFadePower, GBeamMedianFloor, R.MinMedian, R.Checked, R.Above200, *DescribeBeams(R)));
+			Note(FString::Printf(TEXT("BEAMS least lower-half median: %d at the settings' BeamLevel %.3f and BeamFadePower %.2f, %d at %.3f and %.2f; the floor %d (two thirds of 75)"),
+				GSettingsLeastMedian, SavedTuning.BeamLevel, SavedTuning.BeamFadePower, R.MinMedian, GUnseenBeamLevel, GUnseenBeamFadePower, GBeamMedianFloor));
+			UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+			Settings->Hologram.BeamLevel = SavedTuning.BeamLevel;
+			Settings->Hologram.BeamFadePower = SavedTuning.BeamFadePower;
+			APrologueHologram* H = Holo();
+			H->Rebuild();
+			H->SetBeamsHiddenForTest(false);
+			H->SetMotionFrozenForTest(false);
+			H->SetRouteProgressOverride(-1.f);
+			return 0.3f;
 		}));
 
 		// --- while Stopped: each part hidden, nothing on screen before the first scan ---
@@ -1216,7 +1269,7 @@ namespace HologramTest
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsHologramTestCommand(
 	TEXT("tls.HologramTest"),
-	TEXT("tls.HologramTest [Quit=0] [tune]: (fresh PIE or a package, in Prologue_Home) Brief 18's hologram: parts and colours, the turn, the drift, the beams, behind the pause menu, the route's colour on a shot and the beams seen on it (Brief 48: over each beam's lower half a median difference of 20 levels or more with the beams shown and hidden, no pixel pushed above 200), nothing while Stopped or in the scan's capture (each part, two poses), the route drawn by the briefing with fixture rows (two rows, four rows, none). tune: the beams' measure only, for pairs of BeamLevel and BeamFadePower set for the session (TUNE lines). Shots to Saved/Screenshots/Brief48."),
+	TEXT("tls.HologramTest [Quit=0] [tune]: (fresh PIE or a package, in Prologue_Home) Brief 18's hologram: parts and colours, the turn, the drift, the beams, behind the pause menu, the route's colour on a shot and the beams seen on it (over each beam's lower half a median difference of 50 levels or more with the beams shown and hidden, no pixel pushed above 200; then BeamLevel 0.05 and BeamFadePower 5.0 set for the session must fail that floor), nothing while Stopped or in the scan's capture (each part, two poses), the route drawn by the briefing with fixture rows (two rows, four rows, none). tune: the beams' measure only, for pairs of BeamLevel and BeamFadePower set for the session (TUNE lines). Shots to Saved/Screenshots/Brief49."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		HologramTest::Start(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0, Args.Contains(TEXT("tune")));

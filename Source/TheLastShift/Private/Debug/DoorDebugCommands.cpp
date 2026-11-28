@@ -25,7 +25,7 @@
 //   in it holds the door open 3 s past its time, the door closes once it has left; a pawn that enters while it closes
 //   opens it again; the pawn never moves by more than 1 cm with no input and is never inside the panel's collision); the
 //   layout hash against the reference and the validation at the first seed.
-// - Shots to Saved/Screenshots/Brief48 (Brief46 before): in an area, the first gate from 4 m with the flashlight at a
+// - Shots to Saved/Screenshots/Brief49 (Brief48, Brief46 before): in an area, the first gate from 4 m with the flashlight at a
 //   quarter, a half and three quarters of its opening and open, and in a scan Stopped at half its motion; at home, the
 //   print room's door at half its motion and open.
 // - Brief 48, its panel: each door's DOOR line names the mesh its panel shows (the engine's cube or its modelled mesh) with
@@ -35,11 +35,17 @@
 //   the panel's far face, or nothing). At home the print room's door is shot from 4 m on each side, shut and at half its
 //   rise, with its panel as it is and with the engine's cube scaled to the opening as before Brief 48 (the look only, posed
 //   by the check: Before and After).
+// - Brief 49, the arrival's exit door: in Prologue_Arrival the exit door (the hatch's ExitDoor) is checked as the print
+//   room's door is at home: it shows SM_DoorPanel at scale 1 through its PanelMesh, or the check fails; it is the first
+//   door (the clock's checks run on it); it is shot from 4 m on each side, shut and at half its rise, with its panel and
+//   with the engine's cube as before (ExitDoor_After_*, ExitDoor_Before_*), and at half its motion and open. The hatch
+//   (which opens the exit door by itself after its lines) is held still for the run and given back at the end.
 //
 // It puts back the settings, the powered times, the run's home state, the pawn and every door (shut), and destroys the
 // door it spawned. Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
+#include "Area/AreaExit.h"
 #include "Area/AreaGenerator.h"
 #include "Audio/GameAudioSubsystem.h"
 #include "Camera/CameraComponent.h"
@@ -64,6 +70,7 @@
 #include "Misc/Paths.h"
 #include "Prologue/PrologueDeparture.h"
 #include "Prologue/PrologueEntryDoor.h"
+#include "Prologue/PrologueHatch.h"
 #include "Run/RunSubsystem.h"
 #include "Run/TheLastShiftSettings.h"
 #include "Scan/ScanDirectorComponent.h"
@@ -148,6 +155,10 @@ namespace DoorCheck
 		double SavedBattery = 1.0;
 		double SavedHome = 0.0;
 		TWeakObjectPtr<AActor> Departure;
+		/** Brief 49: the area exits of a hand-built map switched off for the run (the pawn stands past a door), given back at the end. */
+		TArray<TWeakObjectPtr<AAreaExit>> HeldExits;
+		/** Brief 49: on arrival (a dark hangar, the flashlight off) the flashlight shown for the run's shots, put out at the end. */
+		bool bFlashlightForShots = false;
 
 		FMotion Motion;
 		int32 ShutPixels = 0;
@@ -528,7 +539,11 @@ namespace DoorCheck
 
 	// --- Shots ---
 
-	static FString ShotFolder() { return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"))); }
+	static FString ShotFolder() { return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief49"))); }
+
+	/** The door of a prologue map that must show SM_DoorPanel (the first door): the print room's at home, the exit door on arrival. */
+	static FString ModelledDoorName() { return URunSubsystem::GetPrologueStageOf(W()) == 2 ? TEXT("ExitDoor") : TEXT("PrintRoomDoor"); }
+	static FString ModelledDoorLabel() { return URunSubsystem::GetPrologueStageOf(W()) == 2 ? TEXT("the arrival's exit door") : TEXT("the print room's door"); }
 
 	static void Shot(const FString& ShotName)
 	{
@@ -778,7 +793,7 @@ namespace DoorCheck
 			if (bShotsAtHome)
 			{
 				GRun.HalfRise = D->GetPanelRise();
-				Shot(TEXT("PrintRoomDoor_Half"));
+				Shot(ModelledDoorName() + TEXT("_Half"));
 			}
 		}, true, [Door](float T) { GRun.Results.FindOrAdd(GetNameSafe(Door())).Open = T; });
 		S.Add(Do(Label + TEXT(": open, from each side"), [Door, Label, bShotsAtHome]()
@@ -801,7 +816,7 @@ namespace DoorCheck
 				WouldFront + WouldBack > 0 ? TEXT("hidden once risen (it would show past the wall above)") : TEXT("the wall above hides it (hidden once risen as well)")));
 			if (bShotsAtHome)
 			{
-				Shot(TEXT("PrintRoomDoor_Open"));
+				Shot(ModelledDoorName() + TEXT("_Open"));
 			}
 			return 0.3f;
 		}));
@@ -1178,6 +1193,19 @@ namespace DoorCheck
 		{
 			D->Destroy();
 		}
+		for (const TWeakObjectPtr<AAreaExit>& Exit : GRun.HeldExits)
+		{
+			if (AAreaExit* E = Exit.Get())
+			{
+				E->SetExitEnabled(true);
+			}
+		}
+		GRun.HeldExits.Reset();
+		if (GRun.bFlashlightForShots)
+		{
+			SetFlashlight(false);
+			GRun.bFlashlightForShots = false;
+		}
 		if (AActor* Dep = GRun.Departure.Get())
 		{
 			Dep->SetActorTickEnabled(true);
@@ -1274,9 +1302,12 @@ namespace DoorCheck
 		GRun.StartLocation = Pawn()->GetActorLocation();
 		GRun.StartRotation = PC()->GetControlRotation();
 		const bool bHome = URunSubsystem::GetPrologueStageOf(World) == 1;
+		// Brief 49: the arrival's exit door is checked as the print room's door is at home.
+		const bool bArrival = URunSubsystem::GetPrologueStageOf(World) == 2;
+		const bool bModelledFirst = bHome || bArrival;
 
 		TArray<FStep>& S = GRun.Steps;
-		S.Add(WaitFor(TEXT("setup: the map ready"), []() { const AAreaGenerator* G = Generator(); return Pawn() && (!G || G->IsReady()); }, 60.f, [bHome]()
+		S.Add(WaitFor(TEXT("setup: the map ready"), []() { const AAreaGenerator* G = Generator(); return Pawn() && (!G || G->IsReady()); }, 60.f, [bHome, bArrival]()
 		{
 			ResumeTime();
 			// The doors of the map, the first gate first (the nearest to the player's start), then a spawned one.
@@ -1302,9 +1333,51 @@ namespace DoorCheck
 					It->SetActorTickEnabled(false);
 				}
 			}
+			else if (bArrival)
+			{
+				// The exit door first (the hatch's ExitDoor); the hatch must not open it by itself while the check moves the
+				// pawn out of the ship and round the hangar: held still for the run.
+				const ADoorDevice* Exit = nullptr;
+				for (TActorIterator<APrologueHatch> It(W()); It; ++It)
+				{
+					Exit = It->ExitDoor;
+					if (It->IsActorTickEnabled())
+					{
+						GRun.Departure = *It;
+						It->SetActorTickEnabled(false);
+					}
+				}
+				Found.Sort([From, Exit](const ADoorDevice& A, const ADoorDevice& B)
+				{
+					return (&A == Exit) != (&B == Exit) ? &A == Exit : FVector::DistSquared(A.GetActorLocation(), From) < FVector::DistSquared(B.GetActorLocation(), From);
+				});
+				Check(Exit && Found.Num() > 0 && Found[0] == Exit, FString::Printf(TEXT("setup: the arrival's exit door (the hatch's ExitDoor) %s is the first door"), *GetNameSafe(Exit)));
+			}
 			else
 			{
 				Found.Sort([From](const ADoorDevice& A, const ADoorDevice& B) { return FVector::DistSquared(A.GetActorLocation(), From) < FVector::DistSquared(B.GetActorLocation(), From); });
+			}
+			// Brief 49: in a hand-built map the pawn stands 4 m past each door, which on arrival is inside the exit corridor
+			// with its area exit: every exit switched on is switched off for the run and given back at the end.
+			if (!Generator())
+			{
+				for (TActorIterator<AAreaExit> It(W()); It; ++It)
+				{
+					if (It->IsExitEnabled())
+					{
+						It->SetExitEnabled(false);
+						GRun.HeldExits.Add(*It);
+					}
+				}
+				Note(FString::Printf(TEXT("setup: %d area exit(s) of the map switched off for the run"), GRun.HeldExits.Num()));
+			}
+			if (bArrival)
+			{
+				// The arrival's hangar is dark and its flashlight starts off: shown for the run so that the shots of the exit
+				// door are lit (depth captures and the rest do not read light), put out at the end.
+				SetFlashlight(true);
+				GRun.bFlashlightForShots = true;
+				Note(TEXT("setup: the flashlight shown for the run's shots (the arrival's hangar is dark)"));
 			}
 			FString List;
 			for (ADoorDevice* D : Found)
@@ -1347,7 +1420,7 @@ namespace DoorCheck
 			}
 			Check(Found.Num() > 0 && Spawned, FString::Printf(TEXT("setup: %d door(s) in %s: %s; one spawned (%s)"), Found.Num(), *GRun.Map, *List, *GetNameSafe(Spawned)));
 			// Brief 48: the doors of a hand-built map that still show the engine's cube, named; at home the print room's door
-			// (the first) shows SM_DoorPanel at scale 1.
+			// (the first) shows SM_DoorPanel at scale 1; Brief 49: on arrival the exit door (the first) too.
 			if (!Generator())
 			{
 				for (const ADoorDevice* D : Found)
@@ -1357,12 +1430,12 @@ namespace DoorCheck
 						Note(FString::Printf(TEXT("CUBE %s (%s) at %s shows the engine's cube: %s"), *D->GetName(), *D->GetClass()->GetName(), *D->GetActorLocation().ToCompactString(), *DescribePanel(D)));
 					}
 				}
-				if (bHome && Found.Num() > 0)
+				if ((bHome || bArrival) && Found.Num() > 0)
 				{
 					const ADoorDevice* Print = Found[0];
 					const UStaticMeshComponent* P = Print->GetPanel();
 					Check(!ShowsCube(Print) && P && GetNameSafe(P->GetStaticMesh()) == TEXT("SM_DoorPanel") && P->GetRelativeScale3D().Equals(FVector::OneVector, 1.e-4),
-						FString::Printf(TEXT("setup: the print room's door %s shows the modelled panel SM_DoorPanel at scale 1 through its PanelMesh (%s; PanelMesh %s)"), *Print->GetName(),
+						FString::Printf(TEXT("setup: %s %s shows the modelled panel SM_DoorPanel at scale 1 through its PanelMesh (%s; PanelMesh %s)"), *ModelledDoorLabel(), *Print->GetName(),
 							*DescribePanel(Print), *GetNameSafe(Print->PanelMesh)));
 				}
 			}
@@ -1394,19 +1467,19 @@ namespace DoorCheck
 		const int32 Count = [World]() { int32 N = 0; for (TActorIterator<ADoorDevice> It(World); It; ++It) { ++N; } return N; }() + 1;
 		for (int32 I = 0; I < Count; ++I)
 		{
-			AddDoor(S, [I]() { return DoorAt(I); }, FString::Printf(TEXT("1 door %d"), I), bHome && I == 0);
+			AddDoor(S, [I]() { return DoorAt(I); }, FString::Printf(TEXT("1 door %d"), I), bModelledFirst && I == 0);
 		}
-		if (bHome)
+		if (bModelledFirst)
 		{
 			// Brief 48: the print room's door from 4 m on each side, shut and at half its rise, as it is (After) and with the
-			// engine's cube as before (Before), the panel posed by the check (the look only).
+			// engine's cube as before (Before), the panel posed by the check (the look only); Brief 49: on arrival the exit door.
 			for (const bool bCube : { true, false })
 			{
 				for (const bool bHalf : { false, true })
 				{
 					for (const float Side : { 1.f, -1.f })
 					{
-						const FString Name = FString::Printf(TEXT("PrintRoomDoor_%s_%s_%s"), bCube ? TEXT("Before") : TEXT("After"), bHalf ? TEXT("Half") : TEXT("Shut"),
+						const FString Name = FString::Printf(TEXT("%s_%s_%s_%s"), *ModelledDoorName(), bCube ? TEXT("Before") : TEXT("After"), bHalf ? TEXT("Half") : TEXT("Shut"),
 							Side > 0.f ? TEXT("PlusX") : TEXT("MinusX"));
 						S.Add(Do(TEXT("7 shots: ") + Name, [bCube, bHalf, Side]()
 						{
@@ -1429,7 +1502,7 @@ namespace DoorCheck
 				if (ADoorDevice* D = FirstDoor())
 				{
 					PosePanel(D, false, 0.f);
-					Note(FString::Printf(TEXT("7 shots: the print room's door at half its rise: %.1f cm; its panel back: %s"), GRun.HalfRise, *DescribePanel(D)));
+					Note(FString::Printf(TEXT("7 shots: %s at half its rise: %.1f cm; its panel back: %s"), *ModelledDoorLabel(), GRun.HalfRise, *DescribePanel(D)));
 				}
 				return 0.f;
 			}));
@@ -1449,7 +1522,7 @@ namespace DoorCheck
 
 	static FAutoConsoleCommandWithWorldAndArgs GDoorCheckCommand(
 		TEXT("tls.DoorCheck"),
-		TEXT("tls.DoorCheck (an area map or a hand-built map; PIE): every door of the map and a spawned one rise open and come down shut over DoorMoveSeconds (times, steps, the panel's cover at half its motion, nothing seen past the frame, the motion's sound), the clock (a Stop and the pause menu at half a motion), and in an area the powered time, a time jump, a payment while closing, the doorway and the layout hash; the panel's mesh in each DOOR line, the doors of a hand-built map showing the engine's cube named (the print room's door must show SM_DoorPanel), nothing seen past a shut panel from 4 m on each side; shots to Saved/Screenshots/Brief48."),
+		TEXT("tls.DoorCheck (an area map or a hand-built map; PIE): every door of the map and a spawned one rise open and come down shut over DoorMoveSeconds (times, steps, the panel's cover at half its motion, nothing seen past the frame, the motion's sound), the clock (a Stop and the pause menu at half a motion), and in an area the powered time, a time jump, a payment while closing, the doorway and the layout hash; the panel's mesh in each DOOR line, the doors of a hand-built map showing the engine's cube named (the print room's door at home and the exit door on arrival must show SM_DoorPanel), nothing seen past a shut panel from 4 m on each side; shots to Saved/Screenshots/Brief49."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld) { Start(InWorld); }));
 }
 
