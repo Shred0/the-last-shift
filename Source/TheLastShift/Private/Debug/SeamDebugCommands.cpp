@@ -16,7 +16,11 @@
 // passes seen as the player sees it: shut and open, from 2 m at eye height on each side looking down at its threshold (no
 // pixel of it shows nothing or a surface below the floor plates' base, the bottom of their bevelled joints) and, shut, from
 // 3 m on each side looking at the wall round and above its frame (no pixel shows nothing);
-// with shots (Tag in their names: Before, After) to Saved/Screenshots/Brief44 (Brief35 before). Development builds only.
+// and (Brief 48) the floor at the foot of a hand-built map's walls: every run of wall panels standing on a floor seen from
+// 2 m at eye height looking down at its foot, a view every 4 m (at home no pixel of a view shows nothing; elsewhere none
+// through the wall's foot), the corridor's view with the floor strips under the panels hidden and shown, and each door's
+// panel against its own frame, shut and risen (no face in the plane of a frame's face facing the same way);
+// with shots (Tag in their names: Before, After) to Saved/Screenshots/Brief48 (Brief44, Brief35 before). Development builds only.
 
 #include "Debug/TlsDebugCommon.h"
 #include "Debug/TestLidarCharacter.h"
@@ -1083,7 +1087,7 @@ namespace SeamDebug
 		{
 			TArray64<uint8> Png;
 			FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
-			const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"), GShotSave + TEXT(".png")));
+			const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"), GShotSave + TEXT(".png")));
 			IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 			FFileHelper::SaveArrayToFile(Png, *Path);
 			Note(FString::Printf(TEXT("shot %s saved: %s"), *GShotSave, *Path));
@@ -1308,7 +1312,7 @@ namespace SeamDebug
 	{
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Mask.GetData(), Mask.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"), MaskName + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"), MaskName + TEXT(".png")));
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 		FFileHelper::SaveArrayToFile(Png, *Path);
 		Note(FString::Printf(TEXT("mask %s saved (red: void; orange: the plates' joints; grey: depth): %s"), *MaskName, *Path));
@@ -1672,7 +1676,7 @@ namespace SeamDebug
 			{
 				TArray64<uint8> Png;
 				FImageUtils::PNGCompressImageArray(GShot.Width, GShot.Height, TArrayView64<const FColor>(Mask.GetData(), Mask.Num()), Png);
-				const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"),
+				const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"),
 					FString::Printf(TEXT("%s_%s_FlickerMask_%s.png"), *MapShort(), *Label, *GRun.Tag)));
 				FFileHelper::SaveArrayToFile(Png, *Path);
 				Note(FString::Printf(TEXT("C: %s: the mask of the flickering pixels (red; the frame's pixels dim yellow): %s"), *Label, *Path));
@@ -1964,6 +1968,375 @@ namespace SeamDebug
 		}
 	}
 
+	// --- Brief 48: the floor at the foot of the hand-built maps' walls, and each door's panel against its frame ---
+
+	/** A run of wall panels standing on a floor: their slab faces in one plane, facing one way, end to end. */
+	struct FWallRun
+	{
+		FVector Normal = FVector::ZeroVector;
+		FVector Along = FVector::ZeroVector;
+		/** The slab faces' plane (Normal . P), the run's extent along it (Along . P) and the floor's top at its foot. */
+		double Plane = 0.0;
+		double From = 0.0;
+		double To = 0.0;
+		double Floor = 0.0;
+		int32 Panels = 0;
+		FString Label;
+	};
+
+	struct FWallFoot
+	{
+		TArray<FWallRun> Runs;
+		/** The floor strips under the panels (SeamFill pieces under a panel's slab), hidden for the "before" counts and shot. */
+		TArray<TWeakObjectPtr<UStaticMeshComponent>> Strips;
+		/** The corridor view shot before and after: its eye and the point at the wall's foot it looks at. */
+		FVector ShotEye = FVector::ZeroVector;
+		FVector ShotAt = FVector::ZeroVector;
+		bool bShot = false;
+		int32 Views = 0;
+		int32 Failed = 0;
+	};
+	static FWallFoot GFoot;
+
+	/**
+	 * The wall panels (SM_KitWallPanel: its pivot at the bottom of its slab's face, +X out of it, +Y along it, 100 cm wide at
+	 * scale 1) that stand on a floor, grouped into runs; and the SeamFill pieces lying under a panel's slab (the strips).
+	 */
+	static void GatherWallRuns(const TArray<FPiece>& Pieces, FWallFoot& Out)
+	{
+		Out.Runs.Reset();
+		Out.Strips.Reset();
+		struct FPanel { FVector Normal, Along; double Plane, Mid, Half, Floor; FBox Box; };
+		TArray<FPanel> Panels;
+		for (const FPiece& P : Pieces)
+		{
+			const UStaticMeshComponent* C = P.Component.Get();
+			if (!C || GetNameSafe(C->GetStaticMesh()) != TEXT("SM_KitWallPanel"))
+			{
+				continue;
+			}
+			const FVector N = P.Transform.GetUnitAxis(EAxis::X);
+			if (FMath::Abs(N.Z) > 0.05)
+			{
+				continue;
+			}
+			const FVector Normal = FVector(N.X, N.Y, 0.0).GetSafeNormal();
+			const FVector Along = FVector::CrossProduct(FVector::UpVector, Normal);
+			const FVector Foot = P.Transform.GetLocation();
+			// On a floor: a floor piece's top at the panel's foot, 5 cm out from its face.
+			if (!IsFloorCovered(Pieces, Foot + Normal * 5.0, nullptr))
+			{
+				continue;
+			}
+			Panels.Add({ Normal, Along, FVector::DotProduct(Normal, Foot), FVector::DotProduct(Along, Foot), 50.0 * FMath::Abs(P.Transform.GetScale3D().Y), Foot.Z, P.Box });
+		}
+		// The strips: SeamFill pieces whose box lies inside a standing panel's box (1 cm round it), their top at its foot.
+		for (const FPiece& P : Pieces)
+		{
+			const UStaticMeshComponent* C = P.Component.Get();
+			if (!C || !C->GetOwner() || !C->GetOwner()->Tags.Contains(TEXT("SeamFill")))
+			{
+				continue;
+			}
+			for (const FPanel& Wp : Panels)
+			{
+				const FBox Grown = Wp.Box.ExpandBy(1.0);
+				if (P.Box.Min.X >= Grown.Min.X && P.Box.Max.X <= Grown.Max.X && P.Box.Min.Y >= Grown.Min.Y && P.Box.Max.Y <= Grown.Max.Y && FMath::Abs(P.Box.Max.Z - Wp.Floor) <= 1.0)
+				{
+					Out.Strips.Add(const_cast<UStaticMeshComponent*>(C));
+					break;
+				}
+			}
+		}
+		// Runs: one facing (within about a degree), one plane (within 1 cm), one floor (within 3 cm), end to end (gaps of 5 cm
+		// at most).
+		TArray<bool> Used;
+		Used.Init(false, Panels.Num());
+		for (int32 I = 0; I < Panels.Num(); ++I)
+		{
+			if (Used[I])
+			{
+				continue;
+			}
+			const FPanel& Head = Panels[I];
+			TArray<TPair<double, double>> Spans;
+			for (int32 J = I; J < Panels.Num(); ++J)
+			{
+				const FPanel& B = Panels[J];
+				if (!Used[J] && FVector::DotProduct(Head.Normal, B.Normal) > 0.9998 && FMath::Abs(Head.Plane - B.Plane) <= 1.0 && FMath::Abs(Head.Floor - B.Floor) <= 3.0)
+				{
+					Used[J] = true;
+					const double Mid = FVector::DotProduct(Head.Along, B.Normal * B.Plane + B.Along * B.Mid);
+					Spans.Add({ Mid - B.Half, Mid + B.Half });
+				}
+			}
+			Spans.Sort([](const TPair<double, double>& A, const TPair<double, double>& B) { return A.Key < B.Key; });
+			bool bOpen = false;
+			for (int32 K = 0; K < Spans.Num(); ++K)
+			{
+				if (!bOpen)
+				{
+					FWallRun& R = Out.Runs.AddDefaulted_GetRef();
+					R.Normal = Head.Normal;
+					R.Along = Head.Along;
+					R.Plane = Head.Plane;
+					R.Floor = Head.Floor;
+					R.From = Spans[K].Key;
+					R.To = Spans[K].Value;
+					bOpen = true;
+				}
+				FWallRun& R = Out.Runs.Last();
+				R.To = FMath::Max(R.To, Spans[K].Value);
+				++R.Panels;
+				if (K + 1 < Spans.Num() && Spans[K + 1].Key - R.To > 5.0)
+				{
+					bOpen = false;
+				}
+			}
+		}
+		for (int32 I = 0; I < Out.Runs.Num(); ++I)
+		{
+			FWallRun& R = Out.Runs[I];
+			const FVector A = R.Normal * R.Plane + R.Along * R.From;
+			const FVector B = R.Normal * R.Plane + R.Along * R.To;
+			R.Label = FString::Printf(TEXT("run %d (facing yaw %.0f, from (%.0f, %.0f) to (%.0f, %.0f) at floor %.0f, %d panels)"), I, R.Normal.Rotation().Yaw, A.X, A.Y, B.X, B.Y, R.Floor, R.Panels);
+		}
+	}
+
+	static void ShowStrips(bool bShow)
+	{
+		for (const TWeakObjectPtr<UStaticMeshComponent>& C : GFoot.Strips)
+		{
+			if (C.IsValid())
+			{
+				C->SetVisibility(bShow);
+			}
+		}
+	}
+
+	/** A corridor's run: another run facing it within 4.5 m across, overlapping it along by a metre. The longest one. */
+	static int32 CorridorRun()
+	{
+		int32 Best = INDEX_NONE;
+		for (int32 I = 0; I < GFoot.Runs.Num(); ++I)
+		{
+			const FWallRun& R = GFoot.Runs[I];
+			for (const FWallRun& O : GFoot.Runs)
+			{
+				if (FVector::DotProduct(R.Normal, O.Normal) > -0.9998 || FMath::Abs(R.Floor - O.Floor) > 3.0)
+				{
+					continue;
+				}
+				// Facing each other: the other's plane, seen along this run's normal, lies Across in front of this one.
+				const double Across = -O.Plane - R.Plane;
+				// The other run's extent along this run's axis (its Along is this one's reversed).
+				const double OFrom = -O.To;
+				const double OTo = -O.From;
+				if (Across > 100.0 && Across <= 450.0 && OTo > R.From + 100.0 && OFrom < R.To - 100.0)
+				{
+					if (Best == INDEX_NONE || R.To - R.From > GFoot.Runs[Best].To - GFoot.Runs[Best].From)
+					{
+						Best = I;
+					}
+					break;
+				}
+			}
+		}
+		return Best;
+	}
+
+	struct FFootCount
+	{
+		int32 Nothing = 0;
+		/** Of those, the pixels whose ray crosses the wall's slab plane within its run and within 30 cm of its foot. */
+		int32 FootHoles = 0;
+		TArray<FColor> Mask;
+	};
+
+	static FFootCount CountFoot(const FWallRun& R, const FVector& Eye, const FRotator& Rotation, int32 Width, int32 Height, const TArray<float>& Depth)
+	{
+		FFootCount C;
+		C.Mask.Init(FColor::Black, Width * Height);
+		for (int32 Y = 0; Y < Height; ++Y)
+		{
+			for (int32 X = 0; X < Width; ++X)
+			{
+				const int32 I = Y * Width + X;
+				const double D = Depth[I];
+				if (D <= 1.0e7)
+				{
+					const uint8 Grey = static_cast<uint8>(FMath::Clamp(255.0 - D / 10.0, 30.0, 255.0));
+					C.Mask[I] = FColor(Grey, Grey, Grey);
+					continue;
+				}
+				++C.Nothing;
+				const FVector Ray = PixelRay(Rotation, 90.f, Width, Height, X, Y);
+				const double Den = FVector::DotProduct(R.Normal, Ray);
+				bool bFoot = false;
+				if (FMath::Abs(Den) > 1.e-6)
+				{
+					const double T = (R.Plane - FVector::DotProduct(R.Normal, Eye)) / Den;
+					const FVector At = Eye + Ray * T;
+					const double Along = FVector::DotProduct(R.Along, At);
+					bFoot = T > 0.0 && FMath::Abs(At.Z - R.Floor) <= 30.0 && Along >= R.From - 5.0 && Along <= R.To + 5.0;
+				}
+				C.FootHoles += bFoot ? 1 : 0;
+				C.Mask[I] = bFoot ? FColor(255, 0, 255) : FColor(255, 0, 0);
+			}
+		}
+		return C;
+	}
+
+	/**
+	 * The views along every run, from 2 m at eye height looking down at the wall's foot, one every 4 m at most (at the run's
+	 * middle when shorter): a depth capture of 960 x 540 at 90 degrees. At home no pixel of a view may show nothing; in the
+	 * other hand-built maps (an exit corridor ends open on the dark) no pixel seen through the wall's foot may.
+	 */
+	static void CheckWallFeet()
+	{
+		const bool bStrict = MapShort() == TEXT("Prologue_Home");
+		GFoot.Views = 0;
+		GFoot.Failed = 0;
+		int32 Skipped = 0;
+		for (int32 Index = 0; Index < GFoot.Runs.Num(); ++Index)
+		{
+			const FWallRun& R = GFoot.Runs[Index];
+			const double Length = R.To - R.From;
+			const int32 N = FMath::Max(1, FMath::CeilToInt(Length / 400.0));
+			for (int32 K = 0; K < N; ++K)
+			{
+				const double S = R.From + (K + 0.5) * Length / N;
+				const FVector At(R.Normal.X * R.Plane + R.Along.X * S, R.Normal.Y * R.Plane + R.Along.Y * S, R.Floor);
+				const FVector Eye = At + R.Normal * 200.0 + FVector(0.0, 0.0, 165.0);
+				if (!IsFloorCovered(G.Pieces, FVector(Eye.X, Eye.Y, R.Floor), nullptr))
+				{
+					++Skipped;
+					Note(FString::Printf(TEXT("wall feet: %s at %.0f: no floor 2 m out, no one stands there: left out"), *R.Label, S - R.From));
+					continue;
+				}
+				const FRotator Rotation = (At - Eye).Rotation();
+				TArray<float> Depth;
+				constexpr int32 Wd = 960, Ht = 540;
+				if (!CaptureDepth(Eye, Rotation, 90.f, Wd, Ht, Depth))
+				{
+					Check(false, FString::Printf(TEXT("wall feet: %s at %.0f: the depth capture failed"), *R.Label, S - R.From));
+					continue;
+				}
+				const FFootCount C = CountFoot(R, Eye, Rotation, Wd, Ht, Depth);
+				const bool bOk = bStrict ? C.Nothing == 0 : C.FootHoles == 0;
+				++GFoot.Views;
+				GFoot.Failed += bOk ? 0 : 1;
+				Check(bOk, FString::Printf(TEXT("wall feet: %s, %.0f cm along, from 2 m at eye height looking down at the wall's foot (960 x 540, 90 degrees): %d pixels show nothing, %d of them through the wall's foot%s"),
+					*R.Label, S - R.From, C.Nothing, C.FootHoles, bStrict ? TEXT(" (none allowed in the view)") : TEXT(" (none allowed through the foot; the others are noted)")));
+				if (!bOk)
+				{
+					SaveMask(FString::Printf(TEXT("%s_WallFoot_Run%d_%04d_Mask_%s"), *MapShort(), Index, FMath::RoundToInt(S - R.From), *GRun.Tag), Wd, Ht, C.Mask);
+				}
+			}
+		}
+		Note(FString::Printf(TEXT("wall feet: %d runs of wall panels standing on a floor, %d views, %d failed, %d left out; %d floor strips under the panels (SeamFill)"),
+			GFoot.Runs.Num(), GFoot.Views, GFoot.Failed, Skipped, GFoot.Strips.Num()));
+		Check(GFoot.Runs.Num() > 0 && GFoot.Views > 0, FString::Printf(TEXT("wall feet: the map has runs of wall panels on a floor to look at (%d runs, %d views)"), GFoot.Runs.Num(), GFoot.Views));
+	}
+
+	/** The corridor's view of the wall's foot, with the strips hidden (before) and shown (after): counts and masks. */
+	static void CompareFootBeforeAfter()
+	{
+		const int32 I = CorridorRun();
+		if (I == INDEX_NONE)
+		{
+			Note(TEXT("wall feet: no corridor run (two runs facing each other within 4.5 m) in this map"));
+			return;
+		}
+		const FWallRun& R = GFoot.Runs[I];
+		const double S = 0.5 * (R.From + R.To);
+		const FVector At(R.Normal.X * R.Plane + R.Along.X * S, R.Normal.Y * R.Plane + R.Along.Y * S, R.Floor);
+		const FVector Eye = At + R.Normal * 200.0 + FVector(0.0, 0.0, 165.0);
+		GFoot.ShotEye = Eye;
+		GFoot.ShotAt = At;
+		GFoot.bShot = true;
+		const FRotator Rotation = (At - Eye).Rotation();
+		for (const bool bShown : { false, true })
+		{
+			ShowStrips(bShown);
+			FlushRenderingCommands();
+			TArray<float> Depth;
+			if (!CaptureDepth(Eye, Rotation, 90.f, 960, 540, Depth))
+			{
+				Check(false, TEXT("wall feet: the corridor's depth capture failed"));
+				continue;
+			}
+			const FFootCount C = CountFoot(R, Eye, Rotation, 960, 540, Depth);
+			Note(FString::Printf(TEXT("wall feet: the corridor's %s, its middle from 2 m, %s: %d pixels show nothing, %d through the wall's foot"), *R.Label,
+				bShown ? TEXT("the strips shown (after)") : TEXT("the strips hidden (before)"), C.Nothing, C.FootHoles));
+			SaveMask(FString::Printf(TEXT("%s_WallFoot_Corridor_%s_Mask"), *MapShort(), bShown ? TEXT("After") : TEXT("Before")), 960, 540, C.Mask);
+		}
+		ShowStrips(true);
+	}
+
+	/**
+	 * Each door's panel against its own frame (the frame round its opening), shut, risen by a quarter, a half and three
+	 * quarters of its height, and at its open place: no face of the panel within 1 cm of the plane of a face of the frame
+	 * that it overlaps and faces the same way as. The panel's place is its shut place moved up along the door's up.
+	 */
+	static void CheckPanelsAgainstFrames()
+	{
+		int32 Doors = 0;
+		for (const FOpening& O : G.Openings)
+		{
+			const ADoorDevice* D = Cast<ADoorDevice>(O.Actor.Get());
+			UStaticMeshComponent* Panel = D ? D->GetPanel() : nullptr;
+			if (!Panel || !Panel->GetStaticMesh())
+			{
+				continue;
+			}
+			const FFrameRef* Frame = nullptr;
+			for (const FFrameRef& F : G.Frames)
+			{
+				if (F.Piece.Box.ExpandBy(FVector(5.0, 5.0, 50.0)).IsInsideOrOnXY(D->GetActorLocation()))
+				{
+					Frame = &F;
+					break;
+				}
+			}
+			if (!Frame)
+			{
+				Note(FString::Printf(TEXT("C: %s: no frame round its opening (%s)"), *O.Label, *GetNameSafe(Panel->GetStaticMesh())));
+				continue;
+			}
+			++Doors;
+			TArray<FTri> FrameTris, PanelTris;
+			WorldTris(Frame->Piece, FrameTris);
+			const FVector Up = D->GetActorUpVector();
+			FTransform Shut = Panel->GetComponentTransform();
+			Shut.AddToTranslation(-Up * D->GetPanelRise());
+			const double Height = D->GetDoorSize().Z;
+			// The open place: the rise the door has now when it stands fully open (this part runs with the doors open), the
+			// panel hidden there; else its height and a centimetre. The rise of exactly its height is not a place it rests at:
+			// its bottom only passes the head's underside there on its way up.
+			const double OpenRise = D->IsFullyOpen() ? D->GetPanelRise() : Height + 1.0;
+			FString Found;
+			int32 Same = 0;
+			for (const double Rise : { 0.0, 0.25 * Height, 0.5 * Height, 0.75 * Height, OpenRise })
+			{
+				FPiece P;
+				P.Component = Panel;
+				P.Transform = Shut;
+				P.Transform.AddToTranslation(Up * Rise);
+				WorldTris(P, PanelTris);
+				const FCoplanar C = Coplanar(PanelTris, FrameTris, false);
+				if (C.SameFacing >= 1.0)
+				{
+					++Same;
+					Found += FString::Printf(TEXT(" risen %.1f cm: %.0f cm2 within %.2f cm, normal %s at %s;"), Rise, C.SameFacing, C.Nearest, *C.SameNormal.ToCompactString(), *C.SameAt.ToCompactString());
+				}
+			}
+			Check(Same == 0, FString::Printf(TEXT("C: %s's panel (%s, scale %s) against its frame %s, shut, risen by a quarter, a half and three quarters of its height and at its open place (%.1f cm up): no face within 1 cm of the plane of a frame's face it overlaps facing the same way (%d places with such faces)%s"),
+				*O.Label, *GetNameSafe(Panel->GetStaticMesh()), *Panel->GetComponentScale().ToCompactString(), *Frame->Label, OpenRise, Same, *Found));
+		}
+		Note(FString::Printf(TEXT("C: %d doors' panels measured against their frames"), Doors));
+	}
+
 	static const FFrameRef* FirstFrame()
 	{
 		return G.Frames.Num() > 0 ? &G.Frames[0] : nullptr;
@@ -2244,6 +2617,34 @@ namespace SeamDebug
 			}
 			return 0.f;
 		}));
+		// Brief 48: the floor at the foot of the walls, every run of wall panels on a floor, the doors shut.
+		S.Add(Do(TEXT("wall feet: the runs and the views"), []()
+		{
+			if (AAreaGenerator::Find(W()))
+			{
+				return 0.f;
+			}
+			GatherWallRuns(G.Pieces, GFoot);
+			CompareFootBeforeAfter();
+			CheckWallFeet();
+			return 0.f;
+		}));
+		for (const bool bShown : { false, true })
+		{
+			S.Add(Do(TEXT("wall feet: the corridor's shot"), [bShown]()
+			{
+				if (!GFoot.bShot)
+				{
+					return 0.f;
+				}
+				ShowStrips(bShown);
+				PlaceEye(GFoot.ShotEye, GFoot.ShotAt);
+				FlashlightOn();
+				return 0.6f;
+			}));
+			AddShot(S, [bShown]() { return GFoot.bShot ? FString::Printf(TEXT("%s_WallFoot_Corridor_%s"), *MapShort(), bShown ? TEXT("After") : TEXT("Before")) : FString(); });
+		}
+		S.Add(Do(TEXT("wall feet: the strips shown"), []() { ShowStrips(true); return 0.f; }));
 		S.Add(Do(TEXT("A, hand-built: every door open"), []()
 		{
 			if (AAreaGenerator::Find(W()))
@@ -2357,6 +2758,12 @@ namespace SeamDebug
 			Note(FString::Printf(TEXT("C: %d frames, %d pieces with faces in a frame's planes"), G.Frames.Num(), Pairs));
 			return 0.f;
 		}));
+		S.Add(Do(TEXT("C: each door's panel against its frame"), []()
+		{
+			GFloorPieces = &G.Pieces;
+			CheckPanelsAgainstFrames();
+			return 0.f;
+		}));
 		AddFlicker(S, []() { return FirstFrame(); }, 300.0, TEXT("Frame3m"));
 		AddFlicker(S, []() { return FirstFrame(); }, 1000.0, TEXT("Frame10m"));
 
@@ -2368,7 +2775,7 @@ namespace SeamDebug
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsSeamCheckCommand(
 	TEXT("tls.SeamCheck"),
-	TEXT("tls.SeamCheck [Quit=0] [Tag=After]: Brief 35 (an area, Prologue_Home, Prologue_Arrival or Epilogue_Chamber; PIE): A, every door and sliding panel that opens has a shown floor piece under it every 20 cm across and through its depth, and no floor piece in its travel; in a hand-built map also its doorways, and each opening from 2 m at eye height on each side, shut and open, no pixel of its threshold showing nothing or a surface below the plates' base, and from 3 m on each side no pixel of the wall round its frame showing nothing; B, each hangar's hatch has its floor running past its panel and frame, and still blocks the way out; C, no face of a door's or gate's frame within 1 cm of the plane of a face it overlaps, and no pixel of a frame alternating between the accent and another colour on 30 frames from 3 m and from 10 m (camera moving 1 cm a frame). Shots (Tag in their names) to Saved/Screenshots/Brief44."),
+	TEXT("tls.SeamCheck [Quit=0] [Tag=After]: Brief 35 (an area, Prologue_Home, Prologue_Arrival or Epilogue_Chamber; PIE): A, every door and sliding panel that opens has a shown floor piece under it every 20 cm across and through its depth, and no floor piece in its travel; in a hand-built map also its doorways, and each opening from 2 m at eye height on each side, shut and open, no pixel of its threshold showing nothing or a surface below the plates' base, and from 3 m on each side no pixel of the wall round its frame showing nothing; B, each hangar's hatch has its floor running past its panel and frame, and still blocks the way out; C, no face of a door's or gate's frame within 1 cm of the plane of a face it overlaps, and no pixel of a frame alternating between the accent and another colour on 30 frames from 3 m and from 10 m (camera moving 1 cm a frame), and each door's panel against its frame shut and risen; Brief 48, in a hand-built map, every run of wall panels on a floor from 2 m looking down at its foot every 4 m (at home no pixel showing nothing; elsewhere none through the foot), the corridor's view with the floor strips hidden and shown. Shots (Tag in their names) to Saved/Screenshots/Brief48."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		if (SeamDebug::GRun.bRunning)

@@ -25,9 +25,16 @@
 //   in it holds the door open 3 s past its time, the door closes once it has left; a pawn that enters while it closes
 //   opens it again; the pawn never moves by more than 1 cm with no input and is never inside the panel's collision); the
 //   layout hash against the reference and the validation at the first seed.
-// - Shots to Saved/Screenshots/Brief46: in an area, the first gate from 4 m with the flashlight at a quarter, a half and
-//   three quarters of its opening and open, and in a scan Stopped at half its motion; at home, the print room's door at
-//   half its motion and open.
+// - Shots to Saved/Screenshots/Brief48 (Brief46 before): in an area, the first gate from 4 m with the flashlight at a
+//   quarter, a half and three quarters of its opening and open, and in a scan Stopped at half its motion; at home, the
+//   print room's door at half its motion and open.
+// - Brief 48, its panel: each door's DOOR line names the mesh its panel shows (the engine's cube or its modelled mesh) with
+//   the mesh's size and the panel's scale; in a hand-built map every door of the map showing the cube is named (CUBE), and
+//   at home the print room's door showing anything but SM_DoorPanel at scale 1 fails. Shut, from 4 m on each side (a depth
+//   capture), no pixel whose ray crosses the door's plane inside its opening shows what lies behind the panel (a surface past
+//   the panel's far face, or nothing). At home the print room's door is shot from 4 m on each side, shut and at half its
+//   rise, with its panel as it is and with the engine's cube scaled to the opening as before Brief 48 (the look only, posed
+//   by the check: Before and After).
 //
 // It puts back the settings, the powered times, the run's home state, the pawn and every door (shut), and destroys the
 // door it spawned. Development builds only.
@@ -45,6 +52,7 @@
 #include "Containers/Ticker.h"
 #include "Energy/DoorDevice.h"
 #include "Engine/Engine.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -114,6 +122,7 @@ namespace DoorCheck
 		FString Name;
 		float Open = -1.f, Close = -1.f, Open2 = -1.f, Close2 = -1.f, StepRatio = 0.f, Cover = -1.f;
 		int32 WouldShowFront = -1, WouldShowBack = -1;
+		FString Panel;
 	};
 
 	struct FRun
@@ -153,6 +162,8 @@ namespace DoorCheck
 		float PawnDrift = 0.f;
 		int32 PawnInPanel = 0;
 		bool bShotReady = true;
+		/** The first door's panel rise at half its opening (Brief 48's shots). */
+		float HalfRise = -1.f;
 	};
 
 	static FRun GRun;
@@ -404,9 +415,120 @@ namespace DoorCheck
 		return FVector(Foot.X, Foot.Y, FloorZ(D) + 165.f);
 	}
 
+	// --- Brief 48: the panel's mesh, and what is seen past a shut panel ---
+
+	/** The mesh the panel shows, its size (the mesh's bounds) and the panel's scale. */
+	static FString DescribePanel(const ADoorDevice* D)
+	{
+		const UStaticMeshComponent* P = D ? D->GetPanel() : nullptr;
+		const UStaticMesh* Mesh = P ? P->GetStaticMesh() : nullptr;
+		if (!Mesh)
+		{
+			return TEXT("no mesh");
+		}
+		const bool bCube = Mesh->GetPathName().StartsWith(TEXT("/Engine/"));
+		return FString::Printf(TEXT("%s%s, its size %s cm, the panel's scale %s"), bCube ? TEXT("the engine's cube ") : TEXT(""), *Mesh->GetName(),
+			*Mesh->GetBoundingBox().GetSize().ToCompactString(), *P->GetRelativeScale3D().ToCompactString());
+	}
+
+	static bool ShowsCube(const ADoorDevice* D)
+	{
+		const UStaticMeshComponent* P = D ? D->GetPanel() : nullptr;
+		return P && P->GetStaticMesh() && P->GetStaticMesh()->GetPathName().StartsWith(TEXT("/Engine/"));
+	}
+
+	/**
+	 * Shut, from 4 m on Side: of the pixels whose ray crosses the door's plane inside its opening, those that show what lies
+	 * behind the panel: a surface past the panel's far face (1 cm of tolerance), or nothing. OutInside: those pixels.
+	 */
+	static int32 BehindPixels(const ADoorDevice* D, float Side, int32& OutInside)
+	{
+		OutInside = 0;
+		const UStaticMeshComponent* Panel = D ? D->GetPanel() : nullptr;
+		if (!Panel)
+		{
+			return -1;
+		}
+		constexpr int32 Width = 640;
+		constexpr int32 Height = 480;
+		const FVector Eye = EyeBefore(D, Side);
+		const FRotator Rotation = (OpeningFrame(D).GetLocation() - Eye).Rotation();
+		TArray<float> Depth;
+		if (!CaptureDepth(Eye, Rotation, Width, Height, nullptr, Depth))
+		{
+			return -1;
+		}
+		const FTransform F = OpeningFrame(D);
+		const FVector Half = HalfSize(D);
+		const FBox PanelLocal = Panel->Bounds.GetBox().InverseTransformBy(F);
+		const double Far = Side > 0.f ? PanelLocal.Min.X - 1.0 : PanelLocal.Max.X + 1.0;
+		const FVector LocalEye = F.InverseTransformPosition(Eye);
+		const FRotationMatrix M(Rotation);
+		const FVector Forward = Rotation.Vector();
+		const double Tan = FMath::Tan(FMath::DegreesToRadians(45.0));
+		int32 Behind = 0;
+		for (int32 I = 0; I < Depth.Num(); ++I)
+		{
+			const int32 X = I % Width;
+			const int32 Y = I / Width;
+			const double U = (2.0 * (X + 0.5) / Width - 1.0) * Tan;
+			const double V = (1.0 - 2.0 * (Y + 0.5) / Height) * Tan * Height / Width;
+			const FVector WorldRay = (M.GetUnitAxis(EAxis::X) + M.GetUnitAxis(EAxis::Y) * U + M.GetUnitAxis(EAxis::Z) * V).GetSafeNormal();
+			const FVector Ray = F.InverseTransformVectorNoScale(WorldRay);
+			if (FMath::Abs(Ray.X) < 1.e-6)
+			{
+				continue;
+			}
+			const double T = -LocalEye.X / Ray.X;
+			const FVector At = LocalEye + Ray * T;
+			if (T <= 0.0 || FMath::Abs(At.Y) > Half.Y || FMath::Abs(At.Z) > Half.Z)
+			{
+				continue;
+			}
+			++OutInside;
+			if (Depth[I] > 1.0e7)
+			{
+				++Behind;
+				continue;
+			}
+			const double Along = FMath::Max(FVector::DotProduct(WorldRay, Forward), 1.e-3);
+			const FVector Hit = F.InverseTransformPosition(Eye + WorldRay * (Depth[I] / Along));
+			Behind += (Side > 0.f ? Hit.X < Far : Hit.X > Far) ? 1 : 0;
+		}
+		return Behind;
+	}
+
+	/**
+	 * The panel posed for a shot (the look only): risen by Rise, as it is (its modelled mesh at scale 1, placed by its bottom
+	 * centre) or as before Brief 48 (the engine's cube scaled to the opening, at its centre, the moving objects' material).
+	 */
+	static void PosePanel(ADoorDevice* D, bool bCube, float Rise)
+	{
+		UStaticMeshComponent* P = D ? D->GetPanel() : nullptr;
+		if (!P)
+		{
+			return;
+		}
+		const FVector Extent = HalfSize(D);
+		if (bCube)
+		{
+			P->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+			ADoorDevice::ApplyPanelMesh(P, nullptr);
+			P->SetRelativeLocation(FVector(0.f, 0.f, Rise));
+			P->SetRelativeScale3D(Extent * 2.f / 100.f);
+		}
+		else
+		{
+			ADoorDevice::ApplyPanelMesh(P, D->PanelMesh);
+			P->SetRelativeLocation(FVector(0.f, 0.f, Rise - (D->PanelMesh ? Extent.Z : 0.f)));
+			P->SetRelativeScale3D(D->PanelMesh ? FVector::OneVector : Extent * 2.f / 100.f);
+		}
+		P->SetVisibility(true);
+	}
+
 	// --- Shots ---
 
-	static FString ShotFolder() { return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief46"))); }
+	static FString ShotFolder() { return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"))); }
 
 	static void Shot(const FString& ShotName)
 	{
@@ -635,6 +757,14 @@ namespace DoorCheck
 					D->PanelMesh ? *D->PanelMesh->GetName() : TEXT("cube"), Off * 10.f, *D->GetDoorSize().ToCompactString(), *D->GetDoorway()->GetScaledBoxExtent().ToCompactString()));
 			GRun.ShutPixels = PanelPixelsFrom(D, EyeBefore(D, 1.f), true);
 			Note(FString::Printf(TEXT("%s: shut, %d pixels of the panel in the opening from 4 m in front (%d of it in all)"), *Label, GRun.ShutPixels, PanelPixelsFrom(D, EyeBefore(D, 1.f))));
+			// Brief 48: nothing seen past the shut panel, round it or under it, from 4 m on each side.
+			int32 InFront = 0, InBack = 0;
+			const int32 Front = BehindPixels(D, 1.f, InFront);
+			const int32 Back = BehindPixels(D, -1.f, InBack);
+			Check(Front == 0 && Back == 0 && InFront > 1000 && InBack > 1000,
+				FString::Printf(TEXT("%s: shut, from 4 m on each side no pixel inside the opening shows what lies behind the panel (%d of %d in front, %d of %d behind; a depth capture, 640 x 480 at 90 degrees); its panel: %s"),
+					*Label, Front, InFront, Back, InBack, *DescribePanel(D)));
+			GRun.Results.FindOrAdd(GetNameSafe(D)).Panel = DescribePanel(D);
 			return 0.3f;
 		}));
 		AddMotion(S, Label + TEXT(": opening"), Door, true, Open, [Door, Label, bShotsAtHome]()
@@ -647,6 +777,7 @@ namespace DoorCheck
 			GRun.Results.FindOrAdd(GetNameSafe(D)).Cover = Cover;
 			if (bShotsAtHome)
 			{
+				GRun.HalfRise = D->GetPanelRise();
 				Shot(TEXT("PrintRoomDoor_Half"));
 			}
 		}, true, [Door](float T) { GRun.Results.FindOrAdd(GetNameSafe(Door())).Open = T; });
@@ -1062,8 +1193,8 @@ namespace DoorCheck
 		for (const TPair<FString, FDoorResult>& Pair : GRun.Results)
 		{
 			const FDoorResult& R = Pair.Value;
-			Note(FString::Printf(TEXT("DOOR %s: open %.3f s, close %.3f s (at 2.0 s: %.3f, %.3f), largest step %.2f x the frame's share, cover at half %.2f, risen panel would show %d / %d px"),
-				*R.Name, R.Open, R.Close, R.Open2, R.Close2, R.StepRatio, R.Cover, R.WouldShowFront, R.WouldShowBack));
+			Note(FString::Printf(TEXT("DOOR %s: open %.3f s, close %.3f s (at 2.0 s: %.3f, %.3f), largest step %.2f x the frame's share, cover at half %.2f, risen panel would show %d / %d px; panel: %s"),
+				*R.Name, R.Open, R.Close, R.Open2, R.Close2, R.StepRatio, R.Cover, R.WouldShowFront, R.WouldShowBack, *R.Panel));
 		}
 		UE_LOG(LogTheLastShift, Log, TEXT("%s: %d passed, %d failed%s."), Name(), GRun.Passed, GRun.Failed, Why);
 	}
@@ -1215,6 +1346,26 @@ namespace DoorCheck
 				GRun.Doors.Add(Spawned);
 			}
 			Check(Found.Num() > 0 && Spawned, FString::Printf(TEXT("setup: %d door(s) in %s: %s; one spawned (%s)"), Found.Num(), *GRun.Map, *List, *GetNameSafe(Spawned)));
+			// Brief 48: the doors of a hand-built map that still show the engine's cube, named; at home the print room's door
+			// (the first) shows SM_DoorPanel at scale 1.
+			if (!Generator())
+			{
+				for (const ADoorDevice* D : Found)
+				{
+					if (ShowsCube(D))
+					{
+						Note(FString::Printf(TEXT("CUBE %s (%s) at %s shows the engine's cube: %s"), *D->GetName(), *D->GetClass()->GetName(), *D->GetActorLocation().ToCompactString(), *DescribePanel(D)));
+					}
+				}
+				if (bHome && Found.Num() > 0)
+				{
+					const ADoorDevice* Print = Found[0];
+					const UStaticMeshComponent* P = Print->GetPanel();
+					Check(!ShowsCube(Print) && P && GetNameSafe(P->GetStaticMesh()) == TEXT("SM_DoorPanel") && P->GetRelativeScale3D().Equals(FVector::OneVector, 1.e-4),
+						FString::Printf(TEXT("setup: the print room's door %s shows the modelled panel SM_DoorPanel at scale 1 through its PanelMesh (%s; PanelMesh %s)"), *Print->GetName(),
+							*DescribePanel(Print), *GetNameSafe(Print->PanelMesh)));
+				}
+			}
 			bool bNoDoorSlot = true;
 			for (int32 I = 0; I < static_cast<int32>(EGameSound::Count); ++I)
 			{
@@ -1245,6 +1396,44 @@ namespace DoorCheck
 		{
 			AddDoor(S, [I]() { return DoorAt(I); }, FString::Printf(TEXT("1 door %d"), I), bHome && I == 0);
 		}
+		if (bHome)
+		{
+			// Brief 48: the print room's door from 4 m on each side, shut and at half its rise, as it is (After) and with the
+			// engine's cube as before (Before), the panel posed by the check (the look only).
+			for (const bool bCube : { true, false })
+			{
+				for (const bool bHalf : { false, true })
+				{
+					for (const float Side : { 1.f, -1.f })
+					{
+						const FString Name = FString::Printf(TEXT("PrintRoomDoor_%s_%s_%s"), bCube ? TEXT("Before") : TEXT("After"), bHalf ? TEXT("Half") : TEXT("Shut"),
+							Side > 0.f ? TEXT("PlusX") : TEXT("MinusX"));
+						S.Add(Do(TEXT("7 shots: ") + Name, [bCube, bHalf, Side]()
+						{
+							ADoorDevice* D = FirstDoor();
+							if (!D)
+							{
+								return 0.f;
+							}
+							ResumeTime();
+							PosePanel(D, bCube, bHalf ? FMath::Max(GRun.HalfRise, 0.f) : 0.f);
+							StandBefore(D, Side);
+							return 0.6f;
+						}));
+						S.Add(Do(TEXT("7 shot: ") + Name, [Name]() { Shot(Name); return 0.6f; }));
+					}
+				}
+			}
+			S.Add(Do(TEXT("7 shots: the panel as it is, shut"), []()
+			{
+				if (ADoorDevice* D = FirstDoor())
+				{
+					PosePanel(D, false, 0.f);
+					Note(FString::Printf(TEXT("7 shots: the print room's door at half its rise: %.1f cm; its panel back: %s"), GRun.HalfRise, *DescribePanel(D)));
+				}
+				return 0.f;
+			}));
+		}
 		AddClock(S, false);
 		AddClock(S, true);
 		if (GRun.bArea)
@@ -1260,7 +1449,7 @@ namespace DoorCheck
 
 	static FAutoConsoleCommandWithWorldAndArgs GDoorCheckCommand(
 		TEXT("tls.DoorCheck"),
-		TEXT("tls.DoorCheck (an area map or a hand-built map; PIE): every door of the map and a spawned one rise open and come down shut over DoorMoveSeconds (times, steps, the panel's cover at half its motion, nothing seen past the frame, the motion's sound), the clock (a Stop and the pause menu at half a motion), and in an area the powered time, a time jump, a payment while closing, the doorway and the layout hash; shots to Saved/Screenshots/Brief46."),
+		TEXT("tls.DoorCheck (an area map or a hand-built map; PIE): every door of the map and a spawned one rise open and come down shut over DoorMoveSeconds (times, steps, the panel's cover at half its motion, nothing seen past the frame, the motion's sound), the clock (a Stop and the pause menu at half a motion), and in an area the powered time, a time jump, a payment while closing, the doorway and the layout hash; the panel's mesh in each DOOR line, the doors of a hand-built map showing the engine's cube named (the print room's door must show SM_DoorPanel), nothing seen past a shut panel from 4 m on each side; shots to Saved/Screenshots/Brief48."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld) { Start(InWorld); }));
 }
 

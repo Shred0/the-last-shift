@@ -88,8 +88,30 @@ void UStdKeyBindingRowWidget::HandleKeySelected(FInputChord SelectedKey)
 
 void UStdKeyBindingRowWidget::HandleIsSelectingKeyChanged()
 {
+	const bool bSelecting = KeySelector && KeySelector->GetIsSelectingKey();
 	if (UStdInputSubsystem* InputSubsystem = GetInputSubsystem())
 	{
-		InputSubsystem->SetKeyCaptureActive(KeySelector && KeySelector->GetIsSelectingKey());
+		InputSubsystem->SetKeyCaptureActive(bSelecting);
+	}
+
+	// While it waits for a key the selector disables its own button, which then shows its disabled look: with a framed
+	// theme, a frame and a label at a third of their level, which hardly read. While it waits it shows its focused look
+	// instead (the accent fill, the label on it); when the wait ends the theme's disabled look is its disabled look again.
+	const UStdUITheme* Theme = bApplyTheme ? StdUITheme::Get() : nullptr;
+	if (KeySelector && Theme && Theme->IsFramed())
+	{
+		FButtonStyle Style = KeySelector->GetButtonStyle();
+		if (bSelecting)
+		{
+			Style.SetDisabled(Style.Hovered);
+			Style.SetDisabledForeground(Style.HoveredForeground);
+		}
+		else
+		{
+			const FButtonStyle ThemeStyle = Theme->MakeButtonStyle();
+			Style.SetDisabled(ThemeStyle.Disabled);
+			Style.SetDisabledForeground(ThemeStyle.DisabledForeground);
+		}
+		StdUITheme::SetKeySelectorStyle(KeySelector, Style);
 	}
 }

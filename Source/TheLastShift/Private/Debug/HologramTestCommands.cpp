@@ -12,12 +12,14 @@
 //  - the route drawn by the briefing terminal typing fixture rows: none before the Hologram group, the share of the text
 //    typed (rows weighted by their length), still between two rows and behind the pause menu, whole after the briefing and
 //    still whole later; with two rows (45 and 140 characters), four rows (20, 90, 35 and 60) and none;
-//  - the route's colour measured on a shot from the doorway, with and without the beams, and the beams seen there: the
-//    pixels inside their place on screen that the beams change by 6 levels or more (at least 2000);
+//  - the route's colour measured on a shot from the doorway, with and without the beams, and the beams seen there (Brief
+//    48): over each beam's lower half, from its rod's tip to half its length, the median difference with the beams shown
+//    and hidden at least 20 levels, and no pixel of a beam pushed above 200 levels by it;
 //  - nothing of it while Stopped (each part's component hidden; a shot before the first scan), and none of its parts in the
 //    scan's capture: from two poses, the scan's depth with each part shown while Stopped (test only) is the depth without
 //    the hologram, texel by texel.
-// Shots to Saved/Screenshots/Brief44 (Brief18 before). The fixture rows replace the prologue table for the run and are put back at the end.
+// tls.HologramTest 0 tune: the beams' measure alone, for pairs of BeamLevel and BeamFadePower set for the session (TUNE lines).
+// Shots to Saved/Screenshots/Brief48 (Brief44, Brief18 before). The fixture rows replace the prologue table for the run and are put back at the end.
 
 #include "CoreMinimal.h"
 
@@ -204,9 +206,15 @@ namespace HologramTest
 		G.Shot.Height = Height;
 		G.Shot.Pixels = Pixels;
 		G.Shots.Add(G.ShotName, G.Shot);
+		if (G.ShotName.StartsWith(TEXT("_")))
+		{
+			// Measured, not saved (Brief 48's tuning).
+			G.bShotReady = true;
+			return;
+		}
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"), TEXT("HologramTest_") + G.ShotName + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"), TEXT("HologramTest_") + G.ShotName + TEXT(".png")));
 		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
 		FFileHelper::SaveArrayToFile(Png, *Path);
 		Note(FString::Printf(TEXT("shot %s (%d x %d): %s"), *G.ShotName, Width, Height, *Path));
@@ -230,6 +238,171 @@ namespace HologramTest
 	}
 
 	static int32 Level(const FColor& C) { return FMath::Max3(C.R, C.G, C.B); }
+
+	// --- Brief 48: what the player sees of the beams, on two shots from one pose (beams shown and hidden, motion held) ---
+
+	struct FBeamSeen
+	{
+		/** Differences (levels, the largest channel) over the beam's lower half: from the rod's tip to half its length. */
+		TArray<int32> Lower;
+		/** Pixels of the whole beam, and of those the ones the beam pushes above 200 levels. */
+		int32 Pixels = 0;
+		int32 Above200 = 0;
+		int32 Brightest = 0;
+		int32 Hidden = 0;
+	};
+
+	struct FBeamMeasure
+	{
+		TArray<FBeamSeen> Beams;
+		/** Differences by share of the length (10 bins, the rod's tip first), all beams together. */
+		TArray<TArray<int32>> Bins;
+		int32 MinMedian = -1;
+		int32 Above200 = 0;
+		int32 Checked = 0;
+	};
+
+	static int32 Median(TArray<int32> V)
+	{
+		if (V.IsEmpty())
+		{
+			return -1;
+		}
+		V.Sort();
+		return V[V.Num() / 2];
+	}
+
+	/**
+	 * Each pixel's ray from the camera, against each beam's cone (apex at the rod's tip, axis to its end, half-angle its
+	 * spread): inside when its closest approach to the axis lies within the cone's radius there; its share of the length is
+	 * that point's along the axis. A pixel where geometry stands between the camera and the beam is not the beam's.
+	 */
+	static FBeamMeasure MeasureBeams(const FShotPixels& With, const FShotPixels& Without)
+	{
+		FBeamMeasure R;
+		R.Bins.SetNum(10);
+		const APrologueHologram* H = Holo();
+		APlayerController* C = PC();
+		UWorld* World = W();
+		if (!H || !C || !World || With.Pixels.Num() != Without.Pixels.Num() || With.Pixels.IsEmpty())
+		{
+			return R;
+		}
+		struct FCone { FVector A, U; double Length = 0.0, Tan = 0.0; };
+		TArray<FCone> Cones;
+		FVector2D Lo(1.e9, 1.e9), Hi(-1.e9, -1.e9);
+		for (int32 I = 0; I < H->GetBeamCount(); ++I)
+		{
+			FVector A, B;
+			float Spread = 0.f, Far = 0.f, Lvl = 0.f;
+			H->GetBeam(I, A, B, Spread, Far, Lvl);
+			FCone& K = Cones.AddDefaulted_GetRef();
+			K.A = A;
+			K.Length = FVector::Dist(A, B);
+			K.U = (B - A).GetSafeNormal();
+			K.Tan = FMath::Tan(FMath::DegreesToRadians(Spread));
+			const double Radius = K.Length * K.Tan;
+			const FVector Side = FVector::CrossProduct(K.U, FVector::UpVector).GetSafeNormal();
+			const FVector Up = FVector::CrossProduct(K.U, Side);
+			for (const FVector& P : { A, B + Side * Radius, B - Side * Radius, B + Up * Radius, B - Up * Radius })
+			{
+				FVector2D S2;
+				if (C->ProjectWorldLocationToScreen(P, S2, false))
+				{
+					Lo = FVector2D(FMath::Min(Lo.X, S2.X), FMath::Min(Lo.Y, S2.Y));
+					Hi = FVector2D(FMath::Max(Hi.X, S2.X), FMath::Max(Hi.Y, S2.Y));
+				}
+			}
+		}
+		R.Beams.SetNum(Cones.Num());
+		FCollisionQueryParams Params(TEXT("TlsHologramBeams"), false, Pawn());
+		const int32 X0 = FMath::Max(0, int32(Lo.X) - 2), X1 = FMath::Min(With.Width, int32(Hi.X) + 2);
+		const int32 Y0 = FMath::Max(0, int32(Lo.Y) - 2), Y1 = FMath::Min(With.Height, int32(Hi.Y) + 2);
+		for (int32 Y = Y0; Y < Y1; ++Y)
+		{
+			for (int32 X = X0; X < X1; ++X)
+			{
+				FVector O, D;
+				if (!C->DeprojectScreenPositionToWorld(X + 0.5f, Y + 0.5f, O, D))
+				{
+					continue;
+				}
+				const int32 Index = Y * With.Width + X;
+				const int32 Diff = FMath::Max3(FMath::Abs(With.Pixels[Index].R - Without.Pixels[Index].R), FMath::Abs(With.Pixels[Index].G - Without.Pixels[Index].G),
+					FMath::Abs(With.Pixels[Index].B - Without.Pixels[Index].B));
+				for (int32 K = 0; K < Cones.Num(); ++K)
+				{
+					const FCone& Cone = Cones[K];
+					// The closest points of the ray (t >= 0) and the axis (0 <= s <= Length).
+					const FVector W0 = O - Cone.A;
+					const double Bd = FVector::DotProduct(D, Cone.U);
+					const double Dd = FVector::DotProduct(D, W0);
+					const double Ed = FVector::DotProduct(Cone.U, W0);
+					const double Denom = 1.0 - Bd * Bd;
+					const double S = Denom > 1.e-9 ? (Ed - Bd * Dd) / Denom : Ed;
+					// A ray whose closest approach lies before the tip or past the beam's end does not pass through it.
+					if (S <= 0.0 || S >= Cone.Length)
+					{
+						continue;
+					}
+					const double T = FMath::Max(0.0, FVector::DotProduct(D, Cone.A + Cone.U * S - O));
+					const FVector OnRay = O + D * T;
+					const double Dist = FVector::Dist(OnRay, Cone.A + Cone.U * S);
+					if (S <= 0.0 || Dist > S * Cone.Tan)
+					{
+						continue;
+					}
+					FHitResult Hit;
+					if (World->LineTraceSingleByChannel(Hit, O, OnRay, ECC_Visibility, Params) && Hit.Distance < T - 5.0)
+					{
+						++R.Beams[K].Hidden;
+						continue;
+					}
+					FBeamSeen& B = R.Beams[K];
+					const double Share = S / FMath::Max(Cone.Length, 1.0);
+					++B.Pixels;
+					B.Brightest = FMath::Max(B.Brightest, Level(With.Pixels[Index]));
+					if (Level(With.Pixels[Index]) > 200 && Level(Without.Pixels[Index]) <= 200)
+					{
+						++B.Above200;
+					}
+					if (Share <= 0.5)
+					{
+						B.Lower.Add(Diff);
+					}
+					R.Bins[FMath::Clamp(int32(Share * 10.0), 0, 9)].Add(Diff);
+				}
+			}
+		}
+		for (FBeamSeen& B : R.Beams)
+		{
+			R.Above200 += B.Above200;
+			if (B.Lower.Num() >= 30)
+			{
+				const int32 M = Median(B.Lower);
+				R.MinMedian = R.MinMedian < 0 ? M : FMath::Min(R.MinMedian, M);
+				++R.Checked;
+			}
+		}
+		return R;
+	}
+
+	static FString DescribeBeams(const FBeamMeasure& R)
+	{
+		FString Out;
+		for (int32 K = 0; K < R.Beams.Num(); ++K)
+		{
+			const FBeamSeen& B = R.Beams[K];
+			Out += FString::Printf(TEXT("%sbeam %d: lower half %d px, median %d; whole %d px, %d above 200, brightest %d, %d hidden by geometry"), K ? TEXT("; ") : TEXT(""), K,
+				B.Lower.Num(), Median(B.Lower), B.Pixels, B.Above200, B.Brightest, B.Hidden);
+		}
+		FString Bins;
+		for (int32 I = 0; I < R.Bins.Num(); ++I)
+		{
+			Bins += FString::Printf(TEXT("%s%.1f-%.1f: %d (%d px)"), I ? TEXT(", ") : TEXT(""), I * 0.1, I * 0.1 + 0.1, Median(R.Bins[I]), R.Bins[I].Num());
+		}
+		return Out + TEXT(". Along the length (share from the rod's tip: median difference): ") + Bins;
+	}
 
 	// --- the route's expected share, from the fixture rows' lengths and the channel ---
 
@@ -597,7 +770,75 @@ namespace HologramTest
 		return true;
 	}
 
-	static void Start(bool bQuit)
+	/**
+	 * Brief 48, tuning only (tls.HologramTest 0 tune): from the doorway, the motion held, the beams' measure of the check for
+	 * each pair of BeamLevel and BeamFadePower set for the session (the first the settings' own), each at its level and at
+	 * its level less the flicker's share (the lowest a held frame can show); TUNE lines in the log; the settings put back.
+	 */
+	static void AddTune(TArray<FStep>& S)
+	{
+		const FHologramTuning Saved = UTheLastShiftSettings::Get()->GetHologramTuning();
+		S.Add(Do(TEXT("tune: the doorway, the route whole, motion held"), []()
+		{
+			StandAt(1810.0, 230.0, GHoloCentre);
+			Holo()->SetRouteProgressOverride(1.f);
+			return 1.f;
+		}));
+		TArray<FVector2D> Pairs = { FVector2D(Saved.BeamLevel, Saved.BeamFadePower) };
+		for (const float Power : { 5.f, 3.f, 2.f, 1.5f })
+		{
+			for (const float Lvl : { 0.075f, 0.1f, 0.15f, 0.2f })
+			{
+				Pairs.Add(FVector2D(Lvl, Power));
+			}
+		}
+		for (const FVector2D& Pair : Pairs)
+		{
+			for (const float Share : { 1.f, 1.f - Saved.BeamFlicker })
+			{
+				// Only the settings' own pair, at its level, is saved (the old values' shot); the others are measured, not saved.
+				const bool bSave = &Pair == &Pairs[0] && Share >= 1.f;
+				const FString Key = FString::Printf(TEXT("%sTune_L%.3f_P%.2f%s"), bSave ? TEXT("") : TEXT("_"), Pair.X, Pair.Y, Share < 1.f ? TEXT("_low") : TEXT(""));
+				S.Add(Do(Key + TEXT(": set"), [Pair, Share]()
+				{
+					UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+					Settings->Hologram.BeamLevel = Pair.X * Share;
+					Settings->Hologram.BeamFadePower = Pair.Y;
+					APrologueHologram* H = Holo();
+					H->SetMotionFrozenForTest(true);
+					H->Rebuild();
+					H->SetBeamsHiddenForTest(false);
+					return 0.4f;
+				}));
+				AddShot(S, Key);
+				S.Add(Do(Key + TEXT(": hidden"), []() { Holo()->SetBeamsHiddenForTest(true); return 0.3f; }));
+				AddShot(S, Key + TEXT("_NoBeams"));
+				S.Add(Do(Key + TEXT(": measured"), [Key, Pair, Share]()
+				{
+					Holo()->SetBeamsHiddenForTest(false);
+					const FShotPixels* With = G.Shots.Find(Key);
+					const FShotPixels* Without = G.Shots.Find(Key + TEXT("_NoBeams"));
+					const FBeamMeasure R = (With && Without) ? MeasureBeams(*With, *Without) : FBeamMeasure();
+					Note(FString::Printf(TEXT("TUNE level %.3f power %.2f%s: least lower-half median %d (%d beams), %d px above 200: %s"), Pair.X, Pair.Y,
+						Share < 1.f ? *FString::Printf(TEXT(" (held at %.3f, the flicker's low)"), Pair.X * Share) : TEXT(""), R.MinMedian, R.Checked, R.Above200, *DescribeBeams(R)));
+					return 0.f;
+				}));
+			}
+		}
+		S.Add(Do(TEXT("tune: the settings back"), [Saved]()
+		{
+			UTheLastShiftSettings* Settings = GetMutableDefault<UTheLastShiftSettings>();
+			Settings->Hologram.BeamLevel = Saved.BeamLevel;
+			Settings->Hologram.BeamFadePower = Saved.BeamFadePower;
+			APrologueHologram* H = Holo();
+			H->Rebuild();
+			H->SetMotionFrozenForTest(false);
+			H->SetRouteProgressOverride(-1.f);
+			return 0.f;
+		}));
+	}
+
+	static void Start(bool bQuit, bool bTune)
 	{
 		if (G.Ticker.IsValid())
 		{
@@ -613,6 +854,13 @@ namespace HologramTest
 		const FHologramTuning T = UTheLastShiftSettings::Get()->GetHologramTuning();
 
 		S.Add(WaitFor(TEXT("a game world in Prologue_Home with the hologram"), []() { const APrologueHologram* H = Holo(); return H && H->HasActorBegunPlay() && Pawn() && TS() && Lidar(); }, 20.f));
+		if (bTune)
+		{
+			AddTune(S);
+			Note(FString::Printf(TEXT("===== tuning: %d steps ====="), S.Num()));
+			G.Ticker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&Tick));
+			return;
+		}
 
 		// --- parts and colours ---
 		S.Add(Do(TEXT("parts and colours"), [T]()
@@ -878,60 +1126,15 @@ namespace HologramTest
 				FString::Printf(TEXT("the route is in the entity's colour on the shot from the doorway: %d pixels, mean (%.0f, %.0f, %.0f) through the beams, (%.0f, %.0f, %.0f) without them (largest difference %.1f levels)"),
 					N, N ? SW[0] / N : 0.0, N ? SW[1] / N : 0.0, N ? SW[2] / N : 0.0, N ? SN[0] / N : 0.0, N ? SN[1] / N : 0.0, N ? SN[2] / N : 0.0, D));
 
-			// What the player sees of the beams: the same two shots, the motion held, so that only the beams differ. Inside the
-			// beams' place on screen (each cone's tip and the rim of its far end, projected) the pixels the beams change, by how
-			// many levels (8-bit, the largest channel). A step of 6 levels on the room's mid grey (about 2.5% of its level) is
-			// above what a person tells apart on a flat patch (about 1 to 2%); 2000 such pixels are a patch, not a speck.
-			FVector2D Lo(1.e9, 1.e9), Hi(-1.e9, -1.e9);
-			for (int32 I = 0; I < H->GetBeamCount(); ++I)
-			{
-				FVector A, B;
-				float Spread = 0.f, Far = 0.f, Level = 0.f;
-				H->GetBeam(I, A, B, Spread, Far, Level);
-				const FVector Axis = (B - A).GetSafeNormal();
-				const float Radius = FVector::Dist(A, B) * FMath::Tan(FMath::DegreesToRadians(Spread));
-				const FVector U = FVector::CrossProduct(Axis, FVector::UpVector).GetSafeNormal();
-				const FVector V = FVector::CrossProduct(Axis, U);
-				for (const FVector& P : { A, B + U * Radius, B - U * Radius, B + V * Radius, B - V * Radius })
-				{
-					FVector2D S2;
-					if (PC()->ProjectWorldLocationToScreen(P, S2, false))
-					{
-						Lo = FVector2D(FMath::Min(Lo.X, S2.X), FMath::Min(Lo.Y, S2.Y));
-						Hi = FVector2D(FMath::Max(Hi.X, S2.X), FMath::Max(Hi.Y, S2.Y));
-					}
-				}
-			}
-			TArray<int32> Diffs;
-			int32 Visible = 0;
-			if (With && Without && With->Pixels.Num() == Without->Pixels.Num() && Hi.X > Lo.X)
-			{
-				for (int32 Y = FMath::Max(0, int32(Lo.Y)); Y < FMath::Min(With->Height, int32(Hi.Y)); ++Y)
-				{
-					for (int32 X = FMath::Max(0, int32(Lo.X)); X < FMath::Min(With->Width, int32(Hi.X)); ++X)
-					{
-						const FColor& P = With->Pixels[Y * With->Width + X];
-						const FColor& Q = Without->Pixels[Y * With->Width + X];
-						const int32 Diff = FMath::Max3(FMath::Abs(P.R - Q.R), FMath::Abs(P.G - Q.G), FMath::Abs(P.B - Q.B));
-						if (Diff > 0)
-						{
-							Diffs.Add(Diff);
-							Visible += Diff >= 6 ? 1 : 0;
-						}
-					}
-				}
-			}
-			Diffs.Sort();
-			double Mean = 0.0;
-			for (const int32 Diff : Diffs)
-			{
-				Mean += Diff;
-			}
-			Mean = Diffs.Num() ? Mean / Diffs.Num() : 0.0;
-			Check(Visible >= 2000,
-				FString::Printf(TEXT("the beams are seen from the doorway: inside their place on screen (%.0f, %.0f)-(%.0f, %.0f) %d pixels differ with the beams shown and hidden by 6 levels or more (2000 needed); of the %d that differ at all: mean %.1f, median %d, 90th percentile %d, largest %d levels (BeamLevel %.3f, BeamFadePower %.1f)"),
-					Lo.X, Lo.Y, Hi.X, Hi.Y, Visible, Diffs.Num(), Mean, Diffs.Num() ? Diffs[Diffs.Num() / 2] : 0, Diffs.Num() ? Diffs[Diffs.Num() * 9 / 10] : 0, Diffs.Num() ? Diffs.Last() : 0,
-					UTheLastShiftSettings::Get()->GetHologramTuning().BeamLevel, UTheLastShiftSettings::Get()->GetHologramTuning().BeamFadePower));
+			// Brief 48: what the player sees of the beams, the same two shots (the motion held, so that only the beams differ):
+			// over each beam's lower half (from its rod's tip to half its length; pixels where geometry stands in front left
+			// out) the median difference with the beams shown and hidden at least 20 levels (8-bit, the largest channel), and
+			// no pixel of a beam pushed above 200 levels by it. A beam with fewer than 30 such pixels is not seen from there.
+			const FBeamMeasure R = (With && Without) ? MeasureBeams(*With, *Without) : FBeamMeasure();
+			Check(R.Checked >= 6 && R.MinMedian >= 20 && R.Above200 == 0,
+				FString::Printf(TEXT("the beams are seen from the doorway: over each beam's lower half the median difference with the beams shown and hidden is at least 20 levels (the least %d, %d beams measured, 6 needed) and no pixel of a beam is pushed above 200 levels (%d) (BeamLevel %.3f, BeamFadePower %.2f): %s"),
+					R.MinMedian, R.Checked, R.Above200, UTheLastShiftSettings::Get()->GetHologramTuning().BeamLevel, UTheLastShiftSettings::Get()->GetHologramTuning().BeamFadePower,
+					*DescribeBeams(R)));
 			return 0.f;
 		}));
 
@@ -1013,10 +1216,10 @@ namespace HologramTest
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsHologramTestCommand(
 	TEXT("tls.HologramTest"),
-	TEXT("tls.HologramTest [Quit=0]: (fresh PIE or a package, in Prologue_Home) Brief 18's hologram: parts and colours, the turn, the drift, the beams, behind the pause menu, the route's colour on a shot and the beams seen on it, nothing while Stopped or in the scan's capture (each part, two poses), the route drawn by the briefing with fixture rows (two rows, four rows, none). Shots to Saved/Screenshots/Brief44."),
+	TEXT("tls.HologramTest [Quit=0] [tune]: (fresh PIE or a package, in Prologue_Home) Brief 18's hologram: parts and colours, the turn, the drift, the beams, behind the pause menu, the route's colour on a shot and the beams seen on it (Brief 48: over each beam's lower half a median difference of 20 levels or more with the beams shown and hidden, no pixel pushed above 200), nothing while Stopped or in the scan's capture (each part, two poses), the route drawn by the briefing with fixture rows (two rows, four rows, none). tune: the beams' measure only, for pairs of BeamLevel and BeamFadePower set for the session (TUNE lines). Shots to Saved/Screenshots/Brief48."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
-		HologramTest::Start(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);
+		HologramTest::Start(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0, Args.Contains(TEXT("tune")));
 	}));
 
 #endif // !UE_BUILD_SHIPPING

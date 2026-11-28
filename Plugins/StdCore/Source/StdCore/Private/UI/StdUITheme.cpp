@@ -413,7 +413,13 @@ void StdUITheme::ApplyToWidget(const UStdUITheme& Theme, UUserWidget& Widget)
 	const FButtonStyle TabStyle = Theme.MakeTabStyle(false);
 	const FSliderStyle SliderStyle = Theme.MakeSliderStyle();
 	const FCheckBoxStyle CheckBoxStyle = Theme.MakeCheckBoxStyle();
-	const FTextBlockStyle KeyTextStyle = Theme.MakeTextStyle(Theme.ButtonFont, Theme.TextColor);
+	FTextBlockStyle KeyTextStyle = Theme.MakeTextStyle(Theme.ButtonFont, Theme.TextColor);
+	if (Theme.IsFramed())
+	{
+		// A framed key selector is a framed button: its key's label follows the button's state (normal, hovered or
+		// focused, pressed, disabled) like every other button label, so that it reads on the accent fill.
+		KeyTextStyle.SetColorAndOpacity(FSlateColor::UseForeground());
+	}
 	TArray<UTextBlock*> Titles;
 
 	Widget.WidgetTree->ForEachWidget([&](UWidget* Child)

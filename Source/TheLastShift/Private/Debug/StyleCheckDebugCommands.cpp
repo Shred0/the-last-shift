@@ -9,6 +9,11 @@
 //    the patch as on the plain background, within 10 levels; both values changed for the session and followed); the
 //    longest row of each real narrative table against its box (lines with the old font and the new, against the lines
 //    the box holds; nothing cut); the travel screen's label against its width.
+//    Brief 48: the settings' Controls tab, every key button at rest, focused by the keys, hovered by the mouse and (the
+//    first) waiting for a key: its label's contrast against its fill (the 3% of its middle farthest from the fill's median)
+//    within 10 levels of a focused main menu button's (at rest, its row in view: of the settings' Back button's); waiting,
+//    the focused look (the accent fill), its text read and logged; with StdCore's style off for the
+//    session, the key buttons' labels in the theme's text colour, as before.
 //  - Prologue_Home: the text channel's font with a home AI row and an engineer's row (fixture rows); the monitors' plates
 //    and the terminals' plates (black from 2 m, mean level at most 20); the rack lights (blinking each on its own rhythm,
 //    hidden while Stopped with a frame of at most 2 levels before the first scan, not in a scan's capture, still behind
@@ -16,7 +21,7 @@
 //  - Area2_ServerHalls: a log console unpaid and paid (its screen black from 2 m with the flashlight while it shows no
 //    entry, the entry shown once paid), a gate terminal's screen, the twin AI's terminal's plate, the Interact prompt, the
 //    pause menu and the archive; the font of each.
-// Shots to Saved/Screenshots/Brief27. Every value it changes (energy, the archive, the settings) is put back.
+// Shots to Saved/Screenshots/Brief48 (Brief27 before). Every value it changes (energy, the archive, the settings, the style) is put back.
 
 #include "CoreMinimal.h"
 
@@ -28,6 +33,7 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/Button.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/InputKeySelector.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SpotLightComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -81,6 +87,7 @@
 #include "TlsDebugCommon.h"
 #include "UI/InteractPromptWidget.h"
 #include "UI/StdScreenWidget.h"
+#include "UI/StdSettingsWidget.h"
 #include "UI/StdTextSceneWidget.h"
 #include "UI/StdUIStyle.h"
 #include "UI/StdUITheme.h"
@@ -103,6 +110,15 @@ namespace StyleCheck
 		int32 Width = 0;
 		int32 Height = 0;
 		TArray<FColor> Pixels;
+	};
+
+	/** Brief 48: a button's label read on a shot. */
+	struct FLabelRead
+	{
+		int32 Contrast = -1;
+		double Fill = 0.0;
+		double Glyphs = 0.0;
+		int32 Pixels = 0;
 	};
 
 	struct FRun
@@ -146,6 +162,13 @@ namespace StyleCheck
 		bool bArchiveSaved = false;
 		TWeakObjectPtr<AActor> Spawned;
 		bool bFixture = false;
+		// Brief 48: the key buttons
+		TArray<TWeakObjectPtr<UInputKeySelector>> Keys;
+		FVector2D MouseAt = FVector2D::ZeroVector;
+		bool bSavedUseStyle = true;
+		bool bStyleChanged = false;
+		FLabelRead MainFocused;
+		FLabelRead MainRest;
 	};
 	static FRun G;
 
@@ -212,7 +235,7 @@ namespace StyleCheck
 
 	static FString ShotPath(const FString& Name)
 	{
-		return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief27"), G.Map + TEXT("_") + Name + TEXT(".png")));
+		return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"), G.Map + TEXT("_") + Name + TEXT(".png")));
 	}
 
 	static void HandleShot(int32 Width, int32 Height, const TArray<FColor>& Pixels)
@@ -570,6 +593,11 @@ namespace StyleCheck
 			NarrativeFixture::Restore(W());
 			G.bFixture = false;
 		}
+		if (G.bStyleChanged)
+		{
+			GetMutableDefault<UStdProjectSettings>()->bUseStyle = G.bSavedUseStyle;
+			G.bStyleChanged = false;
+		}
 		UE_LOG(LogTheLastShift, Display, TEXT("StyleCheck summary (%s, %s): %d checks passed, %d failed; %d texts listed, %d in another font."), *G.Map,
 			G.Failed ? TEXT("FAIL") : TEXT("PASS"), G.Passed, G.Failed, G.FontTexts, G.FontOthers);
 		if (G.bQuit)
@@ -700,6 +728,379 @@ namespace StyleCheck
 				*Box, *Row.ToString(), *GetNameSafe(Table), Text.Len(), OldLines, OldWide, NewLines, NewWide, Width, Holds));
 	}
 
+	// --- Brief 48: a label against its button's fill, as the player sees it ---
+
+	/** A widget's box on a shot with the UI, inset by a share of its width and height on each side and by Px pixels. */
+	static FIntRect ShotRect(const FGeometry& Geo, double InsetX, double InsetY, int32 Px)
+	{
+		const FVector2D P0 = ToShotPixel(Geo.LocalToAbsolute(FVector2D::ZeroVector));
+		const FVector2D P1 = ToShotPixel(Geo.LocalToAbsolute(Geo.GetLocalSize()));
+		const FVector2D Size = P1 - P0;
+		return FIntRect(FMath::CeilToInt(P0.X + Size.X * InsetX) + Px, FMath::CeilToInt(P0.Y + Size.Y * InsetY) + Px,
+			FMath::FloorToInt(P1.X - Size.X * InsetX) - Px, FMath::FloorToInt(P1.Y - Size.Y * InsetY) - Px);
+	}
+
+	/**
+	 * The label's glyphs against its button's fill on a shot with the UI: the fill is the median luma of the button's box
+	 * (4 px in from its frame); the glyphs are the 1% of the label's box farthest from the fill in luma (at least 8 pixels:
+	 * a one-letter key's name covers a few percent of its box, so a larger share would take in the fill round it); the
+	 * contrast is the distance of their mean from the fill, in levels.
+	 */
+	static FLabelRead LabelContrast(const FShot& Shot, const FIntRect& Button, const FIntRect& Label)
+	{
+		FLabelRead R;
+		if (Shot.Pixels.IsEmpty())
+		{
+			return R;
+		}
+		TArray<double> Box;
+		for (int32 Y = FMath::Max(0, Button.Min.Y); Y < FMath::Min(Shot.Height, Button.Max.Y); ++Y)
+		{
+			for (int32 X = FMath::Max(0, Button.Min.X); X < FMath::Min(Shot.Width, Button.Max.X); ++X)
+			{
+				Box.Add(Luma(Shot.Pixels[Y * Shot.Width + X]));
+			}
+		}
+		if (Box.Num() < 50)
+		{
+			return R;
+		}
+		Box.Sort();
+		R.Fill = Box[Box.Num() / 2];
+		TArray<double> Far;
+		for (int32 Y = FMath::Max(0, Label.Min.Y); Y < FMath::Min(Shot.Height, Label.Max.Y); ++Y)
+		{
+			for (int32 X = FMath::Max(0, Label.Min.X); X < FMath::Min(Shot.Width, Label.Max.X); ++X)
+			{
+				Far.Add(Luma(Shot.Pixels[Y * Shot.Width + X]));
+			}
+		}
+		R.Pixels = Far.Num();
+		if (Far.Num() < 50)
+		{
+			return R;
+		}
+		const double Fill = R.Fill;
+		Far.Sort([Fill](double A, double B) { return FMath::Abs(A - Fill) > FMath::Abs(B - Fill); });
+		const int32 Top = FMath::Max(8, Far.Num() / 100);
+		double Sum = 0.0;
+		for (int32 I = 0; I < Top && I < Far.Num(); ++I)
+		{
+			Sum += Far[I];
+		}
+		R.Glyphs = Sum / FMath::Min(Top, Far.Num());
+		R.Contrast = FMath::RoundToInt32(FMath::Abs(R.Glyphs - R.Fill));
+		return R;
+	}
+
+	static FString DescribeRead(const FLabelRead& R)
+	{
+		return FString::Printf(TEXT("contrast %d (glyphs %.0f on a fill of %.0f, %d label pixels)"), R.Contrast, R.Glyphs, R.Fill, R.Pixels);
+	}
+
+	/** A main menu button's label read on a shot: its button's box and its label's (the text block inside it). */
+	static FLabelRead ButtonRead(const FShot& Shot, const UButton* Button)
+	{
+		const UWidget* Label = Button ? Button->GetChildAt(0) : nullptr;
+		if (!Label)
+		{
+			return FLabelRead();
+		}
+		return LabelContrast(Shot, ShotRect(Button->GetCachedGeometry(), 0.0, 0.0, 4), ShotRect(Label->GetCachedGeometry(), 0.0, 0.0, 0));
+	}
+
+	/** A key button's label read on a shot: its box, and the middle of it, where its key's name is drawn (centred). */
+	static FLabelRead KeyRead(const FShot& Shot, const UInputKeySelector* Key)
+	{
+		if (!Key)
+		{
+			return FLabelRead();
+		}
+		return LabelContrast(Shot, ShotRect(Key->GetCachedGeometry(), 0.0, 0.0, 4), ShotRect(Key->GetCachedGeometry(), 0.25, 0.15, 0));
+	}
+
+	/** The key buttons of a screen, those of its nested user widgets (the rebinding rows) included, in the tree's order. */
+	static void CollectKeys(const UWidgetTree* Tree, TArray<UInputKeySelector*>& Out)
+	{
+		if (!Tree)
+		{
+			return;
+		}
+		Tree->ForEachWidget([&Out](UWidget* Widget)
+		{
+			if (UInputKeySelector* Key = Cast<UInputKeySelector>(Widget))
+			{
+				Out.Add(Key);
+			}
+			else if (const UUserWidget* Nested = Cast<UUserWidget>(Widget))
+			{
+				CollectKeys(Nested->WidgetTree, Out);
+			}
+		});
+	}
+
+	static UInputKeySelector* KeyAt(int32 I)
+	{
+		return G.Keys.IsValidIndex(I) ? G.Keys[I].Get() : nullptr;
+	}
+
+	static FVector2D WidgetPoint(const UWidget* Widget)
+	{
+		if (!Widget)
+		{
+			return FVector2D::ZeroVector;
+		}
+		const FGeometry& Geo = Widget->GetCachedGeometry();
+		return FVector2D(Geo.GetAbsolutePosition()) + FVector2D(Geo.GetAbsoluteSize()) * 0.5;
+	}
+
+	/** The widgets under Position in the game's own window (tls.VideoCheck's way). */
+	static FWidgetPath PathAt(const FVector2D& Position)
+	{
+		const TSharedPtr<SWindow> Window = GEngine && GEngine->GameViewport ? GEngine->GameViewport->GetWindow() : nullptr;
+		if (!Window.IsValid() || !FSlateApplication::IsInitialized())
+		{
+			return FWidgetPath();
+		}
+		const TArray<TSharedRef<SWindow>> Windows = { Window.ToSharedRef() };
+		return FSlateApplication::Get().LocateWindowUnderMouse(Position, Windows, false, FSlateApplication::CursorUserIndex);
+	}
+
+	/** The pointer moved to Position (desktop pixels), the platform's cursor too. */
+	static void MouseTo(const FVector2D& Position)
+	{
+		if (!FSlateApplication::IsInitialized())
+		{
+			return;
+		}
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const FVector2D Last = G.MouseAt.IsZero() ? Position : G.MouseAt;
+		if (const TSharedPtr<SWindow> Window = GEngine && GEngine->GameViewport ? GEngine->GameViewport->GetWindow() : nullptr)
+		{
+			Window->BringToFront(true);
+		}
+		Slate.SetCursorPos(Position);
+		const FWidgetPath Path = PathAt(Position);
+		Slate.RoutePointerMoveEvent(Path, FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Position, Last, TSet<FKey>(),
+			EKeys::Invalid, 0.f, FModifierKeysState()), false);
+		G.MouseAt = Position;
+	}
+
+	static void Click(const FVector2D& Position)
+	{
+		MouseTo(Position);
+		FSlateApplication& Slate = FSlateApplication::Get();
+		Slate.RoutePointerDownEvent(PathAt(Position), FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Position, Position,
+			TSet<FKey>({ EKeys::LeftMouseButton }), EKeys::LeftMouseButton, 0.f, FModifierKeysState()));
+		Slate.RoutePointerUpEvent(PathAt(Position), FPointerEvent(FSlateApplication::CursorUserIndex, FSlateApplication::CursorPointerIndex, Position, Position,
+			TSet<FKey>(), EKeys::LeftMouseButton, 0.f, FModifierKeysState()));
+	}
+
+	static void SlateKey(const FKey& Key)
+	{
+		if (FSlateApplication::IsInitialized())
+		{
+			FSlateApplication::Get().ProcessKeyDownEvent(FKeyEvent(Key, FModifierKeysState(), 0, false, 0, 0));
+			FSlateApplication::Get().ProcessKeyUpEvent(FKeyEvent(Key, FModifierKeysState(), 0, false, 0, 0));
+		}
+	}
+
+	/** The pointer away from every button: the settings' title. */
+	static void MouseAway()
+	{
+		const UStdScreenWidget* T = Top();
+		const UWidget* Title = T && T->WidgetTree ? T->WidgetTree->FindWidget(TEXT("Text_Title")) : nullptr;
+		MouseTo(Title ? WidgetPoint(Title) : FVector2D(5.0, 5.0));
+	}
+
+	/** Criterion 1 of Brief 48: the key buttons of the settings' Controls tab, at rest, focused by the keys, hovered and waiting. */
+	static void AddKeyReads(TArray<FStep>& S)
+	{
+		S.Add(Do(TEXT("key buttons: at rest"), []()
+		{
+			G.Keys.Reset();
+			TArray<UInputKeySelector*> Keys;
+			CollectKeys(Top() ? Top()->WidgetTree : nullptr, Keys);
+			for (UInputKeySelector* K : Keys)
+			{
+				G.Keys.Add(K);
+			}
+			int32 UseForeground = 0;
+			for (int32 I = 0; I < G.Keys.Num(); ++I)
+			{
+				const UInputKeySelector* K = KeyAt(I);
+				UseForeground += K && !K->GetTextStyle().ColorAndOpacity.IsColorSpecified() ? 1 : 0;
+			}
+			Check(G.Keys.Num() > 0 && UseForeground == G.Keys.Num(), FString::Printf(TEXT("key buttons: %d on the Controls tab, %d of them with their label following the button's state (the style's text on the accent when focused or hovered)"),
+				G.Keys.Num(), UseForeground));
+			return 0.f;
+		}));
+		constexpr int32 MaxKeys = 16;
+		for (int32 I = 0; I < MaxKeys; ++I)
+		{
+			for (const int32 Pose : { 0, 1, 2 })
+			{
+				const bool bHover = Pose == 1;
+				const bool bRest = Pose == 2;
+				const FString Name = FString::Printf(TEXT("%sRebinding_Key%s%s"), I == 0 ? TEXT("") : TEXT("_"), bRest ? TEXT("Rest") : bHover ? TEXT("Hovered") : TEXT("Focused"),
+					I == 0 ? TEXT("") : *FString::Printf(TEXT("_%d"), I));
+				S.Add(Do(Name + TEXT(": pose"), [I, bHover, bRest]()
+				{
+					UInputKeySelector* K = KeyAt(I);
+					if (!K)
+					{
+						return 0.f;
+					}
+					if (bRest)
+					{
+						// At rest: the pointer away and the focus on the Controls tab; the row stays where focusing it scrolled it.
+						MouseAway();
+						if (UWidget* Tab = Top() && Top()->WidgetTree ? Top()->WidgetTree->FindWidget(TEXT("Button_TabControls")) : nullptr)
+						{
+							Tab->SetFocus();
+						}
+					}
+					else if (bHover)
+					{
+						MouseTo(WidgetPoint(K));
+					}
+					else
+					{
+						MouseAway();
+						K->SetFocus();
+					}
+					return 0.35f;
+				}));
+				S.Add(Do(Name + TEXT(": shot"), [I, Name]()
+				{
+					if (KeyAt(I))
+					{
+						RequestShot(Name);
+					}
+					else
+					{
+						G.bShotReady = true;
+					}
+					return 0.f;
+				}));
+				S.Add(WaitFor(Name + TEXT(": shot taken"), []() { return G.bShotReady; }, 5.f, [I, bHover, bRest, Name]()
+				{
+					const UInputKeySelector* K = KeyAt(I);
+					if (!K)
+					{
+						return 0.f;
+					}
+					const FShot* Shot = G.Shots.Find(Name);
+					const FLabelRead R = Shot ? KeyRead(*Shot, K) : FLabelRead();
+					if (bRest)
+					{
+						// The reference at rest: a button at rest on the same panel (the settings' Back); a main menu button at rest
+						// stands on the menu's black, 10 levels below the panel's fill.
+						const UButton* Back = Top() && Top()->WidgetTree ? Cast<UButton>(Top()->WidgetTree->FindWidget(TEXT("Button_Back"))) : nullptr;
+						const FLabelRead BackRead = Shot && Back ? ButtonRead(*Shot, Back) : FLabelRead();
+						const bool bQuiet = !K->IsHovered() && !(K->HasUserFocus(PC()) || K->HasUserFocusedDescendants(PC()));
+						Check(bQuiet && R.Contrast >= 0 && BackRead.Contrast >= 0 && FMath::Abs(R.Contrast - BackRead.Contrast) <= 10,
+							FString::Printf(TEXT("key button %d at rest (in view): its label against its fill, %s, within 10 levels of the settings' Back button's at rest (%s; a main menu button's at rest: %s)"),
+								I, *DescribeRead(R), *DescribeRead(BackRead), *DescribeRead(G.MainRest)));
+						return 0.f;
+					}
+					const bool bMarked = bHover ? K->IsHovered() : (K->HasUserFocus(PC()) || K->HasUserFocusedDescendants(PC()));
+					Check(bMarked && R.Contrast >= 0 && FMath::Abs(R.Contrast - G.MainFocused.Contrast) <= 10,
+						FString::Printf(TEXT("key button %d %s: its label against the accent fill, %s, within 10 levels of a focused main menu button's (%s)"), I,
+							bHover ? TEXT("hovered by the mouse") : TEXT("focused by the keys"), *DescribeRead(R), *DescribeRead(G.MainFocused)));
+					return 0.f;
+				}));
+			}
+		}
+		// A row waiting for a key: the first key button focused (its row scrolled back into view), clicked, its waiting text
+		// read, then Escape (no key taken).
+		S.Add(Do(TEXT("key button waiting: the first row in view"), []()
+		{
+			MouseAway();
+			if (UInputKeySelector* K = KeyAt(0))
+			{
+				K->SetFocus();
+			}
+			return 0.5f;
+		}));
+		S.Add(Do(TEXT("key button waiting: click"), []()
+		{
+			if (UInputKeySelector* K = KeyAt(0))
+			{
+				Click(WidgetPoint(K));
+			}
+			return 0.4f;
+		}));
+		AddShot(S, TEXT("Rebinding_KeyWaiting"), 0.1f);
+		S.Add(Do(TEXT("key button waiting: read, then Escape"), []()
+		{
+			const UInputKeySelector* K = KeyAt(0);
+			const FShot* Shot = G.Shots.Find(TEXT("Rebinding_KeyWaiting"));
+			const FLabelRead R = Shot && K ? KeyRead(*Shot, K) : FLabelRead();
+			// While it waits the engine disables the selector's button, and draws a disabled widget's text with its disabled
+			// effect (a fraction of its level): the label cannot read as a focused one does. The row shows its focused look
+			// (the accent fill) and its text is read and logged.
+			Check(K && K->GetIsSelectingKey() && R.Contrast > 0 && FMath::Abs(R.Fill - G.MainFocused.Fill) <= 10,
+				FString::Printf(TEXT("key button 0 waiting for a key (%s): it shows the focused look, its fill %.0f against a focused main menu button's %.0f (within 10); what it shows: %s"),
+					K && K->GetIsSelectingKey() ? TEXT("waiting") : TEXT("NOT waiting"), R.Fill, G.MainFocused.Fill, *DescribeRead(R)));
+			// Escape only cancels a wait: with no wait it is the back key, and would close the settings.
+			if (K && K->GetIsSelectingKey())
+			{
+				SlateKey(EKeys::Escape);
+			}
+			return 0.4f;
+		}));
+		S.Add(Do(TEXT("key button waiting: cancelled"), []()
+		{
+			const UInputKeySelector* K = KeyAt(0);
+			Check(K && !K->GetIsSelectingKey() && Cast<UStdSettingsWidget>(Top()) != nullptr, TEXT("Escape cancelled the wait and left the settings open (no key taken)"));
+			MouseAway();
+			return 0.2f;
+		}));
+	}
+
+	/** With StdCore's style off (for the session): the key buttons' labels keep the theme's text colour, as before Brief 48. */
+	static void AddStyleOff(TArray<FStep>& S)
+	{
+		S.Add(Do(TEXT("style off: the settings again"), []()
+		{
+			UStdProjectSettings* Std = GetMutableDefault<UStdProjectSettings>();
+			G.bSavedUseStyle = Std->bUseStyle;
+			G.bStyleChanged = true;
+			Std->bUseStyle = false;
+			Check(ClickNamed(Top(), TEXT("Button_Settings")), TEXT("style off: the main menu's Settings opens the settings screen"));
+			return 0.5f;
+		}));
+		S.Add(Do(TEXT("style off: Controls tab"), []() { Check(ClickNamed(Top(), TEXT("Button_TabControls")), TEXT("style off: the Controls tab opens")); return 0.6f; }));
+		AddShot(S, TEXT("Rebinding_StyleOff"));
+		S.Add(Do(TEXT("style off: the key buttons' labels"), []()
+		{
+			TArray<UInputKeySelector*> Keys;
+			CollectKeys(Top() ? Top()->WidgetTree : nullptr, Keys);
+			const UStdUITheme* Theme = StdUITheme::Get();
+			int32 AsBefore = 0;
+			for (const UInputKeySelector* K : Keys)
+			{
+				const FSlateColor& Color = K->GetTextStyle().ColorAndOpacity;
+				AsBefore += Theme && !Theme->IsFramed() && Color.IsColorSpecified() && Color.GetSpecifiedColor().Equals(Theme->TextColor, 1.e-4f) ? 1 : 0;
+			}
+			Check(Keys.Num() > 0 && AsBefore == Keys.Num(),
+				FString::Printf(TEXT("style off: the theme asset (%s, not framed) and each key button's label in its text colour, as before Brief 48: %d of %d"),
+					*GetNameSafe(Theme), AsBefore, Keys.Num()));
+			if (UStdScreenWidget* T = Top())
+			{
+				T->CloseScreen();
+			}
+			return 0.4f;
+		}));
+		S.Add(Do(TEXT("style on again"), []()
+		{
+			GetMutableDefault<UStdProjectSettings>()->bUseStyle = G.bSavedUseStyle;
+			G.bStyleChanged = false;
+			return 0.f;
+		}));
+	}
+
 	static void BuildMainMenu(TArray<FStep>& S)
 	{
 		S.Add(WaitFor(TEXT("MainMenu: the main menu"), []() { return Cast<URunMainMenuWidget>(Top()) != nullptr; }, 20.f));
@@ -724,6 +1125,39 @@ namespace StyleCheck
 			return 0.f;
 		}));
 		AddShot(S, TEXT("MainMenu"), 0.5f);
+		// Brief 48: the reference, a focused main menu button's label against its fill, and one at rest.
+		S.Add(Do(TEXT("main menu buttons: their labels read"), []()
+		{
+			const UStdScreenWidget* Menu = Top();
+			const FShot* Shot = G.Shots.Find(TEXT("MainMenu"));
+			const UButton* Focused = nullptr;
+			const UButton* Rest = nullptr;
+			if (Menu && Menu->WidgetTree)
+			{
+				Menu->WidgetTree->ForEachWidget([&Focused, &Rest](UWidget* W)
+				{
+					const UButton* B = Cast<UButton>(W);
+					if (!B || !B->IsVisible() || !B->GetChildAt(0))
+					{
+						return;
+					}
+					if (!Focused && (B->HasUserFocus(PC()) || B->HasUserFocusedDescendants(PC())))
+					{
+						Focused = B;
+					}
+					else if (B->GetIsEnabled() && !B->IsHovered() && !(B->HasUserFocus(PC()) || B->HasUserFocusedDescendants(PC())))
+					{
+						Rest = B;
+					}
+				});
+			}
+			G.MainFocused = Shot && Focused ? ButtonRead(*Shot, Focused) : FLabelRead();
+			G.MainRest = Shot && Rest ? ButtonRead(*Shot, Rest) : FLabelRead();
+			Check(G.MainFocused.Contrast > 0 && G.MainRest.Contrast > 0,
+				FString::Printf(TEXT("main menu: the focused button %s, %s; a button at rest %s, %s"), *GetNameSafe(Focused), *DescribeRead(G.MainFocused), *GetNameSafe(Rest),
+					*DescribeRead(G.MainRest)));
+			return 0.f;
+		}));
 
 		S.Add(Do(TEXT("settings: open"), []() { Check(ClickNamed(Top(), TEXT("Button_Settings")), TEXT("the main menu's Settings opens the settings screen")); return 0.5f; }));
 		S.Add(Do(TEXT("settings: fonts"), []() { AuditFonts(TEXT("settings"), Top(), 4); return 0.f; }));
@@ -731,7 +1165,9 @@ namespace StyleCheck
 		S.Add(Do(TEXT("rebinding: Controls tab"), []() { Check(ClickNamed(Top(), TEXT("Button_TabControls")), TEXT("the settings' Controls tab opens the rebinding rows")); return 0.6f; }));
 		S.Add(Do(TEXT("rebinding: fonts"), []() { AuditFonts(TEXT("rebinding"), Top(), 8); return 0.f; }));
 		AddShot(S, TEXT("Rebinding"));
+		AddKeyReads(S);
 		S.Add(Do(TEXT("settings: close"), []() { if (UStdScreenWidget* T = Top()) { T->CloseScreen(); } return 0.4f; }));
+		AddStyleOff(S);
 
 		S.Add(Do(TEXT("credits"), []()
 		{
@@ -1623,7 +2059,7 @@ namespace StyleCheck
 
 static FAutoConsoleCommandWithWorldAndArgs GTlsStyleCheckCommand(
 	TEXT("tls.StyleCheck"),
-	TEXT("tls.StyleCheck [Quit=0]: (fresh PIE or a package) Brief 27's look in the map it runs in: MainMenu (the font of every screen, the static at a scene's cut, the fit of the narrative tables, the travel screen), Prologue_Home (the channel's font, black monitors and terminals, the rack lights), an area (log console unpaid and paid, a gate terminal, the twin AI terminal's plate, the Interact prompt, the pause menu, the archive). Shots to Saved/Screenshots/Brief27."),
+	TEXT("tls.StyleCheck [Quit=0]: (fresh PIE or a package) Brief 27's look in the map it runs in: MainMenu (the font of every screen, the key buttons' labels read at rest, focused, hovered and waiting against a main menu button's, the style off, the static at a scene's cut, the fit of the narrative tables, the travel screen), Prologue_Home (the channel's font, black monitors and terminals, the rack lights), an area (log console unpaid and paid, a gate terminal, the twin AI terminal's plate, the Interact prompt, the pause menu, the archive). Shots to Saved/Screenshots/Brief48."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		StyleCheck::Start(Args.Num() > 0 && FCString::Atoi(*Args[0]) != 0);

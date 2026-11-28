@@ -300,6 +300,8 @@ namespace ChamberDebug
 		bool bWasInChamber = false;
 		/** tls.Chamber.Flicker: no fixture installed, the save not touched. */
 		bool bNoSaveTouch = false;
+		/** Where the shots go (Saved/Screenshots/<folder>): tls.ChamberCheck's Brief44, tls.Chamber.Flicker's Brief48. */
+		FString ShotFolder = TEXT("Brief44");
 		// Brief 36B: the hall.
 		TArray<FVector> Route;
 		int32 RouteNext = -1;
@@ -527,7 +529,7 @@ namespace ChamberDebug
 		}
 		TArray64<uint8> Png;
 		FImageUtils::PNGCompressImageArray(Rect.Width(), Rect.Height(), TArrayView64<const FColor>(Crop.GetData(), Crop.Num()), Png);
-		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief44"), GRun.ShotName + TEXT(".png")));
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), GRun.ShotFolder, GRun.ShotName + TEXT(".png")));
 		if (!GRun.ShotName.IsEmpty())
 		{
 			IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
@@ -2428,8 +2430,17 @@ namespace ChamberDebug
 		FVector Look = FVector::ZeroVector;
 		FVector Step = FVector::ZeroVector;
 		int32 Width = 0;
+		// Brief 48: the first frame (its drawn shot, the spines alone, its camera), where the counted pixels are placed.
+		int32 Height = 0;
+		TArray<FColor> FirstDrawn;
+		TArray<FColor> FirstAlone;
+		FVector CamLocation = FVector::ZeroVector;
+		FRotator CamRotation = FRotator::ZeroRotator;
+		float CamFov = 90.f;
 	};
 	static FColumnFlicker GFlick;
+	/** tls.Chamber.Flicker's run tag (an argument other than Quit), in its masks' and shots' names. */
+	static FString GFlickTag;
 
 	static void ShowSpines(bool bShow)
 	{
@@ -2454,8 +2465,300 @@ namespace ChamberDebug
 		if (ACharacter* C = Cast<ACharacter>(P))
 		{
 			C->GetCharacterMovement()->StopMovementImmediately();
+			// Brief 48: held where it is put (the pawn stands 2 cm above the floor; falling onto it took a share of a frame
+			// that changed from run to run, and moved the camera with it).
+			C->GetCharacterMovement()->DisableMovement();
 		}
 		PC()->SetControlRotation((GFlick.Look + GFlick.Step * K - P->GetPawnViewLocation()).Rotation());
+	}
+
+	// Brief 48: where the flicker's pixels are. A ray through a pixel of the first frame's view, cast against the triangles
+	// (LOD 0) of the spines and of every other piece the measure saw: the spine it meets and the first other surface.
+
+	struct FRayTarget
+	{
+		TWeakObjectPtr<UStaticMeshComponent> Component;
+		FTransform Transform;
+		FBox Box;
+		bool bSpine = false;
+	};
+
+	struct FRayHit
+	{
+		int32 Target = INDEX_NONE;
+		double Distance = 0.0;
+	};
+
+	static TArray<FRayTarget> GRayTargets;
+	static TMap<const UStaticMesh*, TPair<TArray<FVector>, TArray<uint32>>> GRayMeshes;
+	static TMap<int32, TArray<FVector>> GRayWorldTris;
+
+	static void BuildRayTargets()
+	{
+		GRayTargets.Reset();
+		GRayWorldTris.Reset();
+		auto Add = [](UStaticMeshComponent* C, bool bSpine)
+		{
+			if (!C || !C->GetStaticMesh() || !C->IsVisible())
+			{
+				return;
+			}
+			const FBox Local = C->GetStaticMesh()->GetBoundingBox();
+			if (const UInstancedStaticMeshComponent* Ism = Cast<UInstancedStaticMeshComponent>(C))
+			{
+				for (int32 I = 0; I < Ism->GetInstanceCount(); ++I)
+				{
+					FRayTarget& T = GRayTargets.AddDefaulted_GetRef();
+					T.Component = C;
+					Ism->GetInstanceTransform(I, T.Transform, true);
+					T.Box = Local.TransformBy(T.Transform);
+					T.bSpine = bSpine;
+				}
+				return;
+			}
+			FRayTarget& T = GRayTargets.AddDefaulted_GetRef();
+			T.Component = C;
+			T.Transform = C->GetComponentTransform();
+			T.Box = Local.TransformBy(T.Transform);
+			T.bSpine = bSpine;
+		};
+		for (const TWeakObjectPtr<UStaticMeshComponent>& C : GFlick.Spines) { Add(C.Get(), true); }
+		for (const TWeakObjectPtr<UStaticMeshComponent>& C : GFlick.Others) { Add(C.Get(), false); }
+	}
+
+	static const TArray<FVector>& RayWorldTris(int32 Index)
+	{
+		if (const TArray<FVector>* Found = GRayWorldTris.Find(Index))
+		{
+			return *Found;
+		}
+		TArray<FVector>& Out = GRayWorldTris.Add(Index);
+		const FRayTarget& T = GRayTargets[Index];
+		const UStaticMeshComponent* C = T.Component.Get();
+		const UStaticMesh* Mesh = C ? C->GetStaticMesh() : nullptr;
+		if (!Mesh)
+		{
+			return Out;
+		}
+		TPair<TArray<FVector>, TArray<uint32>>* Cached = GRayMeshes.Find(Mesh);
+		if (!Cached)
+		{
+			Cached = &GRayMeshes.Add(Mesh);
+			FEntityFigureShape::ReadMeshTriangles(Mesh, Cached->Key, Cached->Value);
+		}
+		Out.Reserve(Cached->Value.Num());
+		for (const uint32 V : Cached->Value)
+		{
+			Out.Add(T.Transform.TransformPosition(Cached->Key[V]));
+		}
+		return Out;
+	}
+
+	/** The nearest spine (bSpine) or other piece the ray meets (two-sided triangles), or none. */
+	static FRayHit CastRay(const FVector& O, const FVector& D, bool bSpine)
+	{
+		FRayHit Best;
+		Best.Distance = 1.0e12;
+		for (int32 K = 0; K < GRayTargets.Num(); ++K)
+		{
+			const FRayTarget& T = GRayTargets[K];
+			if (T.bSpine != bSpine || !FMath::LineBoxIntersection(T.Box, O, O + D * 1.0e5, D * 1.0e5))
+			{
+				continue;
+			}
+			const TArray<FVector>& Tris = RayWorldTris(K);
+			for (int32 I = 0; I + 2 < Tris.Num(); I += 3)
+			{
+				const FVector E1 = Tris[I + 1] - Tris[I];
+				const FVector E2 = Tris[I + 2] - Tris[I];
+				const FVector P = FVector::CrossProduct(D, E2);
+				const double Det = FVector::DotProduct(E1, P);
+				if (FMath::Abs(Det) < 1.e-9)
+				{
+					continue;
+				}
+				const double Inv = 1.0 / Det;
+				const FVector S = O - Tris[I];
+				const double U = FVector::DotProduct(S, P) * Inv;
+				if (U < 0.0 || U > 1.0)
+				{
+					continue;
+				}
+				const FVector Q = FVector::CrossProduct(S, E1);
+				const double V = FVector::DotProduct(D, Q) * Inv;
+				if (V < 0.0 || U + V > 1.0)
+				{
+					continue;
+				}
+				const double Dist = FVector::DotProduct(E2, Q) * Inv;
+				if (Dist > 1.0 && Dist < Best.Distance)
+				{
+					Best.Distance = Dist;
+					Best.Target = K;
+				}
+			}
+		}
+		return Best;
+	}
+
+	static FString DescribeTarget(int32 Index)
+	{
+		if (!GRayTargets.IsValidIndex(Index))
+		{
+			return TEXT("nothing");
+		}
+		const UStaticMeshComponent* C = GRayTargets[Index].Component.Get();
+		return FString::Printf(TEXT("%s (%s)"), *GetNameSafe(C ? C->GetStaticMesh() : nullptr), C ? *GetNameSafe(C->GetOwner()) : TEXT("-"));
+	}
+
+	/** The world ray of pixel (X, Y) of the first frame's shot (its camera's place, turn and horizontal angle of view). */
+	static FVector FlickRay(int32 X, int32 Y)
+	{
+		const FRotationMatrix M(GFlick.CamRotation);
+		const double Tan = FMath::Tan(FMath::DegreesToRadians(0.5 * GFlick.CamFov));
+		const double U = (2.0 * (X + 0.5) / GFlick.Width - 1.0) * Tan;
+		const double V = (1.0 - 2.0 * (Y + 0.5) / GFlick.Height) * Tan * GFlick.Height / GFlick.Width;
+		return (M.GetUnitAxis(EAxis::X) + M.GetUnitAxis(EAxis::Y) * U + M.GetUnitAxis(EAxis::Z) * V).GetSafeNormal();
+	}
+
+	static void SaveFlickMask(const FString& Name, const TArray<FColor>& Mask, int32 Width, int32 Height)
+	{
+		TArray64<uint8> Png;
+		FImageUtils::PNGCompressImageArray(Width, Height, TArrayView64<const FColor>(Mask.GetData(), Mask.Num()), Png);
+		const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("Brief48"), Name + TEXT(".png")));
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
+		FFileHelper::SaveArrayToFile(Png, *Path);
+		Note(FString::Printf(TEXT("flicker: mask %s saved (the first frame dimmed; red: a pixel counted, with a neighbour that alternates too; yellow: an isolated one, left out): %s"), *Name, *Path));
+	}
+
+	/**
+	 * For each pixel the measure counts (and each isolated one): where it is on the first frame's shot (a mask), what it
+	 * alternates between (the spine its ray meets and the first other surface), and whether it lies within 2 pixels of the
+	 * spines' silhouette (a pixel the spines alone do not cover) or of the other surface's (a neighbour's ray meets another
+	 * piece first, or none).
+	 */
+	static void ExplainFlicker(const FString& Label, const TFunction<bool(int32)>& Flickers, const TFunction<bool(int32)>& Counted)
+	{
+		const int32 W0 = GFlick.Width;
+		const int32 H0 = GFlick.Height;
+		if (W0 <= 0 || GFlick.FirstDrawn.Num() != W0 * H0)
+		{
+			Note(FString::Printf(TEXT("flicker %s: no first frame to place the pixels on"), *Label));
+			return;
+		}
+		BuildRayTargets();
+		TArray<FColor> Mask;
+		Mask.SetNumUninitialized(W0 * H0);
+		for (int32 I = 0; I < Mask.Num(); ++I)
+		{
+			const FColor& C = GFlick.FirstDrawn[I];
+			Mask[I] = FColor(C.R * 2 / 5, C.G * 2 / 5, C.B * 2 / 5, 255);
+		}
+		TMap<int32, int32> OtherAt;
+		auto Other = [&OtherAt](int32 X, int32 Y)
+		{
+			const int32 Key = Y * GFlick.Width + X;
+			if (const int32* Found = OtherAt.Find(Key))
+			{
+				return *Found;
+			}
+			const int32 Hit = CastRay(GFlick.CamLocation, FlickRay(X, Y), false).Target;
+			OtherAt.Add(Key, Hit);
+			return Hit;
+		};
+		TMap<FString, int32> ByPair;
+		int32 NearSpine = 0, NearOther = 0, NearBoth = 0, NearNeither = 0, Lines = 0;
+		for (int32 I = 0; I < W0 * H0; ++I)
+		{
+			if (!Flickers(I))
+			{
+				continue;
+			}
+			const int32 X = I % W0;
+			const int32 Y = I / W0;
+			const bool bCounted = Counted(I);
+			Mask[I] = bCounted ? FColor(255, 0, 0) : FColor(255, 220, 0);
+			const FVector Ray = FlickRay(X, Y);
+			const FRayHit Spine = CastRay(GFlick.CamLocation, Ray, true);
+			const int32 Behind = Other(X, Y);
+			bool bSpineEdge = false, bOtherEdge = false;
+			for (int32 DY = -2; DY <= 2; ++DY)
+			{
+				for (int32 DX = -2; DX <= 2; ++DX)
+				{
+					const int32 NX = X + DX, NY = Y + DY;
+					if (NX < 0 || NY < 0 || NX >= W0 || NY >= H0 || (DX == 0 && DY == 0))
+					{
+						continue;
+					}
+					const FColor& A = GFlick.FirstAlone[NY * W0 + NX];
+					bSpineEdge |= FMath::Max3(A.R, A.G, A.B) <= 10;
+					if (!bOtherEdge)
+					{
+						const int32 N = Other(NX, NY);
+						bOtherEdge = N != Behind && !(GRayTargets.IsValidIndex(N) && GRayTargets.IsValidIndex(Behind)
+							&& GRayTargets[N].Component == GRayTargets[Behind].Component);
+					}
+				}
+			}
+			(bSpineEdge && bOtherEdge ? NearBoth : bSpineEdge ? NearSpine : bOtherEdge ? NearOther : NearNeither) += bCounted ? 1 : 0;
+			const FString Pair = FString::Printf(TEXT("%s / %s"), *DescribeTarget(Spine.Target), *DescribeTarget(Behind));
+			if (bCounted)
+			{
+				ByPair.FindOrAdd(Pair) += 1;
+			}
+			++Lines;
+			Note(FString::Printf(TEXT("flicker %s PIXEL (%d, %d)%s: alternates between the spine %s at %.0f cm and %s at %.0f cm; within 2 px of the spines' silhouette: %s, of the other's: %s"),
+				*Label, X, Y, bCounted ? TEXT("") : TEXT(" (isolated, left out)"), *DescribeTarget(Spine.Target), Spine.Target != INDEX_NONE ? Spine.Distance : 0.0,
+				*DescribeTarget(Behind), GRayTargets.IsValidIndex(Behind) ? CastRay(GFlick.CamLocation, Ray, false).Distance : 0.0, bSpineEdge ? TEXT("yes") : TEXT("no"),
+				bOtherEdge ? TEXT("yes") : TEXT("no")));
+		}
+		for (const TPair<FString, int32>& P : ByPair)
+		{
+			Note(FString::Printf(TEXT("flicker %s: %d counted pixels alternate between %s"), *Label, P.Value, *P.Key));
+		}
+		Note(FString::Printf(TEXT("flicker %s: of the counted pixels, %d lie within 2 px of both silhouettes, %d of the spines' only, %d of the other surface's only, %d of neither (%d pixel lines)"),
+			*Label, NearBoth, NearSpine, NearOther, NearNeither, Lines));
+		SaveFlickMask(FString::Printf(TEXT("Flicker_%s_Mask%s"), *Label, GFlickTag.IsEmpty() ? TEXT("") : *(TEXT("_") + GFlickTag)), Mask, W0, H0);
+		GRayWorldTris.Reset();
+	}
+
+	/**
+	 * Brief 48: the battery held at one state, the same in every run: each ring at its place when play began (its turn 0), the
+	 * pulses at their phase 0. Before, the measure held it where the chamber's lines happened to end.
+	 */
+	static void HoldBatteryAtStart(AChamberBattery* B)
+	{
+		if (!B)
+		{
+			return;
+		}
+		// Each ring's place when play began, worked out once in a session (while the battery has turned it by its turn): a
+		// later run in the same session, the battery's tick still held, finds the ring already there.
+		static TMap<TWeakObjectPtr<UStaticMeshComponent>, FQuat> StartPlaces;
+		const TArray<TObjectPtr<UStaticMeshComponent>>& Rings = B->GetRings();
+		FString Turns;
+		for (int32 I = 0; I < Rings.Num(); ++I)
+		{
+			UStaticMeshComponent* Ring = Rings[I];
+			if (Ring && Ring->Mobility == EComponentMobility::Movable)
+			{
+				Turns += FString::Printf(TEXT("%s%.1f"), Turns.IsEmpty() ? TEXT("") : TEXT(", "), B->GetRingTurn(I));
+				const FQuat* Start = StartPlaces.Find(Ring);
+				const FQuat Place = Start ? *Start : FQuat(FVector::UpVector, FMath::DegreesToRadians(-B->GetRingTurn(I))) * Ring->GetComponentQuat();
+				StartPlaces.Add(Ring, Place);
+				Ring->SetWorldRotation(Place);
+			}
+		}
+		for (const bool bSpines : { false, true })
+		{
+			if (UMaterialInstanceDynamic* M = B->GetGlowMaterial(bSpines))
+			{
+				M->SetScalarParameterValue(TEXT("Phase"), 0.f);
+			}
+		}
+		Note(FString::Printf(TEXT("flicker: the battery held at its rings' places when play began and its pulses' phase 0 (it stood at pulse phase %.3f m and ring turns %s degrees)"),
+			B->GetPulsePhase(), *Turns));
 	}
 
 	/**
@@ -2506,7 +2809,7 @@ namespace ChamberDebug
 			S.Add(Do(Label + TEXT(": hidden"), [K]() { PlaceFlickerEye(K); ShowSpines(false); return 0.1f; }));
 			AddShotWait(S, FString(), []() { GFlick.Hidden = GRun.ShotPixels; ShowSpines(true); ShowOtherPieces(false); return 0.1f; });
 			AddShotWait(S, FString(), []() { GFlick.Alone = GRun.ShotPixels; ShowOtherPieces(true); return 0.1f; });
-			AddShotWait(S, K == 0 ? FString::Printf(TEXT("Flicker_%s"), *Label) : FString(), [K]()
+			AddShotWait(S, K == 0 ? FString::Printf(TEXT("Flicker_%s%s"), *Label, GFlickTag.IsEmpty() ? TEXT("") : *(TEXT("_") + GFlickTag)) : FString(), [K]()
 			{
 				const TArray<FColor>& Drawn = GRun.ShotPixels;
 				if (GFlick.Hidden.Num() != Drawn.Num() || GFlick.Alone.Num() != Drawn.Num())
@@ -2516,6 +2819,15 @@ namespace ChamberDebug
 				if (K == 0)
 				{
 					GFlick.Width = GRun.ShotW;
+					GFlick.Height = GRun.ShotH;
+					GFlick.FirstDrawn = Drawn;
+					GFlick.FirstAlone = GFlick.Alone;
+					if (const APlayerCameraManager* Cam = PC() ? PC()->PlayerCameraManager.Get() : nullptr)
+					{
+						GFlick.CamLocation = Cam->GetCameraLocation();
+						GFlick.CamRotation = Cam->GetCameraRotation();
+						GFlick.CamFov = Cam->GetFOVAngle();
+					}
 					GFlick.Last.Init(-1, Drawn.Num());
 					GFlick.BeforeLast.Init(-1, Drawn.Num());
 					GFlick.Changes.Init(0, Drawn.Num());
@@ -2584,6 +2896,31 @@ namespace ChamberDebug
 			}
 			Check(Flicker == 0, FString::Printf(TEXT("flicker %s: %d pixels alternate between the spines and another surface on 30 frames, the camera moving 1 cm a frame (%d isolated ones left out; %d pixels the spines cover, %d showing the spines)"),
 				*Label, Flicker, Isolated, Covered, Spine));
+			// Brief 48: where they are, and between what.
+			auto Counted = [Flickers, W0](int32 I)
+			{
+				if (!Flickers(I))
+				{
+					return false;
+				}
+				const int32 X = W0 > 0 ? I % W0 : 0;
+				for (int32 DY = -1; DY <= 1; ++DY)
+				{
+					for (int32 DX = -1; DX <= 1; ++DX)
+					{
+						if ((DX != 0 || DY != 0) && X + DX >= 0 && X + DX < W0 && Flickers(I + DY * W0 + DX))
+						{
+							return true;
+						}
+					}
+				}
+				return false;
+			};
+			ExplainFlicker(Label, Flickers, Counted);
+			if (ACharacter* C = Cast<ACharacter>(Pawn()))
+			{
+				C->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+			}
 			return 0.2f;
 		}));
 	}
@@ -2593,8 +2930,9 @@ namespace ChamberDebug
 		TArray<FStep> S;
 		S.Add(WaitFor(TEXT("flicker: in the hall, the lines said"), []() { return Offering(); }, 120.f, []()
 		{
-			// What moves by itself would change pixels between a frame's three shots: held still for the measure.
-			if (AChamberBattery* B = Bat()) { B->SetActorTickEnabled(false); }
+			// What moves by itself would change pixels between a frame's three shots: held still for the measure, and (Brief 48)
+			// held at one state, the same in every run.
+			if (AChamberBattery* B = Bat()) { B->SetActorTickEnabled(false); HoldBatteryAtStart(B); }
 			if (APrologueMonitorRoom* M = Mon()) { M->SetActorTickEnabled(false); }
 			return 0.5f;
 		}));
@@ -2670,7 +3008,16 @@ namespace ChamberDebug
 		}
 		GRun = FRun();
 		GRun.bNoSaveTouch = true;
+		GRun.ShotFolder = TEXT("Brief48");
 		GRun.bQuitAtEnd = Args.Contains(TEXT("Quit")) || Args.Contains(TEXT("quit"));
+		GFlickTag.Reset();
+		for (const FString& Arg : Args)
+		{
+			if (!Arg.Equals(TEXT("Quit"), ESearchCase::IgnoreCase))
+			{
+				GFlickTag = Arg;
+			}
+		}
 		GRun.bSavedReturn = Settings()->bReturnHome;
 		GRun.bSavedMaps = Settings()->bPrologueMaps;
 		GRun.bSavedChamber = Settings()->bChoiceChamber;
@@ -3527,7 +3874,7 @@ namespace ChamberDebug
 
 	static FAutoConsoleCommandWithWorldAndArgs GChamberFlickerCmd(
 		TEXT("tls.Chamber.Flicker"),
-		TEXT("tls.Chamber.Flicker [Quit]: (Epilogue_Chamber, PIE) sorts the column's face pairs within 1 cm of one plane (facing the same way and overlapping; facing each other or back to back), tries the spines' width from x0.9 to x1.1, and measures the pixels that alternate between the spines and another surface from the gallery, the walkway's foot and the terminal, tls.SeamCheck's way (30 frames, 1 cm a frame; a ProfileGPU from the gallery)."),
+		TEXT("tls.Chamber.Flicker [Quit] [Tag]: (Epilogue_Chamber, PIE) sorts the column's face pairs within 1 cm of one plane (facing the same way and overlapping; facing each other or back to back), tries the spines' width from x0.9 to x1.1, and measures the pixels that alternate between the spines and another surface from the gallery, the walkway's foot and the terminal, tls.SeamCheck's way (30 frames, 1 cm a frame; a ProfileGPU from the gallery), the battery held at its rings' first places and its pulses' phase 0; Brief 48: for each view a mask of the pixels on the first frame and a PIXEL line for each (the spine and the other surface it alternates between, near either silhouette or not). Tag names the run in the masks' and shots' names. Shots and masks to Saved/Screenshots/Brief48."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunFlicker));
 
 	static FAutoConsoleCommandWithWorldAndArgs GChamberBatteryCmd(
