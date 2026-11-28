@@ -8,7 +8,8 @@
 // scan, nothing for a press during the cooldown, no ready signal after a Stop that ended before its cooldown); a residue
 // collected; the text channel's three voices, a restart after a Stop and after the pause menu, a log on its terminal's
 // surface; the pause menu (nothing asked while it is open, the run's sounds after it); a terminal of each kind of
-// payment, a free one, reading a log again and a refusal; the area's gate door and a spawned door opening and closing;
+// payment, a free one, reading a log again and a refusal; the area's gate door and a spawned door opening and closing,
+// each a timed motion (Brief 46);
 // an empty slot; the commands; then every exit from stopped time (a Resume, a contact with each response, a graze).
 // tls.AudioTest menu [Quit] (MainMenu; PIE or a package; clears the save slot): the menu's music (once, looping, again
 // after a travel back), the text scenes' lines and their interruption, New game (the music fades as the opening scene
@@ -611,10 +612,10 @@ namespace AudioDebug
 	}
 
 	/**
-	 * Door (or, Brief 45, motion) sounds since the mark: exactly Movers, in order, each at its mover's position and the
-	 * pitch of its kind. Slot: Door for the doors that move at once, Motion for the timed motions.
+	 * Motion sounds since the mark (Brief 46: every door moves over time, the Door slot is gone): exactly Movers, in order,
+	 * each at its mover's position and the pitch of its kind.
 	 */
-	static void CheckDoorSounds(const FString& Label, const TArray<TPair<const AActor*, bool>>& Movers, EGameSound Slot = EGameSound::Door)
+	static void CheckDoorSounds(const FString& Label, const TArray<TPair<const AActor*, bool>>& Movers, EGameSound Slot = EGameSound::Motion)
 	{
 		const TArray<FGameSoundRequest> List = SinceOf(Slot);
 		const float Hatch = UTheLastShiftSettings::Get()->Audio.GetHatchPitch();
@@ -636,8 +637,8 @@ namespace AudioDebug
 			*Describe(List)));
 	}
 
-	/** Door (or motion) requests (not stops) since the mark whose source names Mover. */
-	static int32 DoorStartsOf(const AActor* Mover, EGameSound Slot = EGameSound::Door)
+	/** Motion requests (not stops) since the mark whose source names Mover. */
+	static int32 DoorStartsOf(const AActor* Mover, EGameSound Slot = EGameSound::Motion)
 	{
 		int32 N = 0;
 		for (const FGameSoundRequest& R : SinceOf(Slot))
@@ -647,8 +648,8 @@ namespace AudioDebug
 		return N;
 	}
 
-	/** Door (or motion) stops since the mark whose source names Mover. */
-	static TArray<FGameSoundRequest> DoorStopsOf(const AActor* Mover, EGameSound Slot = EGameSound::Door)
+	/** Motion stops since the mark whose source names Mover. */
+	static TArray<FGameSoundRequest> DoorStopsOf(const AActor* Mover, EGameSound Slot = EGameSound::Motion)
 	{
 		TArray<FGameSoundRequest> Out;
 		for (const FGameSoundRequest& R : SinceOf(Slot, true))
@@ -661,12 +662,24 @@ namespace AudioDebug
 		return Out;
 	}
 
-	/** An instant door: asked for once since the mark, and never held or stopped. */
-	static void CheckInstantDoor(const FString& Label, const AActor* Door, int32 WantStarts)
+	/** Brief 46: a door's motion as AddTimedMotion reads it: its share of the travel opening (bOpening) or closing. */
+	static float DoorProgress(const ADoorDevice* D, bool bOpening)
 	{
-		Check(Door && DoorStartsOf(Door) == WantStarts && DoorStopsOf(Door).Num() == 0 && !Audio()->GetMotionSound(Door) && DoorStartsOf(Door, EGameSound::Motion) == 0,
-			FString::Printf(TEXT("%s: %s moves at once: the door's short sound asked for %d time(s), never held, never stopped, no motion's sound (starts %d, stops %d, motion %d)"), *Label,
-				*GetNameSafe(Door), WantStarts, DoorStartsOf(Door), DoorStopsOf(Door).Num(), DoorStartsOf(Door, EGameSound::Motion)));
+		if (!D)
+		{
+			return 0.f;
+		}
+		if (bOpening)
+		{
+			return D->GetMotionDirection() > 0 || D->IsFullyOpen() ? FMath::Max(D->GetOpenFraction(), 0.01f) : 0.f;
+		}
+		return D->GetMotionDirection() < 0 || !D->IsOpen() ? FMath::Max(1.f - D->GetOpenFraction(), 0.01f) : 0.f;
+	}
+
+	/** Brief 46: a door's motion ended: fully open (bOpening) or shut. */
+	static bool DoorEnded(const ADoorDevice* D, bool bOpening)
+	{
+		return D && !D->IsMoving() && (bOpening ? D->IsFullyOpen() : !D->IsOpen());
 	}
 
 	/** Brief 45: Component plays a sound wave that loops (one sound for as long as it is held, never asked for again). */
@@ -685,8 +698,8 @@ namespace AudioDebug
 	/**
 	 * A timed motion of Mover (Progress 0 to 1, Ended at its end, about Seconds long): Brief 45, the motion's sound (its own
 	 * slot, a file made to loop) asked for once at the start at the pitch of its kind, one looping sound, the same one still
-	 * playing at half the motion with no second request, and stopped within the fade after the end; the door's short sound
-	 * never asked for.
+	 * playing at half the motion with no second request, and stopped within the fade after the end (Brief 46: every door's
+	 * motion too; the door's short sound is gone).
 	 */
 	static void AddTimedMotion(TArray<FStep>& S, const FString& Label, TFunction<AActor*()> Mover, TFunction<float()> Progress, TFunction<bool()> Ended, float Seconds)
 	{
@@ -702,10 +715,10 @@ namespace AudioDebug
 			{
 				bPitch |= Mover() && R.Source.StartsWith(Mover()->GetName() + TEXT(" ")) && FMath::IsNearlyEqual(R.Pitch, Pitch, 1.e-3f) && R.bHadSound;
 			}
-			Check(DoorStartsOf(Mover(), EGameSound::Motion) == 1 && bPitch && DoorStartsOf(Mover()) == 0 && Audio()->IsMotionSoundPlaying(Mover()) && IsLooping(Component)
+			Check(DoorStartsOf(Mover(), EGameSound::Motion) == 1 && bPitch && Audio()->IsMotionSoundPlaying(Mover()) && IsLooping(Component)
 				&& Audio()->GetMotionPlays(Mover()) == 1,
-				FString::Printf(TEXT("%s: the motion's sound asked for once at the start at pitch %.2f, one looping sound, playing (%s; played %d; door sound %d): %s"), *Label, Pitch,
-					*DescribeLoop(Component), Audio()->GetMotionPlays(Mover()), DoorStartsOf(Mover()), *Describe(List)));
+				FString::Printf(TEXT("%s: the motion's sound asked for once at the start at pitch %.2f, one looping sound, playing (%s; played %d): %s"), *Label, Pitch,
+					*DescribeLoop(Component), Audio()->GetMotionPlays(Mover()), *Describe(List)));
 			return 0.f;
 		}));
 		S.Add(WaitFor(Label + TEXT(": half the motion"), [Progress]() { return Progress() >= 0.5f; }, Seconds + 5.f, [Label, Mover]()
@@ -734,7 +747,7 @@ namespace AudioDebug
 			const double Held = Stops.Num() > 0 && Started >= 0.0 ? Stops[0].RealSeconds - Started : -1.0;
 			const UAudioComponent* First = GRun.FirstMotionSound.Get();
 			Check(!Audio()->IsMotionSoundPlaying(Mover()) && (!First || !First->IsPlaying()) && Stops.Num() == 1 && Stops[0].Source.Contains(TEXT("motion ends"))
-				&& DoorStartsOf(Mover(), EGameSound::Motion) == 1 && Audio()->GetMotionPlays(Mover()) == 1 && DoorStartsOf(Mover()) == 0 && FMath::Abs(Held - Seconds) <= 0.25,
+				&& DoorStartsOf(Mover(), EGameSound::Motion) == 1 && Audio()->GetMotionPlays(Mover()) == 1 && FMath::Abs(Held - Seconds) <= 0.25,
 				FString::Printf(TEXT("%s: held from the motion's start to its end %.2f s (the motion: %.1f s), played once; %.2f s after the end (fade %.2f s) the sound has stopped: %s"),
 					*Label, Held, Seconds, Real() - GRun.MotionEndReal, Fade, *Describe(Stops)));
 			return 0.f;
@@ -1070,19 +1083,23 @@ namespace AudioDebug
 		S.Add(Do(TEXT("doors: the spawned door closes"), []()
 		{
 			ADoorDevice* Door = DoorOf(GRun.Terminals.FindRef(EPaymentKind::Door).Get());
+			Check(Door && Door->IsFullyOpen() && !Door->IsMoving(), TEXT("doors: the spawned door is fully open before it closes"));
 			MarkRecord();
 			if (Door)
 			{
 				Door->PowerOff();
 			}
-			return 0.2f;
+			return 0.f;
 		}));
+		// Brief 46: the door moves over DoorMoveSeconds (before: it closed at once, with the door's short sound).
+		AddTimedMotion(S, TEXT("doors: the spawned door closing"), []() -> AActor* { return DoorOf(GRun.Terminals.FindRef(EPaymentKind::Door).Get()); },
+			[]() { return DoorProgress(DoorOf(GRun.Terminals.FindRef(EPaymentKind::Door).Get()), false); },
+			[]() { return DoorEnded(DoorOf(GRun.Terminals.FindRef(EPaymentKind::Door).Get()), false); }, ADoorDevice::GetMoveSeconds());
 		S.Add(Do(TEXT("doors: the spawned door's close"), []()
 		{
 			ADoorDevice* Door = DoorOf(GRun.Terminals.FindRef(EPaymentKind::Door).Get());
 			Check(Door && !Door->IsOpen(), TEXT("doors: the spawned door is closed"));
 			CheckDoorSounds(TEXT("doors: a door that starts to close"), { { Door, false } });
-			CheckInstantDoor(TEXT("doors: the spawned door"), Door, 1);
 			// The area's first gate: its terminal is the nearest one that powers a door the generator placed.
 			APowerTerminal* Best = nullptr;
 			double BestDist = TNumericLimits<double>::Max();
@@ -1122,16 +1139,25 @@ namespace AudioDebug
 		{
 			CheckTerminalSound(TEXT("doors: the gate's terminal"), GRun.GateTerminal.Get());
 			CheckDoorSounds(TEXT("doors: the gate's door starts to open"), { { GRun.GateDoor.Get(), true } });
+			return 0.f;
+		}));
+		// Brief 46: the gate's door rises over DoorMoveSeconds (before: it opened at once, with the door's short sound).
+		AddTimedMotion(S, TEXT("doors: the gate's door opening"), []() -> AActor* { return GRun.GateDoor.Get(); },
+			[]() { return DoorProgress(GRun.GateDoor.Get(), true); }, []() { return DoorEnded(GRun.GateDoor.Get(), true); }, ADoorDevice::GetMoveSeconds());
+		S.Add(Do(TEXT("doors: the gate's door closes"), []()
+		{
 			// Out of the gate's doorway first, so that the door closes when its power goes.
 			Teleport(GRun.StartLocation, false);
 			MarkRecord();
 			GRun.GateDoor->PowerOff();
 			return 0.f;
 		}));
-		S.Add(WaitFor(TEXT("doors: the gate closes"), []() { return GRun.GateDoor.IsValid() && !GRun.GateDoor->IsOpen(); }, 5.f, []()
+		AddTimedMotion(S, TEXT("doors: the gate's door closing"), []() -> AActor* { return GRun.GateDoor.Get(); },
+			[]() { return DoorProgress(GRun.GateDoor.Get(), false); }, []() { return DoorEnded(GRun.GateDoor.Get(), false); }, ADoorDevice::GetMoveSeconds());
+		S.Add(Do(TEXT("doors: the gate is shut"), []()
 		{
+			Check(GRun.GateDoor.IsValid() && !GRun.GateDoor->IsOpen(), TEXT("doors: the gate's door is shut"));
 			CheckDoorSounds(TEXT("doors: the gate's door starts to close"), { { GRun.GateDoor.Get(), false } });
-			CheckInstantDoor(TEXT("doors: the gate's door"), GRun.GateDoor.Get(), 1);
 			return 0.f;
 		}));
 
@@ -1154,8 +1180,8 @@ namespace AudioDebug
 			const TArray<FGameSoundRequest> List = SinceOf(EGameSound::Motion);
 			Check(List.Num() == 1 && List[0].Source.EndsWith(TEXT("opens")) && Near(List[0].Location, P->GetActorLocation())
 				&& FMath::IsNearlyEqual(List[0].Pitch, UTheLastShiftSettings::Get()->Audio.GetHatchPitch()) && Audio()->IsMotionSoundPlaying(P)
-				&& IsLooping(GRun.FirstMotionSound.Get()) && DoorStartsOf(P) == 0,
-				FString::Printf(TEXT("motion: the panel starts to open: the motion's sound once, at the panel, at the hatches' pitch, one looping sound (%s), no door sound: %s"),
+				&& IsLooping(GRun.FirstMotionSound.Get()),
+				FString::Printf(TEXT("motion: the panel starts to open: the motion's sound once, at the panel, at the hatches' pitch, one looping sound (%s): %s"),
 					*DescribeLoop(GRun.FirstMotionSound.Get()), *Describe(List)));
 			P->SetOpenFraction(0.6f);
 			Check(DoorStartsOf(P, EGameSound::Motion) == 1 && Audio()->GetMotionPlays(P) == 1, TEXT("motion: going on opening asks for nothing more"));
@@ -1171,10 +1197,10 @@ namespace AudioDebug
 			Check(Stops.Num() == 1 && Stops[0].Source.Contains(TEXT("motion reverses")) && List.Num() == 2 && List[1].Source.EndsWith(TEXT("closes"))
 				&& Audio()->IsMotionSoundPlaying(P) && GRun.SecondMotionSound.Get() != GRun.FirstMotionSound.Get() && IsLooping(GRun.SecondMotionSound.Get()),
 				FString::Printf(TEXT("motion: a reversal before the end fades the first sound out and starts the next: %s"), *Describe(Since())));
-			// Past the door's short sound's length at the hatches' pitch (where the sound before this brief was played again).
-			const USoundWave* Wave = Cast<USoundWave>(UTheLastShiftSettings::Get()->Audio.GetSound(EGameSound::Door).LoadSynchronous());
+			// Past the length of a short sound (1 s) at the hatches' pitch: Brief 46, the door's short sound whose length this
+			// waited for before is gone with its slot; a fixed second stands in for it.
 			GRun.MotionStartReal = Real();
-			return FMath::Max((Wave ? Wave->Duration : 1.f) / UTheLastShiftSettings::Get()->Audio.GetHatchPitch() + 0.4f,
+			return FMath::Max(1.f / UTheLastShiftSettings::Get()->Audio.GetHatchPitch() + 0.4f,
 				UTheLastShiftSettings::Get()->Audio.GetMotionFadeOutSeconds() + 0.15f);
 		}));
 		S.Add(Do(TEXT("motion: past the short sound's length into the closing"), []()
@@ -1183,7 +1209,7 @@ namespace AudioDebug
 			const UAudioComponent* First = GRun.FirstMotionSound.Get();
 			Check(!First || !First->IsPlaying(), FString::Printf(TEXT("motion: the first sound has faded out (fade %.2f s)"), UTheLastShiftSettings::Get()->Audio.GetMotionFadeOutSeconds()));
 			Check(Audio()->IsMotionSoundPlaying(P) && Audio()->GetMotionSound(P) == GRun.SecondMotionSound.Get() && Audio()->GetMotionPlays(P) == 1
-				&& DoorStartsOf(P, EGameSound::Motion) == 2 && DoorStartsOf(P) == 0,
+				&& DoorStartsOf(P, EGameSound::Motion) == 2,
 				FString::Printf(TEXT("motion: %.2f s into the closing the same looping sound plays on, played once, no request since the reversal (%s)"),
 					Real() - GRun.MotionStartReal, *DescribeLoop(GRun.SecondMotionSound.Get())));
 			P->SetOpenFraction(0.f);
@@ -1238,20 +1264,27 @@ namespace AudioDebug
 		S.Add(Do(TEXT("owner: the commands"), []()
 		{
 			MarkRecord();
-			GEngine->Exec(W(), TEXT("tls.Audio.Set Door Volume 0.5"));
+			// Brief 46: the Door slot is gone (no slot of that name); the commands are checked on the terminal's slot instead.
+			bool bNoDoorSlot = true;
+			for (int32 I = 0; I < static_cast<int32>(EGameSound::Count); ++I)
+			{
+				bNoDoorSlot &= FCString::Stricmp(LexToString(static_cast<EGameSound>(I)), TEXT("Door")) != 0;
+			}
+			Check(bNoDoorSlot, TEXT("owner: no Door slot among the audio's slots (the door's short sound is gone)"));
+			GEngine->Exec(W(), TEXT("tls.Audio.Set Terminal Volume 0.5"));
 			GEngine->Exec(W(), TEXT("tls.Audio.Set HatchPitch 0.7"));
 			GEngine->Exec(W(), TEXT("tls.Audio.Set FalloffCm 1500"));
 			const FGameAudio& A = UTheLastShiftSettings::Get()->Audio;
-			Check(FMath::IsNearlyEqual(A.Door.GetVolume(), 0.5f) && FMath::IsNearlyEqual(A.GetHatchPitch(), 0.7f) && FMath::IsNearlyEqual(A.GetWorldFalloffCm(), 1500.f),
-				FString::Printf(TEXT("owner: tls.Audio.Set sets the door's volume %.2f, the hatches' pitch %.2f and the falloff %.0f cm for the session"), A.Door.GetVolume(),
+			Check(FMath::IsNearlyEqual(A.Terminal.GetVolume(), 0.5f) && FMath::IsNearlyEqual(A.GetHatchPitch(), 0.7f) && FMath::IsNearlyEqual(A.GetWorldFalloffCm(), 1500.f),
+				FString::Printf(TEXT("owner: tls.Audio.Set sets the terminal's volume %.2f, the hatches' pitch %.2f and the falloff %.0f cm for the session"), A.Terminal.GetVolume(),
 					A.GetHatchPitch(), A.GetWorldFalloffCm()));
-			GEngine->Exec(W(), TEXT("tls.Audio.Play Door"));
+			GEngine->Exec(W(), TEXT("tls.Audio.Play Terminal"));
 			GEngine->Exec(W(), TEXT("tls.Audio.Report"));
 			const TArray<FGameSoundRequest> List = Since();
-			Check(List.Num() == 1 && List[0].Sound == EGameSound::Door && FMath::IsNearlyEqual(List[0].Volume, 0.5f) && List[0].bHadSound,
-				FString::Printf(TEXT("owner: tls.Audio.Play Door plays the door's slot at its session volume; tls.Audio.Report asks for nothing: %s"), *Describe(List)));
+			Check(List.Num() == 1 && List[0].Sound == EGameSound::Terminal && FMath::IsNearlyEqual(List[0].Volume, 0.5f) && List[0].bHadSound,
+				FString::Printf(TEXT("owner: tls.Audio.Play Terminal plays the terminal's slot at its session volume; tls.Audio.Report asks for nothing: %s"), *Describe(List)));
 			GEngine->Exec(W(), TEXT("tls.Audio.Set All Restore"));
-			Check(FMath::IsNearlyEqual(UTheLastShiftSettings::Get()->Audio.Door.GetVolume(), 1.f) || !GSavedAudio.IsSet(), TEXT("owner: tls.Audio.Set All Restore puts the values back"));
+			Check(FMath::IsNearlyEqual(UTheLastShiftSettings::Get()->Audio.Terminal.GetVolume(), 1.f) || !GSavedAudio.IsSet(), TEXT("owner: tls.Audio.Set All Restore puts the values back"));
 			return 0.f;
 		}));
 
@@ -1551,7 +1584,9 @@ namespace AudioDebug
 				const double At = FPlatformTime::Seconds() - GStatic.StartReal;
 				const TArray<FGameSoundRequest> Stops = SinceOf(EGameSound::Interruption, true);
 				const USoundBase* Sound = UTheLastShiftSettings::Get()->Audio.GetSound(EGameSound::Interruption).LoadSynchronous();
-				const float Length = Sound ? Sound->GetDuration() : 0.f;
+				// Brief 46: the sound wave's own length (USoundBase::GetDuration gives 10000 s for a looping wave).
+				const USoundWave* Wave = Cast<USoundWave>(Sound);
+				const float Length = Wave ? Wave->Duration : 0.f;
 				Check(!Audio()->IsInterruptionHeld() && !Audio()->IsInterruptionPlaying() && Stops.Num() == 2 && Stops[1].bStop && SinceOf(EGameSound::Interruption).Num() == 1,
 					FString::Printf(TEXT("%s: %.2f s in, past StaticSeconds + StaticFadeSeconds (%.2f) by 0.3 s, the noise has stopped; asked for once: %s"), *Label, At, GStatic.Hold + GStatic.Fade,
 						*Describe(Stops)));
@@ -1688,13 +1723,15 @@ namespace AudioDebug
 		{
 			MarkRecord();
 			Check(GRun.GateTerminal->TryActivate(Pawn()), TEXT("home: the free terminal works"));
-			return 0.2f;
+			return 0.f;
 		}));
+		// Brief 46: the print room's door rises over DoorMoveSeconds (before: its panel was hidden at once, the door's short sound).
+		AddTimedMotion(S, TEXT("home: the print room's door opening"), []() -> AActor* { return DoorOf(GRun.GateTerminal.Get()); },
+			[]() { return DoorProgress(DoorOf(GRun.GateTerminal.Get()), true); }, []() { return DoorEnded(DoorOf(GRun.GateTerminal.Get()), true); }, ADoorDevice::GetMoveSeconds());
 		S.Add(Do(TEXT("home: its sounds"), []()
 		{
 			CheckTerminalSound(TEXT("home: a prologue terminal's free activation"), GRun.GateTerminal.Get());
 			CheckDoorSounds(TEXT("home: a prologue door starts to open"), { { DoorOf(GRun.GateTerminal.Get()), true } });
-			CheckInstantDoor(TEXT("home: the print room's door"), DoorOf(GRun.GateTerminal.Get()), 1);
 			const APrologueLineTrigger* Trigger = nullptr;
 			for (const APrologueLineTrigger* T : All<APrologueLineTrigger>())
 			{
@@ -1717,8 +1754,11 @@ namespace AudioDebug
 		{
 			MarkRecord();
 			Check(First<APrologueBriefingTerminal>()->TryActivate(Pawn()), TEXT("home: the hangar's terminal works"));
-			return 0.2f;
+			return 0.f;
 		}));
+		// Brief 46: the entry door rises open over DoorMoveSeconds (before: its panel was hidden at once).
+		AddTimedMotion(S, TEXT("home: the entry door opening"), []() -> AActor* { return First<APrologueEntryDoor>(); },
+			[]() { return DoorProgress(First<APrologueEntryDoor>(), true); }, []() { return DoorEnded(First<APrologueEntryDoor>(), true); }, ADoorDevice::GetMoveSeconds());
 		S.Add(Do(TEXT("home: its sounds; into the hangar"), []()
 		{
 			APrologueBriefingTerminal* B = First<APrologueBriefingTerminal>();
@@ -1768,7 +1808,6 @@ namespace AudioDebug
 			}
 			Check(Panels.Num() == 2 && Want.Num() == 3, FString::Printf(TEXT("home: the two hatches (%d sliding panels) both sounded"), Panels.Num()));
 			CheckDoorSounds(TEXT("home: the entry door starts to close behind the player, then the hangar's hatch and the ship's hatch open"), Want, EGameSound::Motion);
-			CheckDoorSounds(TEXT("home: no door's short sound for the timed motions"), {});
 			Teleport(D->ShipExit->GetActorLocation());
 			MarkRecord();
 			return 0.f;
@@ -1796,9 +1835,15 @@ namespace AudioDebug
 		S.Add(WaitFor(TEXT("arrival: the exit door opens"), []() { const APrologueHatch* H = First<APrologueHatch>(); return H && H->GetHatchState() == EPrologueHatchState::DoorOpened; }, 40.f, []()
 		{
 			const APrologueHatch* H = First<APrologueHatch>();
-			CheckDoorSounds(TEXT("arrival: the hatch starts to close (the motion's sound)"), { { H, false } }, EGameSound::Motion);
-			CheckDoorSounds(TEXT("arrival: the exit door starts to open (the door's short sound)"), { { H->ExitDoor.Get(), true } });
-			CheckInstantDoor(TEXT("arrival: the exit door"), H->ExitDoor.Get(), 1);
+			// Brief 46: the exit door's opening is a motion too (before: the door's short sound).
+			CheckDoorSounds(TEXT("arrival: the hatch starts to close, then the exit door starts to open (the motion's sound)"), { { H, false }, { H->ExitDoor.Get(), true } });
+			return 0.f;
+		}));
+		AddTimedMotion(S, TEXT("arrival: the exit door opening"), []() -> AActor* { return First<APrologueHatch>()->ExitDoor.Get(); },
+			[]() { return DoorProgress(First<APrologueHatch>()->ExitDoor.Get(), true); }, []() { return DoorEnded(First<APrologueHatch>()->ExitDoor.Get(), true); },
+			ADoorDevice::GetMoveSeconds());
+		S.Add(Do(TEXT("arrival: travel on"), []()
+		{
 			MarkRecord();
 			Check(Run()->TravelToNextArea(), TEXT("arrival: the travel to area 1 starts"));
 			return 0.f;

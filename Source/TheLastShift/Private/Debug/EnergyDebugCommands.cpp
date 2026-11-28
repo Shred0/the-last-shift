@@ -1036,7 +1036,8 @@ namespace EnergyDebug
 			Check(!D->IsPowered() && D->IsOpen() && D->IsClosePending() && D->IsDoorwayOccupied(),
 				FString::Printf(TEXT("1.5 s after the time ran out, a pawn in the doorway keeps it open: %s occupied=%d"), *DeviceLine(D), D->IsDoorwayOccupied() ? 1 : 0));
 			TeleportTo(TerminalFor<ADoorDevice>());
-			return 0.3f;
+			// Brief 46: the door closes over DoorMoveSeconds once the doorway is clear (before: 0.3 s, it closed at once).
+			return 0.3f + ADoorDevice::GetMoveSeconds();
 		}));
 		S.Add(Do(TEXT("check close"), []()
 		{
@@ -1170,10 +1171,12 @@ namespace EnergyDebug
 		{
 			Check(TS()->GetLastExitReason() == EStopExitReason::Jumped, FString::Printf(TEXT("exit %s"), LexToString(TS()->GetLastExitReason())));
 			const ALightGroupDevice* L = LightGroup();
-			Check(!Door()->IsPowered() && !Door()->IsOpen() && (!L || (!L->IsPowered() && L->GetLitCount() == 0)),
-				FString::Printf(TEXT("contact with Jump switches the devices off: %s; %s"), *DeviceLine(Door()), L ? *DeviceLine(L) : TEXT("no light group")));
-			return 0.3f;
+			// Brief 46: the door starts to close on the return to Normal time and is shut DoorMoveSeconds later.
+			Check(!Door()->IsPowered() && (!Door()->IsOpen() || Door()->GetMotionDirection() < 0) && (!L || (!L->IsPowered() && L->GetLitCount() == 0)),
+				FString::Printf(TEXT("contact with Jump switches the devices off (the door closing): %s; %s"), *DeviceLine(Door()), L ? *DeviceLine(L) : TEXT("no light group")));
+			return 0.f;
 		}));
+		S.Add(WaitFor(TEXT("check jump: the door shut"), []() { return !Door()->IsOpen(); }, ADoorDevice::GetMoveSeconds() + 1.f, []() { return 0.3f; }));
 		PayBoth(S);
 		ContactStop(S, EEntityContactResponse::Rewind);
 		S.Add(Do(TEXT("check rewind"), []()

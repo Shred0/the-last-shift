@@ -864,11 +864,9 @@ enum class EGameSound : uint8
 	Line,
 	/** A terminal accepts what the player does at it (a payment, a free activation, reading a log again). From the terminal. */
 	Terminal,
-	/** A door that opens or closes at once starts to open or to close: its short sound, once. From the door. */
-	Door,
 	/**
-	 * Brief 45: a door or hatch that moves over time (a timed motion): one sound made to loop, from the motion's start to its
-	 * end; the hatches play it at the hatches' pitch. From the mover.
+	 * Brief 45: a door or hatch that moves over time (a timed motion; since Brief 46 every door, gate and panel): one sound
+	 * made to loop, from the motion's start to its end; the hatches play it at the hatches' pitch. From the mover.
 	 */
 	Motion,
 	/** A residue's hold completes and it is collected. */
@@ -893,7 +891,6 @@ inline const TCHAR* LexToString(EGameSound Sound)
 	case EGameSound::Slip: return TEXT("Slip");
 	case EGameSound::Line: return TEXT("Line");
 	case EGameSound::Terminal: return TEXT("Terminal");
-	case EGameSound::Door: return TEXT("Door");
 	case EGameSound::Motion: return TEXT("Motion");
 	case EGameSound::Energy: return TEXT("Energy");
 	case EGameSound::Interruption: return TEXT("Interruption");
@@ -950,13 +947,9 @@ struct THELASTSHIFT_API FGameAudio
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
 	FGameSoundSlot Terminal;
 
-	/** The door's short sound, for the doors that open or close at once (ADoorDevice). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
-	FGameSoundSlot Door;
-
 	/**
-	 * Brief 45: the sound of a timed motion (home's entry door closing, the hangars' hatches, the ship's hatch, a sliding
-	 * panel): a file of its own made to loop (steady, periodic over its length), played once, looping, for as long as the
+	 * Brief 45: the sound of a timed motion (every door, gate and sliding panel opening or closing, home's entry door
+	 * closing behind the player, the hangars' hatches, the ship's hatch): a file of its own made to loop (steady, periodic over its length), played once, looping, for as long as the
 	 * motion lasts, faded in over MotionFadeInSeconds and out over MotionFadeOutSeconds; never asked for again while it lasts.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
@@ -983,7 +976,7 @@ struct THELASTSHIFT_API FGameAudio
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (AllowedClasses = "/Script/Engine.SoundBase"))
 	TSoftObjectPtr<USoundBase> MenuMusic;
 
-	/** Pitch factor of the door and motion sounds for the hatches (the two hangars' hatches, the ship's hatch, sliding panels). */
+	/** Pitch factor of the motion's sound for the hatches (the two hangars' hatches, the ship's hatch, sliding panels). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.1", ClampMax = "2.0"))
 	float HatchPitch = 0.6f;
 
@@ -1379,6 +1372,17 @@ public:
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.0", ClampMax = "30.0", Units = "s"))
 	float ExitDoorDelaySeconds = 2.f;
+
+	/**
+	 * Brief 46: the run's seconds a door (ADoorDevice: the areas' gates, the hand-built maps' doors) takes to rise open or
+	 * to come down shut, the whole travel; a motion from in between takes the share of it its travel left. Still while
+	 * Stopped and behind the pause menu. A door's powered time counts from the start of its opening.
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Doors", meta = (ClampMin = "0.1", ClampMax = "10.0", Units = "s"))
+	float DoorMoveSeconds = 0.8f;
+
+	/** DoorMoveSeconds, clamped. */
+	float GetDoorMoveSeconds() const { return FMath::Clamp(DoorMoveSeconds, 0.1f, 10.f); }
 
 	/** Normal-time seconds the home hangar's entry door takes to close behind the player once wholly inside the hangar. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Prologue", meta = (ClampMin = "0.5", ClampMax = "30.0", Units = "s"))

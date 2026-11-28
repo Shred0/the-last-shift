@@ -12,9 +12,9 @@
 //
 // And that the file is as long as it must be (the motion's at least 8 s, so that the longest motion, 4 s, never reaches the
 // seam at the hatches' pitch; the interruption's at least 4 s, longer than StaticSeconds + StaticFadeSeconds), mono, 48 kHz,
-// and that its sound wave loops. One line per file with its numbers. The door's short sound (the Door slot, which the timed
-// motions looped before) and the WAV files given (default: the interruption's placeholder before it was made to loop, from
-// the sources' Audio folder when it is on disk) are measured too, as notes, not judged. The same measure runs in
+// and that its sound wave loops. One line per file with its numbers. The WAV files given (default: the interruption's
+// placeholder before it was made to loop, from the sources' Audio folder when it is on disk) are measured too, as notes,
+// not judged. The same measure runs in
 // make_loops.py on the WAV files it writes. Editor builds only (the imported samples are editor data).
 
 #include "Audio.h"
@@ -208,13 +208,8 @@ namespace AudioLoopCheck
 		CheckSlot(EGameSound::Interruption, FMath::Max(4.f, Static), true);
 		CheckSlot(EGameSound::ChamberHum, 12.f, false);
 
-		// Notes: the door's short sound (looped by the timed motions before), and the files given or the old interruption's.
+		// Notes: the files given or the old interruption's (the door's short sound went with its slot).
 		FMeasure M;
-		const USoundWave* Door = Cast<USoundWave>(Settings->Audio.GetSound(EGameSound::Door).LoadSynchronous());
-		if (MeasureWave(Door, M))
-		{
-			Note(FString::Printf(TEXT("Door (the short sound, %s): %s"), *GetNameSafe(Door), *Describe(M)));
-		}
 		TArray<FString> Files = Args;
 		if (Files.Num() == 0)
 		{

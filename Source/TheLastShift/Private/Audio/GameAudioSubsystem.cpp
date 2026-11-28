@@ -40,7 +40,6 @@ const FGameSoundSlot* FGameAudio::FindEffect(EGameSound Sound) const
 	case EGameSound::Slip: return &Slip;
 	case EGameSound::Line: return &Line;
 	case EGameSound::Terminal: return &Terminal;
-	case EGameSound::Door: return &Door;
 	case EGameSound::Motion: return &Motion;
 	case EGameSound::Energy: return &Energy;
 	case EGameSound::Interruption: return &Interruption;
@@ -474,13 +473,7 @@ void UGameAudioSubsystem::HandleMotionStarted(AActor* Mover, bool bOpening, bool
 	const FGameAudio& Audio = UTheLastShiftSettings::Get()->Audio;
 	const float Pitch = bDoor ? 1.f : Audio.GetHatchPitch();
 	const FString Source = FString::Printf(TEXT("%s %s"), *Mover->GetName(), bOpening ? TEXT("opens") : TEXT("closes"));
-	if (!bTimed)
-	{
-		// At once: the door's short sound, played once, as any world sound.
-		PlaySoundAt(EGameSound::Door, Mover->GetActorLocation(), Pitch, Source);
-		return;
-	}
-	// Over time: the motion's sound, a file made to loop, asked for once and played once, looping, from now to the end of
+	// Every motion takes time (Brief 46: every door too; bTimed is always true): the motion's sound, a file made to loop, asked for once and played once, looping, from now to the end of
 	// the motion; faded in over MotionFadeInSeconds, never asked for again while the motion lasts.
 	FGameSoundRequest& Request = AddRequest(EGameSound::Motion, Source);
 	const FVector Location = Mover->GetActorLocation();

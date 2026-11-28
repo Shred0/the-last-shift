@@ -537,6 +537,8 @@ namespace SeamDebug
 		if (ADoorDevice* Door = Cast<ADoorDevice>(A))
 		{
 			if (bOpen) { Door->PowerOn(); } else { Door->PowerOff(); }
+			// Brief 46: a door moves over DoorMoveSeconds; this check sees it at its end, at once (test only).
+			Door->FinishMotionAtOnce();
 		}
 		else if (APrologueSlidingPanel* Panel = Cast<APrologueSlidingPanel>(A))
 		{

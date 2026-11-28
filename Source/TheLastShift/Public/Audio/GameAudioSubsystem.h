@@ -74,8 +74,8 @@ struct THELASTSHIFT_API FGameSoundRequest
  *   stopped time, exactly one sound: Slip when it jumps (Jumped, RewoundAndJumped, or Resumed with the entity's graze:
  *   AEntity::RecordStopExit then WasLastExitGraze, as UHomeStateSubsystem does), TimeResume otherwise (a Resume, a
  *   rewind without a jump; in a map with no entity a Resume is TimeResume). The time state: every Stop (TimeStop).
- * - Doors, hatches and terminals, from where they stand, fading over WorldFalloffCm: ADoorDevice::OnMotionStarted at once
- *   (Door, pitch 1), a timed motion (Brief 45: Motion, pitch 1 for an ADoorDevice, HatchPitch for APrologueSlidingPanel and
+ * - Doors, hatches and terminals, from where they stand, fading over WorldFalloffCm: every motion of a door or
+ *   hatch is a timed motion (Brief 45, and since Brief 46 every ADoorDevice too: Motion, pitch 1 for an ADoorDevice, HatchPitch for APrologueSlidingPanel and
  *   APrologueHatch: one looping sound asked for once at the motion's start, faded in over MotionFadeInSeconds, never asked
  *   for again while the motion lasts, faded out over MotionFadeOutSeconds at OnMotionEnded or when the motion reverses),
  *   APowerTerminal::OnAnyActivated and ALogTerminal::OnRead (Terminal).
