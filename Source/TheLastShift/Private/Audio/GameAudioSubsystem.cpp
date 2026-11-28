@@ -41,6 +41,7 @@ const FGameSoundSlot* FGameAudio::FindEffect(EGameSound Sound) const
 	case EGameSound::Line: return &Line;
 	case EGameSound::Terminal: return &Terminal;
 	case EGameSound::Door: return &Door;
+	case EGameSound::Motion: return &Motion;
 	case EGameSound::Energy: return &Energy;
 	case EGameSound::Interruption: return &Interruption;
 	case EGameSound::ChamberHum: return &ChamberHum;
@@ -464,27 +465,29 @@ void UGameAudioSubsystem::HandleMotionStarted(AActor* Mover, bool bOpening, bool
 	{
 		return;
 	}
-	// A motion that reverses before it ends: its sound stops, the next one starts.
+	// A motion that reverses before it ends: its sound fades out over MotionFadeOutSeconds, the next one starts.
 	if (HeldMovers.Contains(Mover))
 	{
-		ReleaseMotionSound(Mover, 0.f, TEXT("motion reverses"));
+		ReleaseMotionSound(Mover, UTheLastShiftSettings::Get()->Audio.GetMotionFadeOutSeconds(), TEXT("motion reverses"));
 	}
 	const bool bDoor = Mover->IsA<ADoorDevice>();
-	const float Pitch = bDoor ? 1.f : UTheLastShiftSettings::Get()->Audio.GetHatchPitch();
+	const FGameAudio& Audio = UTheLastShiftSettings::Get()->Audio;
+	const float Pitch = bDoor ? 1.f : Audio.GetHatchPitch();
 	const FString Source = FString::Printf(TEXT("%s %s"), *Mover->GetName(), bOpening ? TEXT("opens") : TEXT("closes"));
 	if (!bTimed)
 	{
-		// At once: played once, as any world sound.
+		// At once: the door's short sound, played once, as any world sound.
 		PlaySoundAt(EGameSound::Door, Mover->GetActorLocation(), Pitch, Source);
 		return;
 	}
-	// Over time: held from now to the end of the motion, played again each time it finishes before that.
-	FGameSoundRequest& Request = AddRequest(EGameSound::Door, Source);
+	// Over time: the motion's sound, a file made to loop, asked for once and played once, looping, from now to the end of
+	// the motion; faded in over MotionFadeInSeconds, never asked for again while the motion lasts.
+	FGameSoundRequest& Request = AddRequest(EGameSound::Motion, Source);
 	const FVector Location = Mover->GetActorLocation();
 	Request.bInWorld = true;
 	Request.Location = Location;
 	Request.Pitch = Pitch;
-	UAudioComponent* Component = CreateSoundComponent(EGameSound::Door, &Location, Pitch, Request);
+	UAudioComponent* Component = CreateSoundComponent(EGameSound::Motion, &Location, Pitch, Request);
 	HeldMovers.Add(Mover);
 	MotionPlays.Add(Mover, Component ? 1 : 0);
 	MotionSounds.Add(Mover, Component);
@@ -492,7 +495,15 @@ void UGameAudioSubsystem::HandleMotionStarted(AActor* Mover, bool bOpening, bool
 	{
 		HeldComponents.Add(Component);
 		Component->OnAudioFinishedNative.AddUObject(this, &UGameAudioSubsystem::HandleMotionSoundFinished);
-		Component->Play();
+		const float FadeIn = Audio.GetMotionFadeInSeconds();
+		if (FadeIn > 0.f)
+		{
+			Component->FadeIn(FadeIn, 1.f);
+		}
+		else
+		{
+			Component->Play();
+		}
 	}
 }
 
@@ -510,10 +521,10 @@ void UGameAudioSubsystem::HandleMotionSoundFinished(UAudioComponent* Component)
 	{
 		if (Pair.Value.Get() == Component && HeldMovers.Contains(Pair.Key))
 		{
-			// Shorter than the motion: again until it ends.
-			MotionPlays.FindOrAdd(Pair.Key) += 1;
-			Component->Play();
-			return;
+			// The motion's sound loops: it is never played again. It ending before its motion is a sound wave that does not
+			// loop (the slot's file must be imported with Looping ticked).
+			UE_LOG(LogGameAudio, Warning, TEXT("Audio: the motion's sound of %s ended before its motion: its sound wave does not loop."), *GetNameSafe(Pair.Key.Get()));
+			break;
 		}
 	}
 	HeldComponents.Remove(Component);
@@ -523,7 +534,7 @@ void UGameAudioSubsystem::ReleaseMotionSound(AActor* Mover, float FadeSeconds, c
 {
 	HeldMovers.Remove(Mover);
 	UAudioComponent* Component = MotionSounds.FindRef(Mover).Get();
-	FGameSoundRequest& Request = AddRequest(EGameSound::Door, FString::Printf(TEXT("%s %s (played %d)"), *GetNameSafe(Mover), Why, MotionPlays.FindRef(Mover)));
+	FGameSoundRequest& Request = AddRequest(EGameSound::Motion, FString::Printf(TEXT("%s %s (played %d)"), *GetNameSafe(Mover), Why, MotionPlays.FindRef(Mover)));
 	Request.bStop = true;
 	Request.bInWorld = true;
 	Request.Location = Mover ? Mover->GetActorLocation() : FVector::ZeroVector;
@@ -736,9 +747,9 @@ void UGameAudioSubsystem::HandleInterruptionFinished(UAudioComponent* Component)
 {
 	if (bInterruptionHeld && Component && Component == InterruptionSound)
 	{
-		// Shorter than the static: again until it ends.
-		++InterruptionPlays;
-		Component->Play();
+		// The interruption's noise loops: it is never played again. It ending before the static is a sound wave that does
+		// not loop (the slot's file must be imported with Looping ticked).
+		UE_LOG(LogGameAudio, Warning, TEXT("Audio: the interruption's noise ended before the static: its sound wave does not loop."));
 	}
 }
 

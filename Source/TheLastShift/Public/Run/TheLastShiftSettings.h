@@ -864,8 +864,13 @@ enum class EGameSound : uint8
 	Line,
 	/** A terminal accepts what the player does at it (a payment, a free activation, reading a log again). From the terminal. */
 	Terminal,
-	/** A door starts to open or to close; the hatches play it at the hatches' pitch. From the door. */
+	/** A door that opens or closes at once starts to open or to close: its short sound, once. From the door. */
 	Door,
+	/**
+	 * Brief 45: a door or hatch that moves over time (a timed motion): one sound made to loop, from the motion's start to its
+	 * end; the hatches play it at the hatches' pitch. From the mover.
+	 */
+	Motion,
 	/** A residue's hold completes and it is collected. */
 	Energy,
 	/** A text scene goes from a line on the paradise's white to a line on black, once in a scene. */
@@ -889,6 +894,7 @@ inline const TCHAR* LexToString(EGameSound Sound)
 	case EGameSound::Line: return TEXT("Line");
 	case EGameSound::Terminal: return TEXT("Terminal");
 	case EGameSound::Door: return TEXT("Door");
+	case EGameSound::Motion: return TEXT("Motion");
 	case EGameSound::Energy: return TEXT("Energy");
 	case EGameSound::Interruption: return TEXT("Interruption");
 	case EGameSound::ChamberHum: return TEXT("ChamberHum");
@@ -944,12 +950,22 @@ struct THELASTSHIFT_API FGameAudio
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
 	FGameSoundSlot Terminal;
 
+	/** The door's short sound, for the doors that open or close at once (ADoorDevice). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
 	FGameSoundSlot Door;
+
+	/**
+	 * Brief 45: the sound of a timed motion (home's entry door closing, the hangars' hatches, the ship's hatch, a sliding
+	 * panel): a file of its own made to loop (steady, periodic over its length), played once, looping, for as long as the
+	 * motion lasts, faded in over MotionFadeInSeconds and out over MotionFadeOutSeconds; never asked for again while it lasts.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
+	FGameSoundSlot Motion;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
 	FGameSoundSlot Energy;
 
+	/** The interruption's noise at a text scene's cut: a file made to loop (Brief 45), held and faded with the static. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio")
 	FGameSoundSlot Interruption;
 
@@ -967,13 +983,17 @@ struct THELASTSHIFT_API FGameAudio
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (AllowedClasses = "/Script/Engine.SoundBase"))
 	TSoftObjectPtr<USoundBase> MenuMusic;
 
-	/** Pitch factor of the door sound for the hatches (the two hangars' hatches and the ship's hatch). */
+	/** Pitch factor of the door and motion sounds for the hatches (the two hangars' hatches, the ship's hatch, sliding panels). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.1", ClampMax = "2.0"))
 	float HatchPitch = 0.6f;
 
+	/** Brief 45: a timed motion's sound fades in over this when the motion starts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "2.0", Units = "s"))
+	float MotionFadeInSeconds = 0.05f;
+
 	/**
-	 * A door or hatch that moves over time sounds for as long as it moves: its sound (looped while the motion lasts) fades
-	 * out over this when the motion ends.
+	 * A door or hatch that moves over time sounds for as long as it moves: its one looping sound fades out over this when
+	 * the motion ends or reverses.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Audio", meta = (ClampMin = "0.0", ClampMax = "2.0", Units = "s"))
 	float MotionFadeOutSeconds = 0.15f;
@@ -1028,6 +1048,7 @@ struct THELASTSHIFT_API FGameAudio
 	float GetVolume(EGameSound Sound) const;
 
 	float GetHatchPitch() const { return FMath::Clamp(HatchPitch, 0.1f, 2.f); }
+	float GetMotionFadeInSeconds() const { return FMath::Clamp(MotionFadeInSeconds, 0.f, 2.f); }
 	float GetMotionFadeOutSeconds() const { return FMath::Clamp(MotionFadeOutSeconds, 0.f, 2.f); }
 	float GetWorldFalloffCm() const { return FMath::Clamp(WorldFalloffCm, 100.f, 20000.f); }
 	float GetMusicFadeInSeconds() const { return FMath::Clamp(MusicFadeInSeconds, 0.f, 10.f); }

@@ -170,6 +170,7 @@ namespace AudioDebug
 		double MotionEndReal = 0.0;
 		TWeakObjectPtr<APrologueSlidingPanel> Panel;
 		TWeakObjectPtr<UAudioComponent> FirstMotionSound;
+		TWeakObjectPtr<UAudioComponent> SecondMotionSound;
 	};
 	static FRun GRun;
 
@@ -609,10 +610,13 @@ namespace AudioDebug
 		Check(bOk, FString::Printf(TEXT("%s: the terminal sound %d time(s) at %s, pitch 1: %s"), *Label, Want, T ? *T->GetActorLocation().ToCompactString() : TEXT("-"), *Describe(List)));
 	}
 
-	/** Door sounds since the mark: exactly Movers, in order, each at its mover's position and the pitch of its kind. */
-	static void CheckDoorSounds(const FString& Label, const TArray<TPair<const AActor*, bool>>& Movers)
+	/**
+	 * Door (or, Brief 45, motion) sounds since the mark: exactly Movers, in order, each at its mover's position and the
+	 * pitch of its kind. Slot: Door for the doors that move at once, Motion for the timed motions.
+	 */
+	static void CheckDoorSounds(const FString& Label, const TArray<TPair<const AActor*, bool>>& Movers, EGameSound Slot = EGameSound::Door)
 	{
-		const TArray<FGameSoundRequest> List = SinceOf(EGameSound::Door);
+		const TArray<FGameSoundRequest> List = SinceOf(Slot);
 		const float Hatch = UTheLastShiftSettings::Get()->Audio.GetHatchPitch();
 		bool bOk = List.Num() == Movers.Num();
 		FString Want;
@@ -628,25 +632,26 @@ namespace AudioDebug
 					&& R.Source.EndsWith(Movers[I].Value ? TEXT("opens") : TEXT("closes")) && R.Source.StartsWith(M->GetName());
 			}
 		}
-		Check(bOk, FString::Printf(TEXT("%s: the door sound for %s: %s"), *Label, Want.IsEmpty() ? TEXT("nothing") : *Want, *Describe(List)));
+		Check(bOk, FString::Printf(TEXT("%s: the %s sound for %s: %s"), *Label, Slot == EGameSound::Motion ? TEXT("motion's") : TEXT("door"), Want.IsEmpty() ? TEXT("nothing") : *Want,
+			*Describe(List)));
 	}
 
-	/** Door requests (not stops) since the mark whose source names Mover. */
-	static int32 DoorStartsOf(const AActor* Mover)
+	/** Door (or motion) requests (not stops) since the mark whose source names Mover. */
+	static int32 DoorStartsOf(const AActor* Mover, EGameSound Slot = EGameSound::Door)
 	{
 		int32 N = 0;
-		for (const FGameSoundRequest& R : SinceOf(EGameSound::Door))
+		for (const FGameSoundRequest& R : SinceOf(Slot))
 		{
 			N += Mover && R.Source.StartsWith(Mover->GetName() + TEXT(" ")) ? 1 : 0;
 		}
 		return N;
 	}
 
-	/** Door stops since the mark whose source names Mover. */
-	static TArray<FGameSoundRequest> DoorStopsOf(const AActor* Mover)
+	/** Door (or motion) stops since the mark whose source names Mover. */
+	static TArray<FGameSoundRequest> DoorStopsOf(const AActor* Mover, EGameSound Slot = EGameSound::Door)
 	{
 		TArray<FGameSoundRequest> Out;
-		for (const FGameSoundRequest& R : SinceOf(EGameSound::Door, true))
+		for (const FGameSoundRequest& R : SinceOf(Slot, true))
 		{
 			if (R.bStop && Mover && R.Source.StartsWith(Mover->GetName() + TEXT(" ")))
 			{
@@ -659,28 +664,56 @@ namespace AudioDebug
 	/** An instant door: asked for once since the mark, and never held or stopped. */
 	static void CheckInstantDoor(const FString& Label, const AActor* Door, int32 WantStarts)
 	{
-		Check(Door && DoorStartsOf(Door) == WantStarts && DoorStopsOf(Door).Num() == 0 && !Audio()->GetMotionSound(Door),
-			FString::Printf(TEXT("%s: %s moves at once: asked for %d time(s), never held, never stopped (starts %d, stops %d)"), *Label, *GetNameSafe(Door),
-				WantStarts, DoorStartsOf(Door), DoorStopsOf(Door).Num()));
+		Check(Door && DoorStartsOf(Door) == WantStarts && DoorStopsOf(Door).Num() == 0 && !Audio()->GetMotionSound(Door) && DoorStartsOf(Door, EGameSound::Motion) == 0,
+			FString::Printf(TEXT("%s: %s moves at once: the door's short sound asked for %d time(s), never held, never stopped, no motion's sound (starts %d, stops %d, motion %d)"), *Label,
+				*GetNameSafe(Door), WantStarts, DoorStartsOf(Door), DoorStopsOf(Door).Num(), DoorStartsOf(Door, EGameSound::Motion)));
+	}
+
+	/** Brief 45: Component plays a sound wave that loops (one sound for as long as it is held, never asked for again). */
+	static bool IsLooping(const UAudioComponent* Component)
+	{
+		const USoundWave* Wave = Component ? Cast<USoundWave>(Component->Sound) : nullptr;
+		return Wave && Wave->bLooping;
+	}
+
+	static FString DescribeLoop(const UAudioComponent* Component)
+	{
+		const USoundWave* Wave = Component ? Cast<USoundWave>(Component->Sound) : nullptr;
+		return Wave ? FString::Printf(TEXT("%s, %.2f s%s"), *Wave->GetName(), Wave->Duration, Wave->bLooping ? TEXT(", looping") : TEXT(", NOT looping")) : FString(TEXT("no sound"));
 	}
 
 	/**
-	 * A timed motion of Mover (Progress 0 to 1, Ended at its end, about Seconds long): its sound asked for once at the start,
-	 * still playing at half the motion, stopped within the fade after the end (Brief 24 follow-up).
+	 * A timed motion of Mover (Progress 0 to 1, Ended at its end, about Seconds long): Brief 45, the motion's sound (its own
+	 * slot, a file made to loop) asked for once at the start at the pitch of its kind, one looping sound, the same one still
+	 * playing at half the motion with no second request, and stopped within the fade after the end; the door's short sound
+	 * never asked for.
 	 */
 	static void AddTimedMotion(TArray<FStep>& S, const FString& Label, TFunction<AActor*()> Mover, TFunction<float()> Progress, TFunction<bool()> Ended, float Seconds)
 	{
 		S.Add(WaitFor(Label + TEXT(": the motion starts"), [Progress]() { return Progress() > 0.f; }, Seconds + 15.f, [Label, Mover]()
 		{
 			GRun.MotionStartReal = Real();
-			Check(DoorStartsOf(Mover()) == 1 && Audio()->IsMotionSoundPlaying(Mover()),
-				FString::Printf(TEXT("%s: the door sound asked for once at the start, held and playing"), *Label));
+			UAudioComponent* Component = Audio()->GetMotionSound(Mover());
+			GRun.FirstMotionSound = Component;
+			const TArray<FGameSoundRequest> List = SinceOf(EGameSound::Motion);
+			const float Pitch = Mover() && Mover()->IsA<ADoorDevice>() ? 1.f : UTheLastShiftSettings::Get()->Audio.GetHatchPitch();
+			bool bPitch = false;
+			for (const FGameSoundRequest& R : List)
+			{
+				bPitch |= Mover() && R.Source.StartsWith(Mover()->GetName() + TEXT(" ")) && FMath::IsNearlyEqual(R.Pitch, Pitch, 1.e-3f) && R.bHadSound;
+			}
+			Check(DoorStartsOf(Mover(), EGameSound::Motion) == 1 && bPitch && DoorStartsOf(Mover()) == 0 && Audio()->IsMotionSoundPlaying(Mover()) && IsLooping(Component)
+				&& Audio()->GetMotionPlays(Mover()) == 1,
+				FString::Printf(TEXT("%s: the motion's sound asked for once at the start at pitch %.2f, one looping sound, playing (%s; played %d; door sound %d): %s"), *Label, Pitch,
+					*DescribeLoop(Component), Audio()->GetMotionPlays(Mover()), DoorStartsOf(Mover()), *Describe(List)));
 			return 0.f;
 		}));
 		S.Add(WaitFor(Label + TEXT(": half the motion"), [Progress]() { return Progress() >= 0.5f; }, Seconds + 5.f, [Label, Mover]()
 		{
-			Check(Audio()->IsMotionSoundPlaying(Mover()) && DoorStartsOf(Mover()) == 1 && DoorStopsOf(Mover()).Num() == 0,
-				FString::Printf(TEXT("%s: at half the motion (%.2f s) still playing, asked for once, not stopped (played %d time(s) so far)"), *Label,
+			const UAudioComponent* Component = Audio()->GetMotionSound(Mover());
+			Check(Audio()->IsMotionSoundPlaying(Mover()) && Component && Component == GRun.FirstMotionSound.Get() && DoorStartsOf(Mover(), EGameSound::Motion) == 1
+				&& DoorStopsOf(Mover(), EGameSound::Motion).Num() == 0 && Audio()->GetMotionPlays(Mover()) == 1,
+				FString::Printf(TEXT("%s: at half the motion (%.2f s) the same sound still plays, no second request, not stopped (played %d time(s))"), *Label,
 					Real() - GRun.MotionStartReal, Audio()->GetMotionPlays(Mover())));
 			return 0.f;
 		}));
@@ -691,17 +724,18 @@ namespace AudioDebug
 		}));
 		S.Add(Do(Label + TEXT(": after the fade"), [Label, Mover, Seconds]()
 		{
-			const TArray<FGameSoundRequest> Stops = DoorStopsOf(Mover());
+			const TArray<FGameSoundRequest> Stops = DoorStopsOf(Mover(), EGameSound::Motion);
 			const float Fade = UTheLastShiftSettings::Get()->Audio.GetMotionFadeOutSeconds();
 			double Started = -1.0;
-			for (const FGameSoundRequest& R : SinceOf(EGameSound::Door))
+			for (const FGameSoundRequest& R : SinceOf(EGameSound::Motion))
 			{
 				Started = Mover() && R.Source.StartsWith(Mover()->GetName() + TEXT(" ")) ? R.RealSeconds : Started;
 			}
 			const double Held = Stops.Num() > 0 && Started >= 0.0 ? Stops[0].RealSeconds - Started : -1.0;
-			Check(!Audio()->IsMotionSoundPlaying(Mover()) && Stops.Num() == 1 && Stops[0].Source.Contains(TEXT("motion ends")) && DoorStartsOf(Mover()) == 1
-				&& FMath::Abs(Held - Seconds) <= 0.25,
-				FString::Printf(TEXT("%s: held from the motion's start to its end %.2f s (the motion: %.1f s); %.2f s after the end (fade %.2f s) the sound has stopped: %s"),
+			const UAudioComponent* First = GRun.FirstMotionSound.Get();
+			Check(!Audio()->IsMotionSoundPlaying(Mover()) && (!First || !First->IsPlaying()) && Stops.Num() == 1 && Stops[0].Source.Contains(TEXT("motion ends"))
+				&& DoorStartsOf(Mover(), EGameSound::Motion) == 1 && Audio()->GetMotionPlays(Mover()) == 1 && DoorStartsOf(Mover()) == 0 && FMath::Abs(Held - Seconds) <= 0.25,
+				FString::Printf(TEXT("%s: held from the motion's start to its end %.2f s (the motion: %.1f s), played once; %.2f s after the end (fade %.2f s) the sound has stopped: %s"),
 					*Label, Held, Seconds, Real() - GRun.MotionEndReal, Fade, *Describe(Stops)));
 			return 0.f;
 		}));
@@ -1101,7 +1135,7 @@ namespace AudioDebug
 			return 0.f;
 		}));
 
-		// --- Follow-up: a panel that moves over time and reverses before it ends ---
+		// --- Follow-up: a panel that moves over time and reverses before it ends (Brief 45: the motion's own looping sound) ---
 		S.Add(Do(TEXT("motion: a sliding panel starts to open"), []()
 		{
 			FActorSpawnParameters Params;
@@ -1117,37 +1151,41 @@ namespace AudioDebug
 			}
 			P->SetOpenFraction(0.3f);
 			GRun.FirstMotionSound = Audio()->GetMotionSound(P);
-			const TArray<FGameSoundRequest> List = SinceOf(EGameSound::Door);
+			const TArray<FGameSoundRequest> List = SinceOf(EGameSound::Motion);
 			Check(List.Num() == 1 && List[0].Source.EndsWith(TEXT("opens")) && Near(List[0].Location, P->GetActorLocation())
-				&& FMath::IsNearlyEqual(List[0].Pitch, UTheLastShiftSettings::Get()->Audio.GetHatchPitch()) && Audio()->IsMotionSoundPlaying(P),
-				FString::Printf(TEXT("motion: the panel starts to open: the door sound once, at the panel, at the hatches' pitch, held and playing: %s"), *Describe(List)));
+				&& FMath::IsNearlyEqual(List[0].Pitch, UTheLastShiftSettings::Get()->Audio.GetHatchPitch()) && Audio()->IsMotionSoundPlaying(P)
+				&& IsLooping(GRun.FirstMotionSound.Get()) && DoorStartsOf(P) == 0,
+				FString::Printf(TEXT("motion: the panel starts to open: the motion's sound once, at the panel, at the hatches' pitch, one looping sound (%s), no door sound: %s"),
+					*DescribeLoop(GRun.FirstMotionSound.Get()), *Describe(List)));
 			P->SetOpenFraction(0.6f);
-			Check(DoorStartsOf(P) == 1, TEXT("motion: going on opening asks for nothing more"));
+			Check(DoorStartsOf(P, EGameSound::Motion) == 1 && Audio()->GetMotionPlays(P) == 1, TEXT("motion: going on opening asks for nothing more"));
 			return 0.3f;
 		}));
 		S.Add(Do(TEXT("motion: the panel reverses"), []()
 		{
 			APrologueSlidingPanel* P = GRun.Panel.Get();
 			P->SetOpenFraction(0.4f);
-			const UAudioComponent* First = GRun.FirstMotionSound.Get();
-			const TArray<FGameSoundRequest> Stops = DoorStopsOf(P);
-			const TArray<FGameSoundRequest> List = SinceOf(EGameSound::Door);
-			Check((!First || !First->IsPlaying()) && Stops.Num() == 1 && Stops[0].Source.Contains(TEXT("motion reverses")) && List.Num() == 2
-				&& List[1].Source.EndsWith(TEXT("closes")) && Audio()->IsMotionSoundPlaying(P) && Audio()->GetMotionSound(P) != First,
-				FString::Printf(TEXT("motion: a reversal before the end stops the first sound and starts the next: %s"), *Describe(Since())));
-			// The door sound lasts its length divided by the hatches' pitch: wait for it to end once, and a margin.
+			const TArray<FGameSoundRequest> Stops = DoorStopsOf(P, EGameSound::Motion);
+			const TArray<FGameSoundRequest> List = SinceOf(EGameSound::Motion);
+			GRun.SecondMotionSound = Audio()->GetMotionSound(P);
+			Check(Stops.Num() == 1 && Stops[0].Source.Contains(TEXT("motion reverses")) && List.Num() == 2 && List[1].Source.EndsWith(TEXT("closes"))
+				&& Audio()->IsMotionSoundPlaying(P) && GRun.SecondMotionSound.Get() != GRun.FirstMotionSound.Get() && IsLooping(GRun.SecondMotionSound.Get()),
+				FString::Printf(TEXT("motion: a reversal before the end fades the first sound out and starts the next: %s"), *Describe(Since())));
+			// Past the door's short sound's length at the hatches' pitch (where the sound before this brief was played again).
 			const USoundWave* Wave = Cast<USoundWave>(UTheLastShiftSettings::Get()->Audio.GetSound(EGameSound::Door).LoadSynchronous());
 			GRun.MotionStartReal = Real();
-			return (Wave ? Wave->Duration : 1.f) / UTheLastShiftSettings::Get()->Audio.GetHatchPitch() + 0.4f;
+			return FMath::Max((Wave ? Wave->Duration : 1.f) / UTheLastShiftSettings::Get()->Audio.GetHatchPitch() + 0.4f,
+				UTheLastShiftSettings::Get()->Audio.GetMotionFadeOutSeconds() + 0.15f);
 		}));
-		S.Add(Do(TEXT("motion: past the sound's length into the closing"), []()
+		S.Add(Do(TEXT("motion: past the short sound's length into the closing"), []()
 		{
 			APrologueSlidingPanel* P = GRun.Panel.Get();
-			const USoundWave* Wave = Cast<USoundWave>(UTheLastShiftSettings::Get()->Audio.GetSound(EGameSound::Door).LoadSynchronous());
-			Check(Audio()->IsMotionSoundPlaying(P) && Audio()->GetMotionPlays(P) >= 2 && DoorStartsOf(P) == 2,
-				FString::Printf(TEXT("motion: the sound (%.2f s, %.2f s at pitch %.2f) shorter than the motion loops until it ends: played %d time(s) in %.2f s, asked for once"),
-					Wave ? Wave->Duration : -1.f, Wave ? Wave->Duration / UTheLastShiftSettings::Get()->Audio.GetHatchPitch() : -1.f,
-					UTheLastShiftSettings::Get()->Audio.GetHatchPitch(), Audio()->GetMotionPlays(P), Real() - GRun.MotionStartReal));
+			const UAudioComponent* First = GRun.FirstMotionSound.Get();
+			Check(!First || !First->IsPlaying(), FString::Printf(TEXT("motion: the first sound has faded out (fade %.2f s)"), UTheLastShiftSettings::Get()->Audio.GetMotionFadeOutSeconds()));
+			Check(Audio()->IsMotionSoundPlaying(P) && Audio()->GetMotionSound(P) == GRun.SecondMotionSound.Get() && Audio()->GetMotionPlays(P) == 1
+				&& DoorStartsOf(P, EGameSound::Motion) == 2 && DoorStartsOf(P) == 0,
+				FString::Printf(TEXT("motion: %.2f s into the closing the same looping sound plays on, played once, no request since the reversal (%s)"),
+					Real() - GRun.MotionStartReal, *DescribeLoop(GRun.SecondMotionSound.Get())));
 			P->SetOpenFraction(0.f);
 			GRun.MotionEndReal = Real();
 			return UTheLastShiftSettings::Get()->Audio.GetMotionFadeOutSeconds() + 0.15f;
@@ -1155,7 +1193,7 @@ namespace AudioDebug
 		S.Add(Do(TEXT("motion: the panel has closed"), []()
 		{
 			APrologueSlidingPanel* P = GRun.Panel.Get();
-			const TArray<FGameSoundRequest> Stops = DoorStopsOf(P);
+			const TArray<FGameSoundRequest> Stops = DoorStopsOf(P, EGameSound::Motion);
 			Check(!Audio()->IsMotionSoundPlaying(P) && Stops.Num() == 2 && Stops[1].Source.Contains(TEXT("motion ends")),
 				FString::Printf(TEXT("motion: %.2f s after the end (fade %.2f s) the sound has stopped: %s"), Real() - GRun.MotionEndReal,
 					UTheLastShiftSettings::Get()->Audio.GetMotionFadeOutSeconds(), *Describe(Stops)));
@@ -1394,6 +1432,8 @@ namespace AudioDebug
 		float SavedHold = 0.f;
 		float SavedFade = 0.f;
 		bool bSaved = false;
+		/** Brief 45: the noise's one component, from the cut. */
+		TWeakObjectPtr<UAudioComponent> Sound;
 	};
 	static FStaticSound GStatic;
 
@@ -1459,6 +1499,11 @@ namespace AudioDebug
 			Check(Cuts.Num() == 1 && Audio()->IsInterruptionHeld() && Audio()->IsInterruptionPlaying(),
 				FString::Printf(TEXT("%s: the interruption's noise starts with the static (StaticSeconds %.2f, StaticFadeSeconds %.2f): held %d, playing %d, %s"), *Label, GStatic.Hold,
 					GStatic.Fade, Audio()->IsInterruptionHeld() ? 1 : 0, Audio()->IsInterruptionPlaying() ? 1 : 0, *Describe(Cuts)));
+			// Brief 45: one sound, looping, at once at its volume (the cut is sudden: no fade in).
+			GStatic.Sound = Audio()->GetInterruptionComponent();
+			Check(IsLooping(GStatic.Sound.Get()) && Audio()->GetInterruptionPlays() == 1 && Audio()->GetInterruptionShare() >= 0.99f,
+				FString::Printf(TEXT("%s: the noise is one looping sound, played once, at its full volume from the cut (%s; share %.2f)"), *Label, *DescribeLoop(GStatic.Sound.Get()),
+					Audio()->GetInterruptionShare()));
 			return bSkip ? 0.5f : FMath::Max(GStatic.Hold - 0.25f, 0.05f);
 		}));
 		if (bSkip)
@@ -1487,7 +1532,8 @@ namespace AudioDebug
 			S.Add(Do(Label + TEXT(": at the end of the hold"), [Label]()
 			{
 				const double At = FPlatformTime::Seconds() - GStatic.StartReal;
-				Check(Audio()->IsInterruptionHeld() && Audio()->IsInterruptionPlaying() && Audio()->GetInterruptionShare() >= 0.99f,
+				Check(Audio()->IsInterruptionHeld() && Audio()->IsInterruptionPlaying() && Audio()->GetInterruptionShare() >= 0.99f
+					&& Audio()->GetInterruptionComponent() == GStatic.Sound.Get() && Audio()->GetInterruptionPlays() == 1,
 					FString::Printf(TEXT("%s: %.2f s in (StaticSeconds %.2f) the noise still plays at full strength (share %.2f, played %d times)"), *Label, At, GStatic.Hold,
 						Audio()->GetInterruptionShare(), Audio()->GetInterruptionPlays()));
 				return 0.25f + 0.5f * GStatic.Fade;
@@ -1509,8 +1555,8 @@ namespace AudioDebug
 				Check(!Audio()->IsInterruptionHeld() && !Audio()->IsInterruptionPlaying() && Stops.Num() == 2 && Stops[1].bStop && SinceOf(EGameSound::Interruption).Num() == 1,
 					FString::Printf(TEXT("%s: %.2f s in, past StaticSeconds + StaticFadeSeconds (%.2f) by 0.3 s, the noise has stopped; asked for once: %s"), *Label, At, GStatic.Hold + GStatic.Fade,
 						*Describe(Stops)));
-				Check(Length <= 0.f || Length >= GStatic.Hold + GStatic.Fade || Audio()->GetInterruptionPlays() >= 2,
-					FString::Printf(TEXT("%s: the sound (%.2f s) shorter than the static (%.2f s) loops: played %d times"), *Label, Length, GStatic.Hold + GStatic.Fade,
+				Check(Length <= 0.f || (Length >= GStatic.Hold + GStatic.Fade && Audio()->GetInterruptionPlays() == 1),
+					FString::Printf(TEXT("%s: one sound (%.2f s, the static %.2f s) for the whole static, never played again: played %d time(s)"), *Label, Length, GStatic.Hold + GStatic.Fade,
 						Audio()->GetInterruptionPlays()));
 				return 0.f;
 			}));
@@ -1709,7 +1755,7 @@ namespace AudioDebug
 			TArray<APrologueSlidingPanel*> Panels = All<APrologueSlidingPanel>();
 			// The hangar's hatch opens first, then the ship's: the panels in the order of their sounds.
 			TArray<TPair<const AActor*, bool>> Want = { { First<APrologueEntryDoor>(), false } };
-			TArray<FGameSoundRequest> Doors = SinceOf(EGameSound::Door);
+			TArray<FGameSoundRequest> Doors = SinceOf(EGameSound::Motion);
 			for (int32 I = 1; I < Doors.Num(); ++I)
 			{
 				for (APrologueSlidingPanel* P : Panels)
@@ -1721,7 +1767,8 @@ namespace AudioDebug
 				}
 			}
 			Check(Panels.Num() == 2 && Want.Num() == 3, FString::Printf(TEXT("home: the two hatches (%d sliding panels) both sounded"), Panels.Num()));
-			CheckDoorSounds(TEXT("home: the entry door starts to close behind the player, then the hangar's hatch and the ship's hatch open"), Want);
+			CheckDoorSounds(TEXT("home: the entry door starts to close behind the player, then the hangar's hatch and the ship's hatch open"), Want, EGameSound::Motion);
+			CheckDoorSounds(TEXT("home: no door's short sound for the timed motions"), {});
 			Teleport(D->ShipExit->GetActorLocation());
 			MarkRecord();
 			return 0.f;
@@ -1749,7 +1796,8 @@ namespace AudioDebug
 		S.Add(WaitFor(TEXT("arrival: the exit door opens"), []() { const APrologueHatch* H = First<APrologueHatch>(); return H && H->GetHatchState() == EPrologueHatchState::DoorOpened; }, 40.f, []()
 		{
 			const APrologueHatch* H = First<APrologueHatch>();
-			CheckDoorSounds(TEXT("arrival: the hatch starts to close, then the exit door starts to open"), { { H, false }, { H->ExitDoor.Get(), true } });
+			CheckDoorSounds(TEXT("arrival: the hatch starts to close (the motion's sound)"), { { H, false } }, EGameSound::Motion);
+			CheckDoorSounds(TEXT("arrival: the exit door starts to open (the door's short sound)"), { { H->ExitDoor.Get(), true } });
 			CheckInstantDoor(TEXT("arrival: the exit door"), H->ExitDoor.Get(), 1);
 			MarkRecord();
 			Check(Run()->TravelToNextArea(), TEXT("arrival: the travel to area 1 starts"));

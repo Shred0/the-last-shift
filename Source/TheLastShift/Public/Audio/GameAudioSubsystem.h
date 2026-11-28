@@ -74,13 +74,15 @@ struct THELASTSHIFT_API FGameSoundRequest
  *   stopped time, exactly one sound: Slip when it jumps (Jumped, RewoundAndJumped, or Resumed with the entity's graze:
  *   AEntity::RecordStopExit then WasLastExitGraze, as UHomeStateSubsystem does), TimeResume otherwise (a Resume, a
  *   rewind without a jump; in a map with no entity a Resume is TimeResume). The time state: every Stop (TimeStop).
- * - Doors, hatches and terminals, from where they stand, fading over WorldFalloffCm: ADoorDevice::OnMotionStarted (Door,
- *   pitch 1), APrologueSlidingPanel and APrologueHatch (Door at HatchPitch), APowerTerminal::OnAnyActivated and
- *   ALogTerminal::OnRead (Terminal).
+ * - Doors, hatches and terminals, from where they stand, fading over WorldFalloffCm: ADoorDevice::OnMotionStarted at once
+ *   (Door, pitch 1), a timed motion (Brief 45: Motion, pitch 1 for an ADoorDevice, HatchPitch for APrologueSlidingPanel and
+ *   APrologueHatch: one looping sound asked for once at the motion's start, faded in over MotionFadeInSeconds, never asked
+ *   for again while the motion lasts, faded out over MotionFadeOutSeconds at OnMotionEnded or when the motion reverses),
+ *   APowerTerminal::OnAnyActivated and ALogTerminal::OnRead (Terminal).
  * - The suit's: AResidue::OnCollected (Energy), UTextChannelComponent::OnTypingStarted (Line), the text scenes' lines
  *   (Line) and their first change from the paradise's white to black (Interruption, once in a scene). Brief 35: the
- *   interruption's noise lasts as long as the static at that cut: it starts with it, is held (played again while it lasts
- *   when shorter) for the static's StaticSeconds and fades out with the static's own fade over StaticFadeSeconds (its volume
+ *   interruption's noise lasts as long as the static at that cut: it starts with it at its volume, is held (Brief 45: one
+ *   sound made to loop, played once and never again) for the static's StaticSeconds and fades out with the static's own fade over StaticFadeSeconds (its volume
  *   follows the static's strength, read from the text scene screen: UStdTextSceneWidget::GetEffectOpacity), and stops
  *   with it whenever the static ends early (the next line, the scene skipped or closed).
  * - The main menu's music (MenuMusic, through StdCore's music subsystem): on while the main menu map shows its menu, off
@@ -145,7 +147,7 @@ public:
 	/** Mover's timed motion sound is playing now. */
 	bool IsMotionSoundPlaying(const AActor* Mover) const;
 
-	/** Times the sound of Mover's current or last timed motion was played (1 + its loops). */
+	/** Times the sound of Mover's current or last timed motion was asked to play: 1 (Brief 45: it loops, never played again). */
 	int32 GetMotionPlays(const AActor* Mover) const { return MotionPlays.FindRef(Mover); }
 
 	/** Brief 35: the interruption's noise is held now (from the static's start to the end of its fade, or until it ends early). */
@@ -154,8 +156,11 @@ public:
 	/** Brief 35: the interruption's noise is playing now. */
 	bool IsInterruptionPlaying() const;
 
-	/** Brief 35: times the current or last interruption's noise was played (1 + its loops). */
+	/** Brief 35: times the current or last interruption's noise was asked to play: 1 (Brief 45: it loops, never played again). */
 	int32 GetInterruptionPlays() const { return InterruptionPlays; }
+
+	/** Brief 45: the interruption's noise's one component while it is held (null otherwise or with an empty slot). */
+	UAudioComponent* GetInterruptionComponent() const { return InterruptionSound; }
 
 	/** Brief 35: the share of its slot's volume the interruption's noise plays at now (the static's strength). */
 	float GetInterruptionShare() const { return InterruptionShare; }
@@ -205,7 +210,7 @@ private:
 	UFUNCTION()
 	void HandleMotionEnded(AActor* Mover);
 
-	/** A held motion sound finished: played again while its motion lasts. */
+	/** A motion sound finished (faded out; or, while held, a sound wave that does not loop: warned, never played again). */
 	void HandleMotionSoundFinished(UAudioComponent* Component);
 
 	/** Stops Mover's held sound: faded over FadeSeconds (0: at once), recorded as a stop with Why. */
@@ -241,7 +246,7 @@ private:
 	/** Brief 35: follows the static every frame: its strength sets the noise's volume; its end, or the line's, stops it. */
 	bool TickInterruption(float DeltaSeconds);
 
-	/** Brief 35: a held interruption's noise finished before the static: played again while the static lasts. */
+	/** Brief 35: a held interruption's noise finished before the static (a sound wave that does not loop): warned, never played again. */
 	void HandleInterruptionFinished(UAudioComponent* Component);
 
 	/** Brief 35: stops the interruption's noise (recorded as a stop with Why). */
